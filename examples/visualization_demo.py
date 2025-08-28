@@ -8,6 +8,7 @@ import numpy as np
 import sys
 import os
 from pathlib import Path
+import time
 
 # Add the parent directory to path for importing swarmsort
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -39,8 +40,8 @@ def create_random_walk_simulation(num_objects: int = 10,
     sim_config = SimulationConfig(
         world_width=world_width,
         world_height=world_height,
-        detection_probability=0.95,
-        false_positive_rate=0.02,
+        detection_probability=1,
+        false_positive_rate=0,
         position_noise_std=2.0,
         use_embeddings=True,
         random_seed=42  # For reproducible results
@@ -60,7 +61,7 @@ def create_random_walk_simulation(num_objects: int = 10,
         step_size = np.random.uniform(0.01, 0.03)
         
         # Random confidence and class
-        base_confidence = np.random.uniform(0.7, 0.95)
+        base_confidence = 1 #np.random.uniform(0.7, 0.95)
         class_id = i % 5  # 5 different classes
         
         obj = sim.create_random_walk_object(
@@ -76,110 +77,82 @@ def create_random_walk_simulation(num_objects: int = 10,
     return sim
 
 
-def run_visualization_demo(num_objects: int = 150, num_frames: int = 300):
-    """Run the main visualization demo."""
+def run_visualization_demo(num_objects: int = 50, realtime: bool = True):
+    """Run visualization demo, optionally in realtime with OpenCV imshow."""
     print("SwarmSort Random Walk Visualization Demo")
     print("=" * 50)
-    print(f"Configuration: {num_objects} objects, {num_frames} frames")
-    
-    if not MATPLOTLIB_AVAILABLE and not OPENCV_AVAILABLE:
-        print("Warning: Neither matplotlib nor opencv-python is available.")
-        print("Install one or both for full visualization capabilities.")
-        print("pip install matplotlib opencv-python")
+    print(f"Configuration: {num_objects} objects")
+
+    if not OPENCV_AVAILABLE:
+        print("OpenCV not available, install with `pip install opencv-python`.")
         return
-    
-    # Create results directory
-    results_dir = Path(__file__).parent / "results"
-    results_dir.mkdir(exist_ok=True)
-    print(f"Output directory: {results_dir}")
-    
+
     # Create simulation
     print("Creating random walk simulation...")
     sim = create_random_walk_simulation(num_objects)
-    
+
     # Create tracker with embeddings
     config = SwarmSortConfig(
         max_distance=100,
         use_embeddings=True,
         embedding_weight=1,
-        min_consecutive_detections=3
+        min_consecutive_detections=3,
+        debug_timings=True,
     )
     tracker = SwarmSortTracker(config)
-    
-    # Run simulation
-    detection_sequences = []
-    track_sequences = []
-    
-    print(f"Running simulation for {num_frames} frames...")
-    for frame in range(num_frames):
-        detections = sim.step()
-        tracks = tracker.update(detections)
-        
-        detection_sequences.append(detections)
-        track_sequences.append(tracks)
-        
-        if frame % 50 == 0:
-            print(f"Frame {frame}: {len(detections)} detections, {len(tracks)} tracks")
-    
-    print(f"Final frame: {len(detection_sequences[-1])} detections, {len(track_sequences[-1])} tracks")
-    
-    # Run performance benchmark
-    print("\nBenchmarking performance...")
-    benchmark_result = quick_benchmark(detection_sequences, config, verbose=True)
-    
-    # Create visualization
+
+    # Visualization config
     vis_config = VisualizationConfig(
-        frame_width=1920,
+        frame_width=1080,
         frame_height=1080,
         show_trails=True,
-        trail_length=10,
+        trail_length=15,
         show_confidences=True,
         show_ids=True,
         show_velocities=False
     )
     visualizer = TrackingVisualizer(vis_config)
-    
-    # Show final frame
-    print("\nSkipping interactive final frame visualization (would block execution)")
-    # if detection_sequences and track_sequences:
-    #     quick_visualize(detection_sequences[-1], track_sequences[-1], 
-    #                    frame_num=len(detection_sequences)-1)
-    
-    # Create video if OpenCV is available
-    if OPENCV_AVAILABLE:
-        print("Creating tracking video...")
-        try:
-            output_filename = results_dir / f"random_walk_demo_{num_objects}objects_{num_frames}frames.mp4"
-            visualizer.create_video_sequence(
-                detection_sequences, track_sequences,
-                output_path=str(output_filename), fps=30
-            )
-            print(f"Video saved as {output_filename}")
-        except Exception as e:
-            print(f"Video creation failed: {e}")
-    
-    # Create matplotlib animation if available
-    if MATPLOTLIB_AVAILABLE:
-        print("Creating matplotlib animation...")
-        try:
-            gif_filename = results_dir / f"random_walk_demo_{num_objects}objects.gif"
-            anim = visualizer.show_sequence_matplotlib(
-                detection_sequences[::5], track_sequences[::5],  # Every 5th frame for smaller file
-                interval=100, save_path=str(gif_filename)
-            )
-            print(f"Animation saved as {gif_filename}")
-        except Exception as e:
-            print(f"Animation creation failed: {e}")
-    
-    # Show tracking statistics
-    stats = tracker.get_statistics()
-    print(f"\nFinal Tracking Statistics:")
-    print(f"Total frames processed: {stats.get('frame_count', 0)}")
-    print(f"Active tracks: {stats.get('active_tracks', 0)}")
-    print(f"Total detections processed: {sum(len(dets) for dets in detection_sequences)}")
-    
-    return detection_sequences, track_sequences
 
+    print("Starting endless simulation. Press 'q' to quit.")
+
+    frame = 0
+    prev_time = time.time()
+    fps = 0.0
+
+    while True:
+
+
+        # Step simulation
+        detections = sim.step()
+
+        start_time = time.time()
+        tracks = tracker.update(detections)
+        # Calculate FPS (tracking loop)
+        end_time = time.time()
+        fps = 1.0 / (end_time - start_time + 1e-8)
+
+        # Render frame
+        frame_img = visualizer.draw_frame_opencv(detections, tracks, frame_num=frame)
+
+        # Print tracker timing in terminal
+        print(f"[Frame {frame}] Tracker time: {(end_time - start_time)*1000:.0f} ms")
+        
+        # Overlay FPS on frame
+        cv2.putText(frame_img, f"FPS: {fps:.1f}", (10, 60),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 0), 2)
+
+        # Show in OpenCV
+        cv2.imshow("SwarmSort Realtime Simulation", frame_img)
+
+        # Press q to quit
+        key = cv2.waitKey(1) & 0xFF
+        if key == ord('q'):
+            break
+
+        frame += 1
+
+    cv2.destroyAllWindows()
+    print("Simulation stopped by user.")
 
 def main():
     """Main demo function with configurable parameters."""
@@ -187,7 +160,7 @@ def main():
     print("=" * 50)
     
     # Default parameters
-    default_objects = 10
+    default_objects = 150
     default_frames = 300
     
     # Check for command line arguments

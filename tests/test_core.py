@@ -18,7 +18,7 @@ from swarmsort.core import (
     compute_embedding_distances_multi_history,
     compute_cost_matrix_vectorized,
     PendingDetection,
-    TrackState
+    FastTrackState
 )
 
 
@@ -156,7 +156,7 @@ class TestTrackState:
     
     def test_track_state_creation(self):
         """Test TrackState creation and initialization."""
-        track = TrackState(
+        track = FastTrackState(
             id=1,
             position=np.array([50.0, 100.0]),
             velocity=np.array([2.0, -1.0])
@@ -177,9 +177,9 @@ class TestTrackState:
         assert track.time_since_update == 0
     
     def test_track_state_with_bbox(self):
-        """Test TrackState with bounding box."""
+        """Test FastTrackState with bounding box."""
         bbox = np.array([45.0, 95.0, 55.0, 105.0], dtype=np.float32)
-        track = TrackState(
+        track = FastTrackState(
             id=2,
             position=np.array([50.0, 100.0], dtype=np.float32),
             bbox=bbox
@@ -189,8 +189,8 @@ class TestTrackState:
         assert np.array_equal(track.bbox, bbox)
     
     def test_track_embeddings(self):
-        """Test embedding storage in TrackState."""
-        track = TrackState(id=1, position=np.array([0.0, 0.0]))
+        """Test embedding storage in FastTrackState."""
+        track = FastTrackState(id=1, position=np.array([0.0, 0.0]))
         
         # Initially empty
         assert len(track.embeddings) == 0
@@ -282,7 +282,7 @@ class TestSwarmSortTrackerCore:
         tracker = SwarmSortTracker(default_config)
         
         # Create a track manually
-        track = TrackState(
+        track = FastTrackState(
             id=1,
             position=np.array([10.0, 20.0]),
             velocity=np.array([2.0, 1.0])
@@ -308,7 +308,7 @@ class TestSwarmSortTrackerCore:
         # Add some state
         tracker.frame_count = 10
         tracker.next_id = 5
-        tracker.tracks[1] = TrackState(id=1, position=np.array([0.0, 0.0]))
+        tracker.tracks[1] = FastTrackState(id=1, position=np.array([0.0, 0.0]))
         tracker.timing_stats['test'] = 0.1
         
         # Reset
@@ -327,9 +327,9 @@ class TestSwarmSortTrackerCore:
         tracker = SwarmSortTracker(default_config)
         
         # Add some tracks
-        tracker.tracks[1] = TrackState(id=1, position=np.array([0.0, 0.0]))
-        tracker.tracks[2] = TrackState(id=2, position=np.array([10.0, 10.0]))
-        tracker.lost_tracks[3] = TrackState(id=3, position=np.array([20.0, 20.0]))
+        tracker.tracks[1] = FastTrackState(id=1, position=np.array([0.0, 0.0]))
+        tracker.tracks[2] = FastTrackState(id=2, position=np.array([10.0, 10.0]))
+        tracker.lost_tracks[3] = FastTrackState(id=3, position=np.array([20.0, 20.0]))
         tracker.pending_detections.append(PendingDetection(position=np.array([30.0, 30.0])))
         tracker.frame_count = 15
         tracker.next_id = 4

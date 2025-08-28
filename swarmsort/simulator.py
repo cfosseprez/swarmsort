@@ -75,7 +75,7 @@ class SimulationConfig:
     embedding_noise_std: float = 0.1
     
     # Occlusion simulation
-    occlusion_probability: float = 0.1
+    occlusion_probability: float = 0.01
     occlusion_duration_range: Tuple[int, int] = (5, 20)
     
     # Random seed
