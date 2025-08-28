@@ -1,0 +1,13 @@
+cff-version: 1.0.0
+message: If you use Swarmsort, please cite it using the following metadata.
+title: 'SwarmTracker: Scalable Real-Time Tracking and Compression of Dense Biological Swarms'
+authors:
+- family-names: Fosseprez
+  given-names: Charles
+  orcid: https://orcid.org/0009-0000-4524-0399
+version: 1.0.0
+date-released: '2025-08-28'
+repository-code: https://github.com/cfosseprez/swarmsort
+url: https://github.com/cfosseprez/swarmsort
+license: GPL 2.0 or later
+type: software
