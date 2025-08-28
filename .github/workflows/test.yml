@@ -4,12 +4,18 @@ on:
   push:
     branches: [ main, develop ]
     paths:
-      - 'src/swarmtracker/tracking/trackerzoo/swarmsort_standalone/**'
+      - 'swarmsort/**'
+      - 'tests/**'
+      - 'examples/**'
+      - 'pyproject.toml'
       - '.github/workflows/test.yml'
   pull_request:
     branches: [ main, develop ]
     paths:
-      - 'src/swarmtracker/tracking/trackerzoo/swarmsort_standalone/**'
+      - 'swarmsort/**'
+      - 'tests/**'
+      - 'examples/**'
+      - 'pyproject.toml'
       - '.github/workflows/test.yml'
   workflow_dispatch:  # Allow manual triggering
 
@@ -44,19 +50,15 @@ jobs:
     
     - name: Install dependencies
       if: steps.cached-poetry-dependencies.outputs.cache-hit != 'true'
-      working-directory: src/swarmtracker/tracking/trackerzoo/swarmsort_standalone
       run: poetry install --with dev
     
     - name: Run Black
-      working-directory: src/swarmtracker/tracking/trackerzoo/swarmsort_standalone
       run: poetry run black --check swarmsort/ tests/ examples/
     
     - name: Run Flake8
-      working-directory: src/swarmtracker/tracking/trackerzoo/swarmsort_standalone
       run: poetry run flake8 swarmsort/ tests/ examples/
     
     - name: Run MyPy
-      working-directory: src/swarmtracker/tracking/trackerzoo/swarmsort_standalone
       run: poetry run mypy swarmsort/ --ignore-missing-imports
 
   # Unit and integration tests
@@ -98,34 +100,28 @@ jobs:
     
     - name: Install dependencies
       if: steps.cached-poetry-dependencies.outputs.cache-hit != 'true'
-      working-directory: src/swarmtracker/tracking/trackerzoo/swarmsort_standalone
       run: poetry install --with dev
     
     - name: Install SwarmSort in development mode
-      working-directory: src/swarmtracker/tracking/trackerzoo/swarmsort_standalone
       run: poetry run pip install -e .
     
-    - name: Run unit tests
-      working-directory: src/swarmtracker/tracking/trackerzoo/swarmsort_standalone
+    - name: Run basic tests
       run: |
-        poetry run pytest tests/test_basic.py tests/test_core.py \
-          -v --tb=short --strict-markers \
-          --cov=swarmsort --cov-report=xml --cov-report=html \
-          -m "unit or not slow"
+        poetry run pytest tests/test_basic.py tests/test_core.py tests/test_embeddings.py \
+          -v --tb=short \
+          --cov=swarmsort --cov-report=xml --cov-report=html
     
     - name: Run integration tests
-      working-directory: src/swarmtracker/tracking/trackerzoo/swarmsort_standalone
       run: |
         poetry run pytest tests/test_integration.py \
-          -v --tb=short --strict-markers \
-          --cov=swarmsort --cov-append --cov-report=xml \
-          -m "integration and not slow"
+          -v --tb=short \
+          --cov=swarmsort --cov-append --cov-report=xml
     
     - name: Upload coverage to Codecov
       if: matrix.python-version == '3.11' && matrix.os == 'ubuntu-latest'
       uses: codecov/codecov-action@v3
       with:
-        file: src/swarmtracker/tracking/trackerzoo/swarmsort_standalone/coverage.xml
+        file: coverage.xml
         flags: unittests
         name: codecov-umbrella
         fail_ci_if_error: true
@@ -152,15 +148,12 @@ jobs:
         virtualenvs-in-project: true
     
     - name: Install dependencies
-      working-directory: src/swarmtracker/tracking/trackerzoo/swarmsort_standalone
       run: poetry install --with dev
     
     - name: Run performance tests
-      working-directory: src/swarmtracker/tracking/trackerzoo/swarmsort_standalone
       run: |
-        poetry run pytest tests/ \
-          -v --tb=short --strict-markers \
-          -m "performance" \
+        poetry run pytest tests/test_performance.py \
+          -v --tb=short \
           --benchmark-only --benchmark-sort=mean \
           --benchmark-json=benchmark_results.json
     
@@ -169,7 +162,7 @@ jobs:
       if: github.event_name != 'pull_request'
       with:
         tool: 'pytest'
-        output-file-path: src/swarmtracker/tracking/trackerzoo/swarmsort_standalone/benchmark_results.json
+        output-file-path: benchmark_results.json
         github-token: ${{ secrets.GITHUB_TOKEN }}
         auto-push: true
 
@@ -195,33 +188,19 @@ jobs:
         virtualenvs-in-project: true
     
     - name: Install dependencies
-      working-directory: src/swarmtracker/tracking/trackerzoo/swarmsort_standalone
       run: poetry install --with dev
     
     - name: Run embedding tests
-      working-directory: src/swarmtracker/tracking/trackerzoo/swarmsort_standalone
       run: |
-        poetry run pytest tests/ \
-          -v --tb=short --strict-markers \
-          -m "embedding" \
+        poetry run pytest tests/test_embedding_specific.py \
+          -v --tb=short \
           --cov=swarmsort --cov-report=xml
     
     - name: Run stress tests
-      working-directory: src/swarmtracker/tracking/trackerzoo/swarmsort_standalone
       run: |
-        poetry run pytest tests/ \
-          -v --tb=short --strict-markers \
-          -m "stress" \
+        poetry run pytest tests/test_stress_edge_cases.py \
+          -v --tb=short \
           --cov=swarmsort --cov-append --cov-report=xml
-    
-    - name: Run slow tests
-      working-directory: src/swarmtracker/tracking/trackerzoo/swarmsort_standalone
-      run: |
-        poetry run pytest tests/ \
-          -v --tb=short --strict-markers \
-          -m "slow" \
-          --cov=swarmsort --cov-append --cov-report=xml \
-          --timeout=300  # 5 minute timeout for slow tests
 
   # Documentation and example tests
   docs:
@@ -243,18 +222,15 @@ jobs:
         virtualenvs-create: true
         virtualenvs-in-project: true
     
-    - name: Install dependencies with plotting
-      working-directory: src/swarmtracker/tracking/trackerzoo/swarmsort_standalone
-      run: poetry install --with dev --extras plotting
+    - name: Install dependencies
+      run: poetry install --with dev
     
     - name: Test examples
-      working-directory: src/swarmtracker/tracking/trackerzoo/swarmsort_standalone
       run: |
         # Test that examples run without error
-        poetry run python examples/basic_usage.py --no-plot
+        poetry run python examples/basic_usage.py
     
     - name: Check documentation completeness
-      working-directory: src/swarmtracker/tracking/trackerzoo/swarmsort_standalone
       run: |
         # Basic documentation completeness check
         poetry run python -c "
@@ -295,18 +271,15 @@ jobs:
         virtualenvs-in-project: true
     
     - name: Install dependencies
-      working-directory: src/swarmtracker/tracking/trackerzoo/swarmsort_standalone
       run: poetry install --with dev
     
     - name: Run safety check
-      working-directory: src/swarmtracker/tracking/trackerzoo/swarmsort_standalone
       run: |
         poetry run pip install safety
         poetry export --format=requirements.txt --output=requirements.txt --with dev
         poetry run safety check --file=requirements.txt
     
     - name: Run bandit security lint
-      working-directory: src/swarmtracker/tracking/trackerzoo/swarmsort_standalone
       run: |
         poetry run pip install bandit
         poetry run bandit -r swarmsort/ -f json -o bandit-report.json
@@ -316,7 +289,7 @@ jobs:
       uses: actions/upload-artifact@v3
       with:
         name: security-results
-        path: src/swarmtracker/tracking/trackerzoo/swarmsort_standalone/bandit-report.json
+        path: bandit-report.json
 
   # Installation tests
   install:
@@ -335,7 +308,6 @@ jobs:
         python-version: ${{ matrix.python-version }}
     
     - name: Test pip installation
-      working-directory: src/swarmtracker/tracking/trackerzoo/swarmsort_standalone
       run: |
         pip install .
         python -c "import swarmsort; print('Import successful')"
@@ -344,14 +316,13 @@ jobs:
         import numpy as np
         
         tracker = SwarmSort()
-        det = Detection(position=[10.0, 20.0], confidence=0.9)
+        det = Detection(position=np.array([10.0, 20.0]), confidence=0.9)
         result = tracker.update([det])
         print(f'Basic functionality test: {len(result)} tracks')
         "
     
     - name: Test Poetry installation
       if: matrix.os != 'windows-latest'  # Poetry issues on Windows CI
-      working-directory: src/swarmtracker/tracking/trackerzoo/swarmsort_standalone
       run: |
         pip install poetry
         poetry install
@@ -379,23 +350,22 @@ jobs:
         virtualenvs-in-project: true
     
     - name: Build package
-      working-directory: src/swarmtracker/tracking/trackerzoo/swarmsort_standalone
       run: poetry build
     
     - name: Upload build artifacts
       uses: actions/upload-artifact@v3
       with:
         name: dist
-        path: src/swarmtracker/tracking/trackerzoo/swarmsort_standalone/dist/
+        path: dist/
     
     - name: Test built package
-      working-directory: src/swarmtracker/tracking/trackerzoo/swarmsort_standalone
       run: |
         pip install dist/*.whl
         python -c "
         from swarmsort import SwarmSort, Detection
+        import numpy as np
         tracker = SwarmSort()
-        det = Detection(position=[10.0, 20.0], confidence=0.9)
+        det = Detection(position=np.array([10.0, 20.0]), confidence=0.9)
         result = tracker.update([det])
         print('Built package test successful')
         "
