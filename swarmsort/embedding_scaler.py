@@ -12,10 +12,9 @@ from loguru import logger
 class EmbeddingDistanceScaler:
     """Enhanced embedding scaler with multiple scaling methods for comparison"""
 
-    def __init__(self,
-                 method: str = 'robust_minmax',
-                 update_rate: float = 0.05,
-                 min_samples: int = 200):
+    def __init__(
+        self, method: str = "robust_minmax", update_rate: float = 0.05, min_samples: int = 200
+    ):
         self.method = method
         self.update_rate = update_rate
         self.min_samples = min_samples
@@ -102,27 +101,27 @@ class EmbeddingDistanceScaler:
         distances = np.array(distances, dtype=np.float64)
 
         try:
-            if self.method == 'robust_minmax':
+            if self.method == "robust_minmax":
                 return self._robust_minmax(distances)
-            elif self.method == 'min_robustmax':
+            elif self.method == "min_robustmax":
                 return self._min_robustmax(distances)
-            elif self.method == 'zscore':
+            elif self.method == "zscore":
                 return self._zscore_scaling(distances)
-            elif self.method == 'robust_zscore':
+            elif self.method == "robust_zscore":
                 return self._robust_zscore_scaling(distances)
-            elif self.method == 'arcsinh':
+            elif self.method == "arcsinh":
                 return self._arcsinh_scaling(distances)
-            elif self.method == 'arcsinh_percentile':
+            elif self.method == "arcsinh_percentile":
                 return self._arcsinh_percentile_scaling(distances)
-            elif self.method == 'beta':
+            elif self.method == "beta":
                 return self._beta_scaling(distances)
-            elif self.method == 'double_transform':
+            elif self.method == "double_transform":
                 return self._double_transformation_scaling(distances)
-            elif self.method == 'sqrt':
+            elif self.method == "sqrt":
                 return self._sqrt_scaling(distances)
-            elif self.method == 'quantile':
+            elif self.method == "quantile":
                 return self._quantile_scaling(distances)
-            elif self.method == 'sigmoid':
+            elif self.method == "sigmoid":
                 return self._sigmoid_scaling(distances)
             else:
                 # Fallback to robust_minmax
@@ -245,6 +244,7 @@ class EmbeddingDistanceScaler:
 
             alpha, beta = 0.8, 0.8  # Slight U-shape for better discrimination
             from scipy.stats import beta as beta_dist
+
             scaled = beta_dist.cdf(normalized, alpha, beta)
             return scaled
         else:
@@ -304,27 +304,33 @@ class EmbeddingDistanceScaler:
     def get_statistics(self) -> dict:
         """Get current scaler statistics"""
         return {
-            'method': self.method,
-            'sample_count': self.sample_count,
-            'min_distance': self.min_distance,
-            'max_distance': self.max_distance,
-            'mean_distance': self.mean_distance,
-            'std_distance': self.std_distance,
-            'median': self.median,
-            'p1': self.p1, 'p5': self.p5, 'p10': self.p10,
-            'p90': self.p90, 'p95': self.p95, 'p99': self.p99,
-            'q25': self.q25, 'q75': self.q75, 'iqr': self.iqr,
-            'ready': self.sample_count >= self.min_samples
+            "method": self.method,
+            "sample_count": self.sample_count,
+            "min_distance": self.min_distance,
+            "max_distance": self.max_distance,
+            "mean_distance": self.mean_distance,
+            "std_distance": self.std_distance,
+            "median": self.median,
+            "p1": self.p1,
+            "p5": self.p5,
+            "p10": self.p10,
+            "p90": self.p90,
+            "p95": self.p95,
+            "p99": self.p99,
+            "q25": self.q25,
+            "q75": self.q75,
+            "iqr": self.iqr,
+            "ready": self.sample_count >= self.min_samples,
         }
 
 
 # Recommended scaling methods
 RECOMMENDED_SCALING_METHODS = [
-    'robust_minmax',  # Baseline method
-    'min_robustmax',  # Asymmetric scaling
-    'arcsinh_percentile',  # Arcsinh + percentile normalization
-    'double_transform',  # Two-stage transformation
-    'beta',  # Beta CDF transformation
-    'quantile',  # Empirical CDF
-    'robust_zscore',  # Robust z-score + sigmoid
+    "robust_minmax",  # Baseline method
+    "min_robustmax",  # Asymmetric scaling
+    "arcsinh_percentile",  # Arcsinh + percentile normalization
+    "double_transform",  # Two-stage transformation
+    "beta",  # Beta CDF transformation
+    "quantile",  # Empirical CDF
+    "robust_zscore",  # Robust z-score + sigmoid
 ]

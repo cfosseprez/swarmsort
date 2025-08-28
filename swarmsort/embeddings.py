@@ -16,6 +16,7 @@ from loguru import logger
 try:
     import cupy as cp
     from cupyx.scipy.ndimage import uniform_filter
+
     CUPY_AVAILABLE = True
     logger.info("CuPy detected - GPU acceleration available")
 except ImportError:
@@ -26,18 +27,18 @@ except ImportError:
 
 class EmbeddingExtractor:
     """Base class for embedding extractors in standalone package."""
-    
+
     def __init__(self, use_tensor=False):
         self.use_tensor = use_tensor
-    
+
     def extract(self, frame: np.ndarray, bbox: np.ndarray) -> np.ndarray:
         """Extract single embedding."""
         raise NotImplementedError
-    
+
     def extract_batch(self, frame: np.ndarray, bboxes: np.ndarray) -> List[np.ndarray]:
         """Extract batch of embeddings."""
         return [self.extract(frame, bbox) for bbox in bboxes]
-    
+
     @property
     def embedding_dim(self) -> int:
         """Return embedding dimensionality."""
@@ -60,7 +61,9 @@ def extract_features_batch_jit(patches: np.ndarray, features_out: np.ndarray):
         gray = np.zeros((H, W), dtype=np.float32)
         for y in range(H):
             for x in range(W):
-                gray[y, x] = 0.114 * patch[y, x, 0] + 0.587 * patch[y, x, 1] + 0.299 * patch[y, x, 2]
+                gray[y, x] = (
+                    0.114 * patch[y, x, 0] + 0.587 * patch[y, x, 1] + 0.299 * patch[y, x, 2]
+                )
 
         # Basic statistics (4 features)
         features_out[i, 0] = np.mean(gray)
@@ -127,8 +130,8 @@ def extract_features_batch_jit(patches: np.ndarray, features_out: np.ndarray):
 
         # Eccentricity and orientation
         if m20 + m02 > 0:
-            lambda1 = 0.5 * (m20 + m02 + np.sqrt((m20 - m02) ** 2 + 4 * m11 ** 2))
-            lambda2 = 0.5 * (m20 + m02 - np.sqrt((m20 - m02) ** 2 + 4 * m11 ** 2))
+            lambda1 = 0.5 * (m20 + m02 + np.sqrt((m20 - m02) ** 2 + 4 * m11**2))
+            lambda2 = 0.5 * (m20 + m02 - np.sqrt((m20 - m02) ** 2 + 4 * m11**2))
             eccentricity = np.sqrt(1 - lambda2 / lambda1) if lambda1 > 0 else 0
             orientation = 0.5 * np.arctan2(2 * m11, m20 - m02)
         else:
@@ -233,14 +236,22 @@ def extract_features_batch_jit(patches: np.ndarray, features_out: np.ndarray):
             for x in range(1, W - 1):
                 center = gray[y, x]
                 code = 0
-                if gray[y - 1, x - 1] > center: code |= 1
-                if gray[y - 1, x] > center: code |= 2
-                if gray[y - 1, x + 1] > center: code |= 4
-                if gray[y, x + 1] > center: code |= 8
-                if gray[y + 1, x + 1] > center: code |= 16
-                if gray[y + 1, x] > center: code |= 32
-                if gray[y + 1, x - 1] > center: code |= 64
-                if gray[y, x - 1] > center: code |= 128
+                if gray[y - 1, x - 1] > center:
+                    code |= 1
+                if gray[y - 1, x] > center:
+                    code |= 2
+                if gray[y - 1, x + 1] > center:
+                    code |= 4
+                if gray[y, x + 1] > center:
+                    code |= 8
+                if gray[y + 1, x + 1] > center:
+                    code |= 16
+                if gray[y + 1, x] > center:
+                    code |= 32
+                if gray[y + 1, x - 1] > center:
+                    code |= 64
+                if gray[y, x - 1] > center:
+                    code |= 128
                 lbp_hist[code % 8] += 1
 
         lbp_sum = np.sum(lbp_hist)
@@ -271,7 +282,9 @@ def extract_mega_features_batch_jit(patches: np.ndarray, features_out: np.ndarra
         gray = np.zeros((H, W), dtype=np.float32)
         for y in range(H):
             for x in range(W):
-                gray[y, x] = 0.114 * patch[y, x, 0] + 0.587 * patch[y, x, 1] + 0.299 * patch[y, x, 2]
+                gray[y, x] = (
+                    0.114 * patch[y, x, 0] + 0.587 * patch[y, x, 1] + 0.299 * patch[y, x, 2]
+                )
 
         features_out[i, feature_idx] = np.mean(gray)
         features_out[i, feature_idx + 1] = np.std(gray)
@@ -337,18 +350,20 @@ def extract_mega_features_batch_jit(patches: np.ndarray, features_out: np.ndarra
         if abs(denom) < 1e-6:
             denom += 1e-6
 
-        discriminant = np.sqrt(denom ** 2 + 4 * m11 ** 2)
+        discriminant = np.sqrt(denom**2 + 4 * m11**2)
         lambda1 = 0.5 * (m20 + m02 + discriminant)
         lambda2 = 0.5 * (m20 + m02 - discriminant)
         eccentricity = np.sqrt(1 - lambda2 / lambda1) if lambda1 > 1e-6 else 0
         orientation = 0.5 * np.arctan2(2 * m11, denom)
         features_out[i, feature_idx + 5] = eccentricity
-        features_out[i, feature_idx + 6] = np.sin(2 * orientation)  # Use 2*orientation for rotational stability
+        features_out[i, feature_idx + 6] = np.sin(
+            2 * orientation
+        )  # Use 2*orientation for rotational stability
         features_out[i, feature_idx + 7] = np.cos(2 * orientation)
 
         # Hu Moments (2 rotation-invariant moments)
         I1 = m20 + m02
-        I2 = (m20 - m02) ** 2 + 4 * m11 ** 2
+        I2 = (m20 - m02) ** 2 + 4 * m11**2
         features_out[i, feature_idx + 8] = I1
         features_out[i, feature_idx + 9] = I2
         feature_idx += 10
@@ -371,9 +386,10 @@ def extract_mega_features_batch_jit(patches: np.ndarray, features_out: np.ndarra
                         h = (60 * ((b - r) / diff) + 120) % 360
                     else:
                         h = (60 * ((r - g) / diff) + 240) % 360
-                if max_val > 1e-6: s = diff / max_val
-                h_vals.append(h);
-                s_vals.append(s);
+                if max_val > 1e-6:
+                    s = diff / max_val
+                h_vals.append(h)
+                s_vals.append(s)
                 v_vals.append(v)
 
         h_rad = np.array([v * np.pi / 180.0 for v in h_vals])
@@ -385,7 +401,9 @@ def extract_mega_features_batch_jit(patches: np.ndarray, features_out: np.ndarra
         mean_sin, mean_cos = np.mean(np.sin(h_rad)), np.mean(np.cos(h_rad))
         features_out[i, feature_idx + 4] = np.arctan2(mean_sin, mean_cos)
         # Use circular std for hue
-        features_out[i, feature_idx + 5] = np.sqrt(-2 * np.log(np.sqrt(mean_sin ** 2 + mean_cos ** 2)))
+        features_out[i, feature_idx + 5] = np.sqrt(
+            -2 * np.log(np.sqrt(mean_sin**2 + mean_cos**2))
+        )
         feature_idx += 6
 
         # ------------------- TEXTURE: LBP (10 features) -------------------
@@ -394,14 +412,22 @@ def extract_mega_features_batch_jit(patches: np.ndarray, features_out: np.ndarra
             for x in range(1, W - 1):
                 center = gray[y, x]
                 code = 0
-                if gray[y - 1, x - 1] > center: code |= 1
-                if gray[y - 1, x] > center: code |= 2
-                if gray[y - 1, x + 1] > center: code |= 4
-                if gray[y, x + 1] > center: code |= 8
-                if gray[y + 1, x + 1] > center: code |= 16
-                if gray[y + 1, x] > center: code |= 32
-                if gray[y + 1, x - 1] > center: code |= 64
-                if gray[y, x - 1] > center: code |= 128
+                if gray[y - 1, x - 1] > center:
+                    code |= 1
+                if gray[y - 1, x] > center:
+                    code |= 2
+                if gray[y - 1, x + 1] > center:
+                    code |= 4
+                if gray[y, x + 1] > center:
+                    code |= 8
+                if gray[y + 1, x + 1] > center:
+                    code |= 16
+                if gray[y + 1, x] > center:
+                    code |= 32
+                if gray[y + 1, x - 1] > center:
+                    code |= 64
+                if gray[y, x - 1] > center:
+                    code |= 128
 
                 min_code = code
                 for rot in range(1, 8):
@@ -411,7 +437,8 @@ def extract_mega_features_batch_jit(patches: np.ndarray, features_out: np.ndarra
                 lbp_hist[min_code % 36] += 1
 
         lbp_sum = np.sum(lbp_hist)
-        if lbp_sum > 0: lbp_hist /= lbp_sum
+        if lbp_sum > 0:
+            lbp_hist /= lbp_sum
         for j in range(10):
             features_out[i, feature_idx + j] = lbp_hist[j]
         feature_idx += 10
@@ -428,8 +455,12 @@ def extract_mega_features_batch_jit(patches: np.ndarray, features_out: np.ndarra
                 x1, y1 = int(x), int(y)
                 if 0 <= x1 < W - 1 and 0 <= y1 < H - 1:
                     fx, fy = x - x1, y - y1
-                    val = (gray[y1, x1] * (1 - fx) * (1 - fy) + gray[y1, x1 + 1] * fx * (1 - fy) +
-                           gray[y1 + 1, x1] * (1 - fx) * fy + gray[y1 + 1, x1 + 1] * fx * fy)
+                    val = (
+                        gray[y1, x1] * (1 - fx) * (1 - fy)
+                        + gray[y1, x1 + 1] * fx * (1 - fy)
+                        + gray[y1 + 1, x1] * (1 - fx) * fy
+                        + gray[y1 + 1, x1 + 1] * fx * fy
+                    )
                     radial_values.append(val)
 
             if len(radial_values) > 1:
@@ -443,9 +474,11 @@ def extract_mega_features_batch_jit(patches: np.ndarray, features_out: np.ndarra
                     angle = 2 * np.pi * n / n_samples
                     real_part += radial_arr[n] * np.cos(angle)
                     imag_part -= radial_arr[n] * np.sin(angle)
-                features_out[i, feature_idx + 2] = np.sqrt(real_part ** 2 + imag_part ** 2) / n_samples
+                features_out[i, feature_idx + 2] = (
+                    np.sqrt(real_part**2 + imag_part**2) / n_samples
+                )
             else:
-                features_out[i, feature_idx:feature_idx + 3] = 0.0
+                features_out[i, feature_idx : feature_idx + 3] = 0.0
             feature_idx += 4  # Note: one feature is left empty per radius for now
 
         # ------------------- TEXTURE: ENTROPY & WAVELET (14 features) -------------------
@@ -456,11 +489,12 @@ def extract_mega_features_batch_jit(patches: np.ndarray, features_out: np.ndarra
             count = 0
             for y in range(0, H - block_size, block_size):
                 for x in range(0, W - block_size, block_size):
-                    block = gray[y:y + block_size, x:x + block_size]
+                    block = gray[y : y + block_size, x : x + block_size]
                     if block.size > 0:
                         std_sum += np.std(block)
                         count += 1
-            if count > 0: features_out[i, feature_idx + scale_exp] = std_sum / count
+            if count > 0:
+                features_out[i, feature_idx + scale_exp] = std_sum / count
         feature_idx += 4
 
         # Entropy features
@@ -469,13 +503,15 @@ def extract_mega_features_batch_jit(patches: np.ndarray, features_out: np.ndarra
             for x in range(W):
                 bin_idx = min(15, int(gray[y, x] / 16))
                 hist[bin_idx] += 1
-        if H * W > 0: hist /= (H * W)
+        if H * W > 0:
+            hist /= H * W
 
         entropy = 0.0
         for p in hist:
-            if p > 0: entropy -= p * np.log2(p)
+            if p > 0:
+                entropy -= p * np.log2(p)
         features_out[i, feature_idx] = entropy
-        features_out[i, feature_idx + 1] = np.sum(hist ** 2)  # Uniformity
+        features_out[i, feature_idx + 1] = np.sum(hist**2)  # Uniformity
         feature_idx += 2
 
         # Fill any remaining features
@@ -650,7 +686,7 @@ class CupyTextureEmbedding(EmbeddingExtractor):
             logger.error(f"GPU extraction failed: {e}, falling back to CPU")
             return self.extract_batch_cpu(frame, bboxes)
 
-    def _extract_features_gpu(self, patches_gpu) -> 'cp.ndarray':
+    def _extract_features_gpu(self, patches_gpu) -> "cp.ndarray":
         """GPU-accelerated feature extraction using CuPy."""
         N, H, W, C = patches_gpu.shape
         features = cp.zeros((N, self._dim), dtype=cp.float32)
@@ -675,7 +711,7 @@ class CupyTextureEmbedding(EmbeddingExtractor):
 
         # Shape and color features (simplified for GPU)
         # Center of mass
-        y_coords, x_coords = cp.meshgrid(cp.arange(H), cp.arange(W), indexing='ij')
+        y_coords, x_coords = cp.meshgrid(cp.arange(H), cp.arange(W), indexing="ij")
         total_intensity = cp.sum(gray_gpu, axis=(1, 2), keepdims=True)
 
         mask = total_intensity.squeeze() > 0
@@ -683,8 +719,12 @@ class CupyTextureEmbedding(EmbeddingExtractor):
         cm_y = cp.zeros(N)
 
         if cp.any(mask):
-            cm_x[mask] = cp.sum(gray_gpu[mask] * x_coords, axis=(1, 2)) / total_intensity[mask].squeeze()
-            cm_y[mask] = cp.sum(gray_gpu[mask] * y_coords, axis=(1, 2)) / total_intensity[mask].squeeze()
+            cm_x[mask] = (
+                cp.sum(gray_gpu[mask] * x_coords, axis=(1, 2)) / total_intensity[mask].squeeze()
+            )
+            cm_y[mask] = (
+                cp.sum(gray_gpu[mask] * y_coords, axis=(1, 2)) / total_intensity[mask].squeeze()
+            )
 
         features[:, 8] = cm_x - W // 2
         features[:, 9] = cm_y - H // 2
@@ -743,20 +783,28 @@ class MegaCupyTextureEmbedding(EmbeddingExtractor):
         self.use_gpu = use_gpu and CUPY_AVAILABLE
 
         if self.use_gpu:
-            logger.info(f"MegaCupyTextureEmbedding loaded. Dim={self._dim}. GPU acceleration ENABLED.")
+            logger.info(
+                f"MegaCupyTextureEmbedding loaded. Dim={self._dim}. GPU acceleration ENABLED."
+            )
         else:
-            logger.info(f"MegaCupyTextureEmbedding loaded. Dim={self._dim}. Running on CPU with Numba.")
+            logger.info(
+                f"MegaCupyTextureEmbedding loaded. Dim={self._dim}. Running on CPU with Numba."
+            )
 
     def _prepare_patch(self, frame: np.ndarray, bbox: np.ndarray) -> Optional[np.ndarray]:
         x1, y1, x2, y2 = map(int, bbox[:4])
         h_frame, w_frame = frame.shape[:2]
         x1, y1, x2, y2 = max(0, x1), max(0, y1), min(w_frame, x2), min(h_frame, y2)
-        if x1 >= x2 or y1 >= y2: return None
-        patch = cv2.resize(frame[y1:y2, x1:x2], (self.patch_size, self.patch_size), interpolation=cv2.INTER_AREA)
+        if x1 >= x2 or y1 >= y2:
+            return None
+        patch = cv2.resize(
+            frame[y1:y2, x1:x2], (self.patch_size, self.patch_size), interpolation=cv2.INTER_AREA
+        )
         return patch
 
     def extract_batch_cpu(self, frame: np.ndarray, bboxes: np.ndarray) -> List[np.ndarray]:
-        if len(bboxes) == 0: return []
+        if len(bboxes) == 0:
+            return []
         patches, valid_indices = [], []
         for i, bbox in enumerate(bboxes):
             patch = self._prepare_patch(frame, bbox)
@@ -764,7 +812,8 @@ class MegaCupyTextureEmbedding(EmbeddingExtractor):
                 patches.append(patch)
                 valid_indices.append(i)
 
-        if not patches: return [np.zeros(self._dim, dtype=np.float32) for _ in bboxes]
+        if not patches:
+            return [np.zeros(self._dim, dtype=np.float32) for _ in bboxes]
 
         patches_array = np.array(patches)
         features = np.zeros((len(patches), self._dim), dtype=np.float32)
@@ -775,7 +824,7 @@ class MegaCupyTextureEmbedding(EmbeddingExtractor):
             result[valid_idx] = features[i]
         return result
 
-    def _extract_features_gpu(self, patches_gpu) -> 'cp.ndarray':
+    def _extract_features_gpu(self, patches_gpu) -> "cp.ndarray":
         """GPU-accelerated feature extraction with improved CPU-GPU consistency."""
         N, H, W, C = patches_gpu.shape
         features = cp.zeros((N, self._dim), dtype=cp.float32)
@@ -783,22 +832,34 @@ class MegaCupyTextureEmbedding(EmbeddingExtractor):
 
         # GRAYSCALE & BASIC STATS (4)
         gray_gpu = cp.sum(patches_gpu * cp.array([0.114, 0.587, 0.299]), axis=3)
-        features[:, idx:idx + 4] = cp.stack([
-            cp.mean(gray_gpu, axis=(1, 2)), cp.std(gray_gpu, axis=(1, 2)),
-            cp.min(gray_gpu, axis=(1, 2)), cp.max(gray_gpu, axis=(1, 2))
-        ], axis=1)
+        features[:, idx : idx + 4] = cp.stack(
+            [
+                cp.mean(gray_gpu, axis=(1, 2)),
+                cp.std(gray_gpu, axis=(1, 2)),
+                cp.min(gray_gpu, axis=(1, 2)),
+                cp.max(gray_gpu, axis=(1, 2)),
+            ],
+            axis=1,
+        )
         idx += 4
 
         # GRADIENTS (4)
         grad_y, grad_x = cp.gradient(gray_gpu, axis=(1, 2))
-        features[:, idx:idx + 4] = cp.stack([
-            cp.mean(cp.abs(grad_x), axis=(1, 2)), cp.mean(cp.abs(grad_y), axis=(1, 2)),
-            cp.std(grad_x, axis=(1, 2)), cp.std(grad_y, axis=(1, 2))
-        ], axis=1)
+        features[:, idx : idx + 4] = cp.stack(
+            [
+                cp.mean(cp.abs(grad_x), axis=(1, 2)),
+                cp.mean(cp.abs(grad_y), axis=(1, 2)),
+                cp.std(grad_x, axis=(1, 2)),
+                cp.std(grad_y, axis=(1, 2)),
+            ],
+            axis=1,
+        )
         idx += 4
 
         # SHAPE & MOMENTS (10) - Vectorized implementation
-        y_coords, x_coords = cp.meshgrid(cp.arange(H, dtype=cp.float32), cp.arange(W, dtype=cp.float32), indexing='ij')
+        y_coords, x_coords = cp.meshgrid(
+            cp.arange(H, dtype=cp.float32), cp.arange(W, dtype=cp.float32), indexing="ij"
+        )
         total_intensity = cp.sum(gray_gpu, axis=(1, 2))
 
         safe_total = total_intensity + 1e-7
@@ -813,10 +874,10 @@ class MegaCupyTextureEmbedding(EmbeddingExtractor):
         m20 = cp.sum(gray_gpu * dx * dx, axis=(1, 2)) / safe_total
         m02 = cp.sum(gray_gpu * dy * dy, axis=(1, 2)) / safe_total
         m11 = cp.sum(gray_gpu * dx * dy, axis=(1, 2)) / safe_total
-        features[:, idx + 2:idx + 5] = cp.stack([m20, m02, m11], axis=1)
+        features[:, idx + 2 : idx + 5] = cp.stack([m20, m02, m11], axis=1)
 
         denom = m20 - m02
-        discriminant = cp.sqrt(denom ** 2 + 4 * m11 ** 2)
+        discriminant = cp.sqrt(denom**2 + 4 * m11**2)
         lambda1 = 0.5 * (m20 + m02 + discriminant)
         lambda2 = 0.5 * (m20 + m02 - discriminant)
         features[:, idx + 5] = cp.sqrt(1 - lambda2 / (lambda1 + 1e-7))
@@ -825,7 +886,7 @@ class MegaCupyTextureEmbedding(EmbeddingExtractor):
         features[:, idx + 7] = cp.cos(2 * orientation)
 
         features[:, idx + 8] = m20 + m02  # Hu Moment 1
-        features[:, idx + 9] = (m20 - m02) ** 2 + 4 * m11 ** 2  # Hu Moment 2
+        features[:, idx + 9] = (m20 - m02) ** 2 + 4 * m11**2  # Hu Moment 2
         idx += 10
 
         # COLOR (6) - Simplified GPU version
@@ -835,11 +896,17 @@ class MegaCupyTextureEmbedding(EmbeddingExtractor):
         min_val = cp.min(bgr_norm, axis=3)
         s = (max_val - min_val) / (max_val + 1e-7)
         v = max_val
-        features[:, idx:idx + 6] = cp.stack([
-            cp.mean(s, axis=(1, 2)), cp.mean(v, axis=(1, 2)),
-            cp.std(s, axis=(1, 2)), cp.std(v, axis=(1, 2)),
-            cp.mean(r, axis=(1, 2)), cp.std(r, axis=(1, 2))  # Use R channel as proxy for hue stats
-        ], axis=1)
+        features[:, idx : idx + 6] = cp.stack(
+            [
+                cp.mean(s, axis=(1, 2)),
+                cp.mean(v, axis=(1, 2)),
+                cp.std(s, axis=(1, 2)),
+                cp.std(v, axis=(1, 2)),
+                cp.mean(r, axis=(1, 2)),
+                cp.std(r, axis=(1, 2)),  # Use R channel as proxy for hue stats
+            ],
+            axis=1,
+        )
         idx += 6
 
         # TEXTURE (approximations) (20)
@@ -863,7 +930,8 @@ class MegaCupyTextureEmbedding(EmbeddingExtractor):
         return self.extract_batch(frame, np.array([bbox]))[0]
 
     def extract_batch_gpu(self, frame: np.ndarray, bboxes: np.ndarray) -> List[np.ndarray]:
-        if len(bboxes) == 0: return []
+        if len(bboxes) == 0:
+            return []
         patches, valid_indices = [], []
         for i, bbox in enumerate(bboxes):
             patch = self._prepare_patch(frame, bbox)
@@ -871,7 +939,8 @@ class MegaCupyTextureEmbedding(EmbeddingExtractor):
                 patches.append(patch)
                 valid_indices.append(i)
 
-        if not patches: return [np.zeros(self._dim, dtype=np.float32) for _ in bboxes]
+        if not patches:
+            return [np.zeros(self._dim, dtype=np.float32) for _ in bboxes]
 
         patches_gpu = cp.asarray(np.array(patches))
         features_gpu = self._extract_features_gpu(patches_gpu)
@@ -901,18 +970,18 @@ class MegaCupyTextureEmbedding(EmbeddingExtractor):
 def compute_embedding_distance(emb1: np.ndarray, emb2: np.ndarray) -> float:
     """Compute correlation-based distance between embeddings."""
     if emb1 is None or emb2 is None:
-        return float('inf')
+        return float("inf")
     if emb1.shape != emb2.shape:
         logger.warning(f"Embeddings have different shapes: {emb1.shape} vs {emb2.shape}")
-        return float('inf')
+        return float("inf")
     if emb1.size == 0:
-        return float('inf')
+        return float("inf")
 
     try:
         return correlation_distance_jit(emb1, emb2)
     except Exception as e:
         logger.error(f"Error in embedding distance computation: {e}")
-        return float('inf')
+        return float("inf")
 
 
 def compute_embedding_distances_batch(emb: np.ndarray, embs: List[np.ndarray]) -> np.ndarray:
@@ -920,7 +989,7 @@ def compute_embedding_distances_batch(emb: np.ndarray, embs: List[np.ndarray]) -
     if emb is None or not embs:
         return np.array([])
 
-    distances = np.full(len(embs), float('inf'))
+    distances = np.full(len(embs), float("inf"))
 
     for i, emb2 in enumerate(embs):
         if emb2 is not None and emb.shape == emb2.shape and emb.size > 0:
@@ -934,8 +1003,8 @@ def compute_embedding_distances_batch(emb: np.ndarray, embs: List[np.ndarray]) -
 
 # Available embedding extractors
 AVAILABLE_EMBEDDINGS = {
-    'cupytexture': CupyTextureEmbedding,
-    'mega_cupytexture': MegaCupyTextureEmbedding,
+    "cupytexture": CupyTextureEmbedding,
+    "mega_cupytexture": MegaCupyTextureEmbedding,
 }
 
 
@@ -944,7 +1013,7 @@ def get_embedding_extractor(name: str, **kwargs) -> EmbeddingExtractor:
     if name not in AVAILABLE_EMBEDDINGS:
         available = list(AVAILABLE_EMBEDDINGS.keys())
         raise ValueError(f"Embedding '{name}' not found. Available: {available}")
-    
+
     return AVAILABLE_EMBEDDINGS[name](**kwargs)
 
 

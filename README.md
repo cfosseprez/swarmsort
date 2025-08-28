@@ -21,14 +21,16 @@ A high-performance standalone multi-object tracking library with GPU-accelerated
 ### Standalone Installation (via Poetry)
 
 ```bash
-cd swarmsort_standalone
+git clone https://github.com/cfosseprez/swarmsort.git
+cd swarmsort
 poetry install
 ```
 
 ### Development Installation
 
 ```bash
-cd swarmsort_standalone
+git clone https://github.com/cfosseprez/swarmsort.git
+cd swarmsort
 poetry install --with dev
 ```
 
@@ -38,10 +40,10 @@ poetry install --with dev
 
 ```python
 import numpy as np
-from swarmsort import SwarmSort, Detection
+from swarmsort import SwarmSortTracker, Detection
 
 # Create tracker
-tracker = SwarmSort()
+tracker = SwarmSortTracker()
 
 # Create detections for current frame
 detections = [
@@ -60,15 +62,15 @@ for obj in tracked_objects:
 ### With Embeddings
 
 ```python
-from swarmsort import SwarmSort, SwarmSortConfig, Detection
+from swarmsort import SwarmSortTracker, SwarmSortConfig, Detection
 
 # Configure tracker for embeddings
 config = SwarmSortConfig(
     use_embeddings=True,
     embedding_weight=0.4,
-    embedding_matching_method='best_match'
+    embedding_matching_method='weighted_average'
 )
-tracker = SwarmSort(config)
+tracker = SwarmSortTracker(config)
 
 # Create detection with embedding
 embedding = np.random.randn(128).astype(np.float32)
@@ -109,53 +111,42 @@ config = SwarmSortConfig(
     duplicate_detection_threshold=25.0,   # Distance threshold for duplicate removal
 )
 
-tracker = SwarmSort(config)
+tracker = SwarmSortTracker(config)
 ```
 
 ## Advanced Usage
 
-### Factory Function
+### Different Configuration Methods
 
 ```python
-from swarmsort import create_tracker
+from swarmsort import SwarmSortTracker, SwarmSortConfig
 
 # Default tracker
-tracker = create_tracker()
+tracker = SwarmSortTracker()
 
-# With configuration dict
-tracker = create_tracker({'max_distance': 100.0, 'use_embeddings': True})
+# With configuration object
+config = SwarmSortConfig(max_distance=100.0, use_embeddings=True)
+tracker = SwarmSortTracker(config)
 
-# Force standalone mode (disable SwarmTracker integration)
-tracker = create_tracker(force_standalone=True)
-
-# From YAML config file
-tracker = create_tracker('config.yaml')
+# With dictionary config
+tracker = SwarmSortTracker({'max_distance': 100.0, 'use_embeddings': True})
 ```
 
-### Integration Detection
+### Basic Standalone Usage
 
 ```python
-from swarmsort import is_within_swarmtracker
+from swarmsort import SwarmSortTracker, SwarmSortConfig
 
-if is_within_swarmtracker():
-    print("Running within SwarmTracker pipeline")
-else:
-    print("Running in standalone mode")
-```
+# SwarmSort is a standalone tracker - no special integration needed
+tracker = SwarmSortTracker()
 
-### Different Tracker Types
-
-```python
-from swarmsort import SwarmSort, StandaloneSwarmSort, AdaptiveSwarmSortTracker
-
-# Adaptive tracker (automatically detects environment)
-tracker1 = SwarmSort()
-
-# Explicit standalone tracker
-tracker2 = StandaloneSwarmSort()
-
-# Adaptive tracker (same as SwarmSort)
-tracker3 = AdaptiveSwarmSortTracker()
+# Configure for specific use cases
+config = SwarmSortConfig(
+    use_embeddings=True,
+    reid_enabled=True,
+    max_distance=100.0
+)
+tracker_configured = SwarmSortTracker(config)
 ```
 
 ## Data Classes
@@ -187,8 +178,8 @@ for tracked_obj in tracked_objects:
     print(f"Confidence: {tracked_obj.confidence}")
     print(f"Age: {tracked_obj.age}")
     print(f"Hits: {tracked_obj.hits}")
-    print(f"Time since update: {tracked_obj.time_since_update}")
-    print(f"State: {tracked_obj.state}")
+    print(f"Lost frames: {tracked_obj.lost_frames}")
+    print(f"Bbox: {tracked_obj.bbox}")
 ```
 
 ## Configuration Parameters
@@ -203,7 +194,7 @@ for tracked_obj in tracked_objects:
 | `embedding_weight` | 0.3 | Weight for embedding similarity in cost function |
 | `max_embeddings_per_track` | 15 | Maximum embeddings stored per track |
 | `embedding_matching_method` | 'weighted_average' | Method for multi-embedding matching |
-| `min_consecutive_detections` | 3 | Minimum consecutive detections to create track |
+| `min_consecutive_detections` | 5 | Minimum consecutive detections to create track |
 | `max_detection_gap` | 2 | Maximum gap between detections for same pending track |
 | `reid_enabled` | True | Enable re-identification of lost tracks |
 | `reid_max_distance` | 150.0 | Maximum distance for ReID |
@@ -220,27 +211,21 @@ SwarmSort includes several performance optimizations:
 4. **Optimized Memory Usage**: Efficient data structures and memory management
 5. **Parallel Processing**: Multi-threaded operations where beneficial
 
-## Integration with SwarmTracker
+## GPU Acceleration
 
-When used within the SwarmTracker pipeline, SwarmSort automatically:
-
-- Detects the SwarmTracker environment
-- Uses SwarmTracker's detection and tracking data classes
-- Integrates with SwarmTracker's configuration system
-- Leverages SwarmTracker's embedding and feature extraction
-
-To use within SwarmTracker:
+SwarmSort supports GPU acceleration for embedding extraction using CuPy:
 
 ```python
-# In your SwarmTracker configuration
-tracker_config = {
-    'tracker_type': 'swarmsort',
-    'swarmsort': {
-        'max_distance': 80.0,
-        'use_embeddings': True,
-        'embedding_weight': 0.3
-    }
-}
+from swarmsort import is_gpu_available, SwarmSortTracker, SwarmSortConfig
+
+if is_gpu_available():
+    print("GPU acceleration available")
+    # GPU will be used automatically for embedding operations
+    config = SwarmSortConfig(use_embeddings=True)
+    tracker = SwarmSortTracker(config)
+else:
+    print("Using CPU mode")
+    tracker = SwarmSortTracker()
 ```
 
 ## Examples

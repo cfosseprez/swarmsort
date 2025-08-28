@@ -1,58 +1,78 @@
 """
 SwarmSort Standalone - Multi-Object Tracker with GPU-Accelerated Embeddings
 
-A standalone implementation of the SwarmSort algorithm for multi-object tracking
-with optional GPU acceleration using CuPy for embedding extraction.
+SwarmSort is a high-performance, standalone multi-object tracking library that combines
+advanced computer vision techniques with deep learning embeddings for robust real-time
+object tracking applications.
 
-Features:
-- Real-time multi-object tracking
-- GPU-accelerated embedding extraction (optional)
-- Advanced distance scaling with 11 different methods
-- Kalman filtering for motion prediction
-- Hungarian algorithm for optimal assignment
-- Re-identification for lost tracks
+Key Features:
+    - Real-time multi-object tracking with motion prediction via Kalman filtering
+    - GPU-accelerated embedding extraction using CuPy (optional)
+    - Advanced distance scaling with 11 different normalization methods  
+    - Hungarian algorithm for optimal detection-to-track assignment
+    - Re-identification (ReID) capabilities for recovering lost tracks
+    - Probabilistic and non-probabilistic cost computation methods
+    - Comprehensive configuration system with sensible defaults
+    - Extensive test suite with 200+ tests for reliability
 
 Installation:
-    # Basic installation (CPU only)
-    pip install swarmsort
+    # Clone from repository
+    git clone https://github.com/cfosseprez/swarmsort.git
+    cd swarmsort
+    poetry install
     
-    # With GPU support
-    pip install swarmsort[gpu]
-    
-    # Development installation
-    pip install swarmsort[dev]
+    # Development installation with testing tools
+    poetry install --with dev
 
 Basic Usage:
     import numpy as np
     from swarmsort import SwarmSortTracker, Detection
     
-    # Initialize tracker
+    # Initialize tracker with default settings
     tracker = SwarmSortTracker()
     
-    # Create detections (x1, y1, x2, y2, confidence, class_id)
+    # Create detections for current frame
     detections = [
-        Detection([100, 100, 200, 200, 0.9, 0]),
-        Detection([300, 150, 400, 250, 0.8, 1])
+        Detection(
+            position=np.array([100.0, 150.0], dtype=np.float32),
+            confidence=0.9
+        ),
+        Detection(
+            position=np.array([300.0, 200.0], dtype=np.float32), 
+            confidence=0.8
+        )
     ]
     
-    # Track objects
-    tracked_objects = tracker.track(detections, frame_data)
+    # Update tracker and get current tracked objects
+    tracked_objects = tracker.update(detections)
     
+    # Process results
     for obj in tracked_objects:
         print(f"Track ID: {obj.id}, Position: {obj.position}")
+        print(f"  Velocity: {obj.velocity}, Age: {obj.age}")
 
-GPU Usage:
-    # With GPU-accelerated embeddings
-    from swarmsort import SwarmSortTracker
-    from swarmsort.embeddings import is_gpu_available
+Advanced Configuration:
+    from swarmsort import SwarmSortTracker, SwarmSortConfig
+    
+    # Configure tracker for embedding-based tracking
+    config = SwarmSortConfig(
+        use_embeddings=True,
+        embedding_weight=0.4,
+        reid_enabled=True,
+        max_distance=100.0
+    )
+    tracker = SwarmSortTracker(config)
+
+GPU Acceleration:
+    from swarmsort import is_gpu_available, SwarmSortTracker
     
     if is_gpu_available():
-        tracker = SwarmSortTracker(
-            embedding_type='cupytexture',  # or 'mega_cupytexture'
-            use_gpu=True
-        )
+        print("GPU acceleration available for embeddings")
+        # GPU will be used automatically for embedding operations
+        tracker = SwarmSortTracker()
     else:
-        tracker = SwarmSortTracker(embedding_type='histogram')
+        print("Using CPU mode")
+        tracker = SwarmSortTracker()
 """
 
 # Core tracking functionality
@@ -70,7 +90,7 @@ from .embeddings import (
     compute_embedding_distance,
     compute_embedding_distances_batch,
     is_gpu_available,
-    CUPY_AVAILABLE
+    CUPY_AVAILABLE,
 )
 
 # Integration utilities
@@ -80,8 +100,9 @@ try:
         SwarmSort,
         StandaloneSwarmSort,
         create_tracker,
-        is_within_swarmtracker
+        is_within_swarmtracker,
     )
+
     INTEGRATION_AVAILABLE = True
 except ImportError:
     INTEGRATION_AVAILABLE = False
@@ -92,7 +113,7 @@ from .swarmtracker_adapter import (
     create_swarmsort_tracker,
     TrackingResult,
     create_tracked_object_fast,
-    FastMultiHypothesisTracker
+    FastMultiHypothesisTracker,
 )
 
 # Visualization and simulation tools (optional)
@@ -101,14 +122,14 @@ try:
         TrackingVisualizer,
         VisualizationConfig,
         ColorManager,
-        quick_visualize
+        quick_visualize,
     )
     from .simulator import (
         ObjectMotionSimulator,
         SimulationConfig,
         SimulatedObject,
         MotionType,
-        create_demo_scenario
+        create_demo_scenario,
     )
     from .benchmarking import (
         TrackingBenchmark,
@@ -116,8 +137,9 @@ try:
         BenchmarkResult,
         FrameTimingResult,
         quick_benchmark,
-        timing_context
+        timing_context,
     )
+
     VISUALIZATION_AVAILABLE = True
 except ImportError:
     VISUALIZATION_AVAILABLE = False
@@ -129,42 +151,69 @@ __license__ = "MIT"
 
 __all__ = [
     # Core classes
-    'SwarmSortTracker',
-    'Detection', 
-    'TrackedObject',
-    'SwarmSortConfig',
-    'EmbeddingDistanceScaler',
-    
+    "SwarmSortTracker",
+    "Detection",
+    "TrackedObject",
+    "SwarmSortConfig",
+    "EmbeddingDistanceScaler",
     # Embedding classes
-    'CupyTextureEmbedding',
-    'MegaCupyTextureEmbedding',
-    'get_embedding_extractor',
-    'list_available_embeddings',
-    'compute_embedding_distance',
-    'compute_embedding_distances_batch',
-    'is_gpu_available',
-    'CUPY_AVAILABLE',
-    
+    "CupyTextureEmbedding",
+    "MegaCupyTextureEmbedding",
+    "get_embedding_extractor",
+    "list_available_embeddings",
+    "compute_embedding_distance",
+    "compute_embedding_distances_batch",
+    "is_gpu_available",
+    "CUPY_AVAILABLE",
     # Integration (if available)
-    *(['AdaptiveSwarmSortTracker', 'SwarmSort', 'StandaloneSwarmSort', 
-       'create_tracker', 'is_within_swarmtracker'] 
-      if INTEGRATION_AVAILABLE else []),
-    
+    *(
+        [
+            "AdaptiveSwarmSortTracker",
+            "SwarmSort",
+            "StandaloneSwarmSort",
+            "create_tracker",
+            "is_within_swarmtracker",
+        ]
+        if INTEGRATION_AVAILABLE
+        else []
+    ),
     # Visualization and simulation (if available)
-    *(['TrackingVisualizer', 'VisualizationConfig', 'ColorManager', 'quick_visualize',
-       'ObjectMotionSimulator', 'SimulationConfig', 'SimulatedObject', 'MotionType', 'create_demo_scenario',
-       'TrackingBenchmark', 'ScalabilityBenchmark', 'BenchmarkResult', 'FrameTimingResult', 
-       'quick_benchmark', 'timing_context']
-      if VISUALIZATION_AVAILABLE else []),
-    
+    *(
+        [
+            "TrackingVisualizer",
+            "VisualizationConfig",
+            "ColorManager",
+            "quick_visualize",
+            "ObjectMotionSimulator",
+            "SimulationConfig",
+            "SimulatedObject",
+            "MotionType",
+            "create_demo_scenario",
+            "TrackingBenchmark",
+            "ScalabilityBenchmark",
+            "BenchmarkResult",
+            "FrameTimingResult",
+            "quick_benchmark",
+            "timing_context",
+        ]
+        if VISUALIZATION_AVAILABLE
+        else []
+    ),
+    # SwarmTracker adapter exports
+    "RawTrackerSwarmSORT",
+    "create_swarmsort_tracker",
+    "TrackingResult",
+    "create_tracked_object_fast",
+    "FastMultiHypothesisTracker",
     # Constants
-    'INTEGRATION_AVAILABLE',
-    'VISUALIZATION_AVAILABLE',
-    '__version__',
-    '__author__',
-    '__email__',
-    '__license__'
+    "INTEGRATION_AVAILABLE",
+    "VISUALIZATION_AVAILABLE",
+    "__version__",
+    "__author__",
+    "__email__",
+    "__license__",
 ]
+
 
 # Package metadata
 def get_package_info():
@@ -172,21 +221,22 @@ def get_package_info():
     gpu_status = "Available" if is_gpu_available() else "Not Available"
     integration_status = "Available" if INTEGRATION_AVAILABLE else "Not Available"
     visualization_status = "Available" if VISUALIZATION_AVAILABLE else "Not Available"
-    
+
     return {
-        'version': __version__,
-        'author': __author__,
-        'license': __license__,
-        'gpu_support': gpu_status,
-        'swarmtracker_integration': integration_status,
-        'visualization_tools': visualization_status,
-        'available_embeddings': list_available_embeddings()
+        "version": __version__,
+        "author": __author__,
+        "license": __license__,
+        "gpu_support": gpu_status,
+        "swarmtracker_integration": integration_status,
+        "visualization_tools": visualization_status,
+        "available_embeddings": list_available_embeddings(),
     }
+
 
 def print_package_info():
     """Print package information."""
     info = get_package_info()
-    
+
     print("=" * 50)
     print("SwarmSort Standalone Package Information")
     print("=" * 50)
@@ -199,7 +249,8 @@ def print_package_info():
     print(f"Available Embeddings: {', '.join(info['available_embeddings'])}")
     print("=" * 50)
 
+
 # Convenient aliases for common usage
 Tracker = SwarmSortTracker  # Short alias
-GPUTracker = lambda **kwargs: SwarmSortTracker(embedding_type='cupytexture', use_gpu=True, **kwargs)
-CPUTracker = lambda **kwargs: SwarmSortTracker(embedding_type='histogram', use_gpu=False, **kwargs)
+GPUTracker = lambda **kwargs: SwarmSortTracker(embedding_type="cupytexture", use_gpu=True, **kwargs)
+CPUTracker = lambda **kwargs: SwarmSortTracker(embedding_type="histogram", use_gpu=False, **kwargs)
