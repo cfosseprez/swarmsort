@@ -14,7 +14,6 @@ from dataclasses import dataclass, field
 from collections import deque
 import numba as nb
 from scipy.optimize import linear_sum_assignment
-import matplotlib.pyplot as plt
 import os
 from pathlib import Path
 import time
