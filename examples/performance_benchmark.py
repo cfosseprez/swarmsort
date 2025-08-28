@@ -1,388 +1,288 @@
 """
-SwarmSort Performance Benchmark Script
+Simple SwarmSort Performance Benchmark
 
-This script runs comprehensive performance benchmarks for SwarmSort,
-testing scalability with increasing object counts over 300 frames and
-generating detailed performance reports.
+This script runs tracking performance tests with different object counts
+and plots the timing results for 1000 frames of tracking.
 """
 import numpy as np
 import sys
 import time
 from pathlib import Path
-from typing import List, Dict
+from typing import List, Dict, Tuple
 
 # Add the parent directory to path for importing swarmsort
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from swarmsort import SwarmSortTracker, SwarmSortConfig
 from swarmsort.data_classes import Detection
-from swarmsort.simulator import ObjectMotionSimulator, SimulationConfig, MotionType
-from swarmsort.benchmarking import (
-    TrackingBenchmark, ScalabilityBenchmark, BenchmarkResult, quick_benchmark
-)
+from swarmsort.simulator import ObjectMotionSimulator, SimulationConfig
 
 try:
     import matplotlib.pyplot as plt
     MATPLOTLIB_AVAILABLE = True
 except ImportError:
     MATPLOTLIB_AVAILABLE = False
+    print("Warning: matplotlib not available - plots will not be generated")
 
 
-def generate_scalability_detections(num_objects: int, num_frames: int) -> List[List[Detection]]:
-    """Generate detection sequences for scalability testing."""
-    # Create simulation config optimized for benchmarking
+def create_test_data(num_objects: int, num_frames: int = 1000) -> List[List[Detection]]:
+    """Create test detection sequences for benchmarking."""
+    # Simple simulation config
     sim_config = SimulationConfig(
-        world_width=1000,
-        world_height=800,
+        world_width=1920,
+        world_height=1080,
         detection_probability=0.95,
         false_positive_rate=0.01,
-        position_noise_std=1.5,
+        position_noise_std=1.0,
         use_embeddings=True,
-        random_seed=42  # For reproducible results
+        random_seed=42
     )
     
     sim = ObjectMotionSimulator(sim_config)
     
-    # Add objects with diverse motion patterns
-    np.random.seed(42)  # Reproducible object placement
-    
+    # Add random walk objects with very small step sizes for realistic motion
+    np.random.seed(42)
     for i in range(num_objects):
-        # Randomize motion type and parameters
-        motion_type = np.random.choice([
-            MotionType.LINEAR,
-            MotionType.CIRCULAR,
-            MotionType.RANDOM_WALK,
-            MotionType.FIGURE_EIGHT
-        ])
+        start_x = np.random.uniform(100, 1820)
+        start_y = np.random.uniform(100, 980)
+        step_size = np.random.uniform(0.5, 2.0)  # Small but visible movement
         
-        start_x = np.random.uniform(50, sim_config.world_width - 50)
-        start_y = np.random.uniform(50, sim_config.world_height - 50)
-        
-        if motion_type == MotionType.LINEAR:
-            velocity = np.random.uniform(-3, 3, 2)
-            obj = sim.create_linear_motion_object(
-                object_id=i+1,
-                start_pos=(start_x, start_y),
-                velocity=tuple(velocity),
-                class_id=i % 5
-            )
-        
-        elif motion_type == MotionType.CIRCULAR:
-            radius = np.random.uniform(30, 80)
-            angular_vel = np.random.uniform(-0.05, 0.05)
-            obj = sim.create_circular_motion_object(
-                object_id=i+1,
-                center=(start_x, start_y),
-                radius=radius,
-                angular_velocity=angular_vel,
-                class_id=i % 5
-            )
-        
-        elif motion_type == MotionType.RANDOM_WALK:
-            step_size = np.random.uniform(1, 4)
-            obj = sim.create_random_walk_object(
-                object_id=i+1,
-                start_pos=(start_x, start_y),
-                step_size=step_size,
-                class_id=i % 5
-            )
-        
-        elif motion_type == MotionType.FIGURE_EIGHT:
-            width = np.random.uniform(30, 60)
-            height = np.random.uniform(20, 40)
-            period = np.random.uniform(80, 120)
-            obj = sim.create_figure_eight_object(
-                object_id=i+1,
-                center=(start_x, start_y),
-                width=width,
-                height=height,
-                period=period,
-                class_id=i % 5
-            )
-        
+        obj = sim.create_random_walk_object(
+            object_id=i+1,
+            start_pos=(start_x, start_y),
+            step_size=step_size,
+            class_id=i % 5,
+            base_confidence=np.random.uniform(0.7, 0.95)
+        )
         sim.add_object(obj)
     
-    # Generate detection sequence
+    print(f"Generating {num_frames} frames with {num_objects} objects...")
     return sim.run_simulation(num_frames)
 
 
-def run_comprehensive_benchmark():
-    """Run comprehensive performance benchmark."""
-    print("SwarmSort Performance Benchmark")
-    print("=" * 60)
-    print(f"Test configuration: 300 frames with varying object counts")
-    print("=" * 60)
+def benchmark_tracking(detections_sequence: List[List[Detection]], 
+                      config: SwarmSortConfig) -> Tuple[float, float, int]:
+    """Benchmark tracking performance and return timing results."""
+    tracker = SwarmSortTracker(config)
+    
+    # Warm up
+    for i in range(min(10, len(detections_sequence))):
+        tracker.update(detections_sequence[i])
+    
+    tracker.reset()
+    
+    # Actual benchmark
+    start_time = time.perf_counter()
+    
+    for frame_detections in detections_sequence:
+        tracker.update(frame_detections)
+    
+    end_time = time.perf_counter()
+    
+    total_time = end_time - start_time
+    avg_time_per_frame = (total_time / len(detections_sequence)) * 1000  # ms
+    
+    # Get final stats
+    stats = tracker.get_statistics()
+    total_tracks = stats.get('active_tracks', 0)
+    
+    return total_time, avg_time_per_frame, total_tracks
+
+
+def run_performance_benchmark():
+    """Run the main performance benchmark."""
+    print("SwarmSort Simple Performance Benchmark")
+    print("=" * 50)
+    
+    # Test parameters
+    object_counts = [50, 100, 200, 300, 500]
+    num_frames = 1000
     
     # Test configurations
-    object_counts = [3, 5, 10, 15, 20, 25, 30]
-    num_frames = 300
-    
-    # Create scalability benchmark
-    scalability = ScalabilityBenchmark()
-    
-    # Test different tracker configurations
     configs = {
-        "basic": SwarmSortConfig(
-            max_distance=50.0,
+        "Basic (No Embeddings)": SwarmSortConfig(
+            max_distance=80.0,
             use_embeddings=False
         ),
-        "embeddings": SwarmSortConfig(
-            max_distance=50.0,
+        "With Embeddings": SwarmSortConfig(
+            max_distance=80.0,
             use_embeddings=True,
-            embedding_weight=0.3
-        ),
-        "high_performance": SwarmSortConfig(
-            max_distance=60.0,
-            use_embeddings=True,
-            embedding_weight=0.4,
-            reid_enabled=False  # Disable ReID for performance
+            embedding_weight=0.5
         )
     }
     
-    all_results = {}
+    results = {}
     
     for config_name, config in configs.items():
         print(f"\nTesting configuration: {config_name}")
-        print("-" * 40)
+        print("-" * 30)
         
-        results = scalability.run_object_count_scalability(
-            detection_generator=generate_scalability_detections,
-            object_counts=object_counts,
-            num_frames=num_frames,
-            config=config
-        )
+        results[config_name] = {
+            'object_counts': [],
+            'total_times': [],
+            'avg_times_per_frame': [],
+            'total_tracks': []
+        }
         
-        all_results[config_name] = results
+        for num_objects in object_counts:
+            print(f"  Testing with {num_objects} objects...")
+            
+            # Generate test data
+            detections_sequence = create_test_data(num_objects, num_frames)
+            
+            # Run benchmark
+            total_time, avg_time_per_frame, total_tracks = benchmark_tracking(
+                detections_sequence, config
+            )
+            
+            # Store results
+            results[config_name]['object_counts'].append(num_objects)
+            results[config_name]['total_times'].append(total_time)
+            results[config_name]['avg_times_per_frame'].append(avg_time_per_frame)
+            results[config_name]['total_tracks'].append(total_tracks)
+            
+            # Print results
+            fps = 1000.0 / avg_time_per_frame
+            print(f"    Total time: {total_time:.2f}s")
+            print(f"    Avg time per frame: {avg_time_per_frame:.2f}ms")
+            print(f"    FPS: {fps:.1f}")
+            print(f"    Total tracks created: {total_tracks}")
     
-    # Generate reports
-    print("\n" + "=" * 60)
-    print("PERFORMANCE SUMMARY")
-    print("=" * 60)
-    
-    # Print summary table
-    print(f"{'Config':<15} {'Objects':<8} {'Avg FPS':<10} {'Avg Time(ms)':<12} {'Peak Mem(MB)':<12}")
-    print("-" * 65)
-    
-    for config_name, results in all_results.items():
-        for test_name, result in results.items():
-            objects = test_name.split('_')[0]
-            print(f"{config_name:<15} {objects:<8} {result.average_fps:<10.1f} "
-                  f"{result.avg_processing_time_ms:<12.2f} {result.peak_memory_mb:<12.1f}")
-    
-    # Save detailed results
-    timestamp = time.strftime("%Y%m%d_%H%M%S")
-    
-    for config_name, results in all_results.items():
-        for test_name, result in results.items():
-            filename = f"benchmark_{config_name}_{test_name}_{timestamp}.json"
-            benchmark = TrackingBenchmark()
-            benchmark.save_results(result, filename)
-    
-    # Generate performance report
-    scalability.results = {f"{config_name}_{test_name}": result 
-                          for config_name, results in all_results.items() 
-                          for test_name, result in results.items()}
-    
-    report_filename = f"performance_report_{timestamp}.json"
-    scalability.generate_performance_report(report_filename)
-    
-    # Create performance plots if matplotlib is available
-    if MATPLOTLIB_AVAILABLE:
-        create_performance_plots(all_results, timestamp)
-    
-    return all_results
+    return results
 
 
-def create_performance_plots(results: Dict, timestamp: str):
-    """Create performance visualization plots."""
-    print(f"\nCreating performance plots...")
+def create_performance_plots(results: Dict, output_dir: Path):
+    """Create performance plots."""
+    if not MATPLOTLIB_AVAILABLE:
+        print("Matplotlib not available - skipping plots")
+        return
     
-    # Extract data for plotting
-    configs = list(results.keys())
-    object_counts = []
-    fps_data = {config: [] for config in configs}
-    memory_data = {config: [] for config in configs}
-    time_data = {config: [] for config in configs}
+    print(f"\nCreating performance plots in {output_dir}...")
     
-    # Get object counts from first config
-    first_config = list(results.values())[0]
-    object_counts = sorted([int(k.split('_')[0]) for k in first_config.keys()])
+    # Create output directory
+    output_dir.mkdir(exist_ok=True)
     
-    # Extract performance data
-    for config_name, config_results in results.items():
-        for obj_count in object_counts:
-            test_key = f"{obj_count}_objects"
-            if test_key in config_results:
-                result = config_results[test_key]
-                fps_data[config_name].append(result.average_fps)
-                memory_data[config_name].append(result.peak_memory_mb)
-                time_data[config_name].append(result.avg_processing_time_ms)
-    
-    # Create plots
+    # Set up the plot style
+    plt.style.use('default')
     fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(15, 10))
+    fig.suptitle('SwarmSort Performance Benchmark (1000 frames)', fontsize=16)
     
-    # FPS vs Object Count
-    for config_name in configs:
-        ax1.plot(object_counts, fps_data[config_name], marker='o', label=config_name)
+    colors = ['#2E86C1', '#E74C3C']  # Blue and Red
+    
+    # Plot 1: Average Time per Frame
+    for i, (config_name, data) in enumerate(results.items()):
+        ax1.plot(data['object_counts'], data['avg_times_per_frame'], 
+                marker='o', linewidth=2, markersize=6, 
+                label=config_name, color=colors[i])
+    
     ax1.set_xlabel('Number of Objects')
-    ax1.set_ylabel('Average FPS')
-    ax1.set_title('Tracking Performance (FPS) vs Object Count')
+    ax1.set_ylabel('Average Time per Frame (ms)')
+    ax1.set_title('Processing Time vs Object Count')
     ax1.legend()
     ax1.grid(True, alpha=0.3)
+    ax1.set_yscale('log')
     
-    # Processing Time vs Object Count
-    for config_name in configs:
-        ax2.plot(object_counts, time_data[config_name], marker='s', label=config_name)
+    # Plot 2: Frames Per Second (FPS)
+    for i, (config_name, data) in enumerate(results.items()):
+        fps_values = [1000.0 / t for t in data['avg_times_per_frame']]
+        ax2.plot(data['object_counts'], fps_values, 
+                marker='s', linewidth=2, markersize=6,
+                label=config_name, color=colors[i])
+    
     ax2.set_xlabel('Number of Objects')
-    ax2.set_ylabel('Average Processing Time (ms)')
-    ax2.set_title('Processing Time vs Object Count')
+    ax2.set_ylabel('Frames Per Second (FPS)')
+    ax2.set_title('Tracking Speed vs Object Count')
     ax2.legend()
     ax2.grid(True, alpha=0.3)
+    ax2.set_yscale('log')
     
-    # Memory Usage vs Object Count
-    for config_name in configs:
-        ax3.plot(object_counts, memory_data[config_name], marker='^', label=config_name)
+    # Plot 3: Total Processing Time
+    for i, (config_name, data) in enumerate(results.items()):
+        ax3.plot(data['object_counts'], data['total_times'], 
+                marker='^', linewidth=2, markersize=6,
+                label=config_name, color=colors[i])
+    
     ax3.set_xlabel('Number of Objects')
-    ax3.set_ylabel('Peak Memory Usage (MB)')
-    ax3.set_title('Memory Usage vs Object Count')
+    ax3.set_ylabel('Total Time (seconds)')
+    ax3.set_title('Total Processing Time (1000 frames)')
     ax3.legend()
     ax3.grid(True, alpha=0.3)
     
-    # Efficiency Plot (FPS per MB)
-    for config_name in configs:
-        efficiency = [fps/mem if mem > 0 else 0 
-                     for fps, mem in zip(fps_data[config_name], memory_data[config_name])]
-        ax4.plot(object_counts, efficiency, marker='d', label=config_name)
-    ax4.set_xlabel('Number of Objects')
-    ax4.set_ylabel('Efficiency (FPS per MB)')
-    ax4.set_title('Memory Efficiency')
-    ax4.legend()
-    ax4.grid(True, alpha=0.3)
+    # Plot 4: Performance Ratio (Embeddings vs Basic)
+    if len(results) == 2:
+        config_names = list(results.keys())
+        basic_times = results[config_names[0]]['avg_times_per_frame']
+        embedding_times = results[config_names[1]]['avg_times_per_frame']
+        
+        ratios = [e/b for e, b in zip(embedding_times, basic_times)]
+        object_counts = results[config_names[0]]['object_counts']
+        
+        ax4.plot(object_counts, ratios, 
+                marker='d', linewidth=2, markersize=6,
+                color='#8E44AD', label='Embedding Overhead')
+        ax4.axhline(y=1.0, color='gray', linestyle='--', alpha=0.7, label='No Overhead')
+        
+        ax4.set_xlabel('Number of Objects')
+        ax4.set_ylabel('Time Ratio (Embeddings / Basic)')
+        ax4.set_title('Embedding Processing Overhead')
+        ax4.legend()
+        ax4.grid(True, alpha=0.3)
     
     plt.tight_layout()
     
-    # Save plots
-    plot_filename = f"performance_plots_{timestamp}.png"
-    plt.savefig(plot_filename, dpi=300, bbox_inches='tight')
-    print(f"Performance plots saved as {plot_filename}")
+    # Save plot
+    plot_path = output_dir / "performance_benchmark.png"
+    plt.savefig(plot_path, dpi=300, bbox_inches='tight')
+    print(f"Performance plot saved as {plot_path}")
     
-    # Show plots
+    # Show plot
     plt.show()
 
 
-def run_single_config_benchmark():
-    """Run a detailed benchmark for a single configuration."""
-    print("\nRunning detailed single-configuration benchmark...")
+def save_results_summary(results: Dict, output_dir: Path):
+    """Save a text summary of the results."""
+    output_dir.mkdir(exist_ok=True)
+    summary_path = output_dir / "benchmark_summary.txt"
     
-    # Generate detection sequence
-    num_objects = 15
-    num_frames = 300
-    
-    print(f"Generating {num_frames} frames with {num_objects} objects...")
-    detection_sequence = generate_scalability_detections(num_objects, num_frames)
-    
-    # Create optimized config
-    config = SwarmSortConfig(
-        max_distance=60.0,
-        use_embeddings=True,
-        embedding_weight=0.4,
-        min_consecutive_detections=3
-    )
-    
-    # Run detailed benchmark
-    tracker = SwarmSortTracker(config)
-    benchmark = TrackingBenchmark(tracker, enable_detailed_profiling=True)
-    
-    print("Running benchmark with detailed profiling...")
-    
-    def progress_callback(frame, total):
-        if frame % 50 == 0:
-            print(f"  Processing frame {frame}/{total}")
-    
-    result = benchmark.benchmark_sequence(detection_sequence, progress_callback)
-    
-    # Print detailed results
-    print(f"\nDetailed Benchmark Results:")
-    print(f"Total frames: {result.total_frames}")
-    print(f"Total time: {result.total_time_ms/1000:.2f} seconds")
-    print(f"Average FPS: {result.average_fps:.1f}")
-    print(f"Processing time - Mean: {result.avg_processing_time_ms:.2f}ms, "
-          f"Std: {result.std_processing_time_ms:.2f}ms")
-    print(f"Processing time - Min: {result.min_processing_time_ms:.2f}ms, "
-          f"Max: {result.max_processing_time_ms:.2f}ms")
-    print(f"Memory - Average: {result.avg_memory_mb:.1f}MB, "
-          f"Peak: {result.peak_memory_mb:.1f}MB")
-    print(f"Tracks - Created: {result.total_tracks_created}, "
-          f"Average active: {result.avg_active_tracks:.1f}")
-    
-    # Save detailed results
-    timestamp = time.strftime("%Y%m%d_%H%M%S")
-    filename = f"detailed_benchmark_{timestamp}.json"
-    benchmark.save_results(result, filename)
-    
-    return result
-
-
-def run_memory_stress_test():
-    """Run a memory stress test with many objects."""
-    print("\nRunning memory stress test...")
-    
-    object_counts = [50, 75, 100]
-    num_frames = 100  # Shorter sequence for stress test
-    
-    for num_objects in object_counts:
-        print(f"\nStress testing with {num_objects} objects...")
+    with open(summary_path, 'w') as f:
+        f.write("SwarmSort Performance Benchmark Summary\n")
+        f.write("=" * 40 + "\n")
+        f.write(f"Test: 1000 frames with varying object counts\n")
+        f.write(f"Object counts tested: {results[list(results.keys())[0]]['object_counts']}\n\n")
         
-        try:
-            # Generate detections
-            detection_sequence = generate_scalability_detections(num_objects, num_frames)
+        for config_name, data in results.items():
+            f.write(f"\n{config_name}:\n")
+            f.write("-" * len(config_name) + "-\n")
             
-            # Create memory-optimized config
-            config = SwarmSortConfig(
-                max_distance=50.0,
-                use_embeddings=False,  # Disable to save memory
-                max_lost_time=30,  # Shorter retention
-                reid_enabled=False
-            )
-            
-            # Run benchmark
-            result = quick_benchmark(detection_sequence, config, verbose=True)
-            
-            print(f"Result: {result.average_fps:.1f} FPS, "
-                  f"{result.peak_memory_mb:.1f}MB peak memory")
-        
-        except MemoryError:
-            print(f"Memory error with {num_objects} objects - reached system limits")
-            break
-        except Exception as e:
-            print(f"Error with {num_objects} objects: {e}")
+            for i, num_objects in enumerate(data['object_counts']):
+                fps = 1000.0 / data['avg_times_per_frame'][i]
+                f.write(f"  {num_objects:3d} objects: ")
+                f.write(f"{data['avg_times_per_frame'][i]:6.2f}ms/frame, ")
+                f.write(f"{fps:6.1f} FPS, ")
+                f.write(f"{data['total_tracks'][i]:3d} tracks\n")
+    
+    print(f"Results summary saved as {summary_path}")
 
 
 def main():
-    """Run all benchmarks."""
-    print("SwarmSort Performance Benchmark Suite")
-    print("=" * 50)
-    
-    # Check what's available
-    print("Available features:")
-    print(f"- Matplotlib: {'Yes' if MATPLOTLIB_AVAILABLE else 'No'}")
-    print()
-    
+    """Run the performance benchmark."""
     try:
-        # Run comprehensive benchmark
-        all_results = run_comprehensive_benchmark()
+        # Create results directory
+        results_dir = Path(__file__).parent / "results"
+        results_dir.mkdir(exist_ok=True)
         
-        # Run detailed single config benchmark
-        detailed_result = run_single_config_benchmark()
+        # Run benchmark
+        results = run_performance_benchmark()
         
-        # Optional memory stress test
-        response = input("\nRun memory stress test? (y/n): ").lower().strip()
-        if response == 'y':
-            run_memory_stress_test()
+        # Create plots
+        create_performance_plots(results, results_dir)
+        
+        # Save summary
+        save_results_summary(results, results_dir)
         
         print("\n" + "=" * 50)
-        print("Benchmark suite completed!")
-        print("Check the current directory for JSON reports and plots.")
+        print("Performance benchmark completed!")
+        print("Check examples/results/ for plots and summary")
         
     except KeyboardInterrupt:
         print("\nBenchmark interrupted by user.")

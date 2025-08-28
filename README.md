@@ -1,4 +1,7 @@
-# SwarmSort Standalone
+
+![logo](https://raw.githubusercontent.com/cfosseprez/swarmsort/releases/download/0.0.0/logo-swarmsort-horizontal.jpg)
+
+# SwarmSort
 
 A high-performance standalone multi-object tracking library with GPU-accelerated embeddings. SwarmSort combines advanced computer vision techniques with deep learning embeddings for real-time tracking applications.
 
@@ -285,7 +288,7 @@ poetry run pytest tests/ --benchmark-only
 
 ## License
 
-MIT License - see LICENSE file for details.
+GPL 3.0 or later - see LICENSE file for details.
 
 ## Contributing
 
@@ -304,6 +307,6 @@ If you use SwarmSort in your research, please cite:
     title={SwarmSort: High-Performance Multi-Object Tracking with Deep Learning},
     author={Charles Fosseprez},
     year={2024},
-    url={https://github.com/your-org/swarmsort}
+    url={https://github.com/cfosseprez/swarmsort}
 }
 ```

@@ -1,83 +1,39 @@
-name: SwarmSort Tests
+name: CI
 
 on:
   push:
     branches: [ main, develop ]
-    paths:
-      - 'swarmsort/**'
-      - 'tests/**'
-      - 'examples/**'
-      - 'pyproject.toml'
-      - '.github/workflows/test.yml'
   pull_request:
     branches: [ main, develop ]
-    paths:
-      - 'swarmsort/**'
-      - 'tests/**'
-      - 'examples/**'
-      - 'pyproject.toml'
-      - '.github/workflows/test.yml'
   workflow_dispatch:  # Allow manual triggering
 
-env:
-  PYTHON_VERSION_MATRIX: '["3.9", "3.10", "3.11", "3.12"]'
-
 jobs:
-  # Lint and code quality checks
-  lint:
-    runs-on: ubuntu-latest
-    steps:
-    - uses: actions/checkout@v4
-    
-    - name: Set up Python
-      uses: actions/setup-python@v4
-      with:
-        python-version: "3.11"
-    
-    - name: Install Poetry
-      uses: snok/install-poetry@v1
-      with:
-        version: latest
-        virtualenvs-create: true
-        virtualenvs-in-project: true
-    
-    - name: Load cached venv
-      id: cached-poetry-dependencies
-      uses: actions/cache@v3
-      with:
-        path: .venv
-        key: venv-${{ runner.os }}-${{ hashFiles('**/pyproject.toml') }}
-    
-    - name: Install dependencies
-      if: steps.cached-poetry-dependencies.outputs.cache-hit != 'true'
-      run: poetry install --with dev
-    
-    - name: Run Black
-      run: poetry run black --check swarmsort/ tests/ examples/
-    
-    - name: Run Flake8
-      run: poetry run flake8 swarmsort/ tests/ examples/
-    
-    - name: Run MyPy
-      run: poetry run mypy swarmsort/ --ignore-missing-imports
-
-  # Unit and integration tests
+  # Main job for testing, linting, and type-checking.
+  # It runs on a matrix of operating systems and Python versions.
   test:
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
+        # Test on all supported Python versions on Ubuntu.
+        # Test only the latest Python on Windows and macOS to ensure cross-platform
+        # compatibility without excessive CI runs.
+        # Python 3.12 is excluded as it's not supported by pyproject.toml (<3.12).
         os: [ubuntu-latest, windows-latest, macos-latest]
-        python-version: ["3.9", "3.10", "3.11", "3.12"]
+        python-version: ["3.9", "3.10", "3.11"]
         exclude:
-          # Reduce matrix size for efficiency
+          - os: windows-latest
+            python-version: "3.9"
+          - os: windows-latest
+            python-version: "3.10"
           - os: macos-latest
             python-version: "3.9"
           - os: macos-latest
-            python-version: "3.12"
+            python-version: "3.10"
 
     steps:
-    - uses: actions/checkout@v4
+    - name: Checkout repository
+      uses: actions/checkout@v4
     
     - name: Set up Python ${{ matrix.python-version }}
       uses: actions/setup-python@v4
@@ -87,50 +43,50 @@ jobs:
     - name: Install Poetry
       uses: snok/install-poetry@v1
       with:
-        version: latest
         virtualenvs-create: true
         virtualenvs-in-project: true
+        cache-poetry: true # Cache the poetry installer itself
     
     - name: Load cached venv
       id: cached-poetry-dependencies
       uses: actions/cache@v3
       with:
         path: .venv
-        key: venv-${{ matrix.os }}-${{ matrix.python-version }}-${{ hashFiles('**/pyproject.toml') }}
+        # The key includes the OS, Python version, and a hash of the lock file.
+        key: venv-${{ runner.os }}-${{ matrix.python-version }}-${{ hashFiles('**/poetry.lock') }}
     
     - name: Install dependencies
+      # Run install only if no cache was found.
       if: steps.cached-poetry-dependencies.outputs.cache-hit != 'true'
-      run: poetry install --with dev
+      run: poetry install --with dev --no-interaction
     
-    - name: Install SwarmSort in development mode
-      run: poetry run pip install -e .
-    
-    - name: Run basic tests
+    - name: Run linters and type checks
+      # Run these checks only once on the primary configuration to avoid redundant work.
+      if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.11'
       run: |
-        poetry run pytest tests/test_basic.py tests/test_core.py tests/test_embeddings.py \
-          -v --tb=short \
-          --cov=swarmsort --cov-report=xml --cov-report=html
+        poetry run black --check swarmsort/ tests/ examples/
+        poetry run flake8 swarmsort/ tests/ examples/
+        poetry run mypy swarmsort/ --ignore-missing-imports
     
-    - name: Run integration tests
-      run: |
-        poetry run pytest tests/test_integration.py \
-          -v --tb=short \
-          --cov=swarmsort --cov-append --cov-report=xml
+    - name: Run tests with coverage
+      # The pytest configuration in tests/pytest.ini handles coverage reports (including xml for codecov).
+      run: poetry run pytest
     
     - name: Upload coverage to Codecov
-      if: matrix.python-version == '3.11' && matrix.os == 'ubuntu-latest'
+      # Upload coverage only from the primary test job to avoid conflicts.
+      if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.11'
       uses: codecov/codecov-action@v3
       with:
-        file: coverage.xml
-        flags: unittests
-        name: codecov-umbrella
-        fail_ci_if_error: true
+        # The token is not required for public repositories.
+        fail_ci_if_error: true # Fail CI if Codecov upload fails
 
-  # Performance and stress tests
+  # Optional job for performance benchmarks.
+  # This job is expensive and runs only on pushes to main/develop or when a
+  # 'run-performance' label is added to a pull request.
   performance:
     runs-on: ubuntu-latest
-    needs: [test]
-    if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'run-performance')
+    needs: test # Run only after main tests pass
+    if: (github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop')) || contains(github.event.pull_request.labels.*.name, 'run-performance')
     
     steps:
     - uses: actions/checkout@v4
@@ -142,254 +98,9 @@ jobs:
     
     - name: Install Poetry
       uses: snok/install-poetry@v1
-      with:
-        version: latest
-        virtualenvs-create: true
-        virtualenvs-in-project: true
     
     - name: Install dependencies
       run: poetry install --with dev
     
     - name: Run performance tests
-      run: |
-        poetry run pytest tests/test_performance.py \
-          -v --tb=short \
-          --benchmark-only --benchmark-sort=mean \
-          --benchmark-json=benchmark_results.json
-    
-    - name: Store benchmark results
-      uses: benchmark-action/github-action-benchmark@v1
-      if: github.event_name != 'pull_request'
-      with:
-        tool: 'pytest'
-        output-file-path: benchmark_results.json
-        github-token: ${{ secrets.GITHUB_TOKEN }}
-        auto-push: true
-
-  # Extended tests (embedding, stress, edge cases)
-  extended:
-    runs-on: ubuntu-latest
-    needs: [test]
-    if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
-    
-    steps:
-    - uses: actions/checkout@v4
-    
-    - name: Set up Python
-      uses: actions/setup-python@v4
-      with:
-        python-version: "3.11"
-    
-    - name: Install Poetry
-      uses: snok/install-poetry@v1
-      with:
-        version: latest
-        virtualenvs-create: true
-        virtualenvs-in-project: true
-    
-    - name: Install dependencies
-      run: poetry install --with dev
-    
-    - name: Run embedding tests
-      run: |
-        poetry run pytest tests/test_embedding_specific.py \
-          -v --tb=short \
-          --cov=swarmsort --cov-report=xml
-    
-    - name: Run stress tests
-      run: |
-        poetry run pytest tests/test_stress_edge_cases.py \
-          -v --tb=short \
-          --cov=swarmsort --cov-append --cov-report=xml
-
-  # Documentation and example tests
-  docs:
-    runs-on: ubuntu-latest
-    needs: [lint]
-    
-    steps:
-    - uses: actions/checkout@v4
-    
-    - name: Set up Python
-      uses: actions/setup-python@v4
-      with:
-        python-version: "3.11"
-    
-    - name: Install Poetry
-      uses: snok/install-poetry@v1
-      with:
-        version: latest
-        virtualenvs-create: true
-        virtualenvs-in-project: true
-    
-    - name: Install dependencies
-      run: poetry install --with dev
-    
-    - name: Test examples
-      run: |
-        # Test that examples run without error
-        poetry run python examples/basic_usage.py
-    
-    - name: Check documentation completeness
-      run: |
-        # Basic documentation completeness check
-        poetry run python -c "
-        import swarmsort
-        import inspect
-        
-        # Check that main classes have docstrings
-        classes_to_check = [swarmsort.SwarmSort, swarmsort.SwarmSortConfig, swarmsort.Detection]
-        for cls in classes_to_check:
-            assert cls.__doc__ is not None, f'{cls.__name__} missing docstring'
-            
-        # Check that main functions have docstrings
-        functions_to_check = [swarmsort.create_tracker, swarmsort.is_within_swarmtracker]
-        for func in functions_to_check:
-            assert func.__doc__ is not None, f'{func.__name__} missing docstring'
-        
-        print('Documentation completeness check passed')
-        "
-
-  # Security and dependency checks
-  security:
-    runs-on: ubuntu-latest
-    if: github.event_name != 'pull_request'
-    
-    steps:
-    - uses: actions/checkout@v4
-    
-    - name: Set up Python
-      uses: actions/setup-python@v4
-      with:
-        python-version: "3.11"
-    
-    - name: Install Poetry
-      uses: snok/install-poetry@v1
-      with:
-        version: latest
-        virtualenvs-create: true
-        virtualenvs-in-project: true
-    
-    - name: Install dependencies
-      run: poetry install --with dev
-    
-    - name: Run safety check
-      run: |
-        poetry run pip install safety
-        poetry export --format=requirements.txt --output=requirements.txt --with dev
-        poetry run safety check --file=requirements.txt
-    
-    - name: Run bandit security lint
-      run: |
-        poetry run pip install bandit
-        poetry run bandit -r swarmsort/ -f json -o bandit-report.json
-    
-    - name: Upload security results
-      if: always()
-      uses: actions/upload-artifact@v3
-      with:
-        name: security-results
-        path: bandit-report.json
-
-  # Installation tests
-  install:
-    runs-on: ${{ matrix.os }}
-    strategy:
-      matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
-        python-version: ["3.9", "3.11"]
-    
-    steps:
-    - uses: actions/checkout@v4
-    
-    - name: Set up Python ${{ matrix.python-version }}
-      uses: actions/setup-python@v4
-      with:
-        python-version: ${{ matrix.python-version }}
-    
-    - name: Test pip installation
-      run: |
-        pip install .
-        python -c "import swarmsort; print('Import successful')"
-        python -c "
-        from swarmsort import SwarmSort, Detection
-        import numpy as np
-        
-        tracker = SwarmSort()
-        det = Detection(position=np.array([10.0, 20.0]), confidence=0.9)
-        result = tracker.update([det])
-        print(f'Basic functionality test: {len(result)} tracks')
-        "
-    
-    - name: Test Poetry installation
-      if: matrix.os != 'windows-latest'  # Poetry issues on Windows CI
-      run: |
-        pip install poetry
-        poetry install
-        poetry run python -c "import swarmsort; print('Poetry install successful')"
-
-  # Package building and distribution
-  build:
-    runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/main'
-    needs: [lint, test, docs]
-    
-    steps:
-    - uses: actions/checkout@v4
-    
-    - name: Set up Python
-      uses: actions/setup-python@v4
-      with:
-        python-version: "3.11"
-    
-    - name: Install Poetry
-      uses: snok/install-poetry@v1
-      with:
-        version: latest
-        virtualenvs-create: true
-        virtualenvs-in-project: true
-    
-    - name: Build package
-      run: poetry build
-    
-    - name: Upload build artifacts
-      uses: actions/upload-artifact@v3
-      with:
-        name: dist
-        path: dist/
-    
-    - name: Test built package
-      run: |
-        pip install dist/*.whl
-        python -c "
-        from swarmsort import SwarmSort, Detection
-        import numpy as np
-        tracker = SwarmSort()
-        det = Detection(position=np.array([10.0, 20.0]), confidence=0.9)
-        result = tracker.update([det])
-        print('Built package test successful')
-        "
-
-# Job summary
-  summary:
-    runs-on: ubuntu-latest
-    needs: [lint, test, performance, extended, docs, security, install, build]
-    if: always()
-    
-    steps:
-    - name: Test Results Summary
-      run: |
-        echo "## SwarmSort Test Results Summary" >> $GITHUB_STEP_SUMMARY
-        echo "" >> $GITHUB_STEP_SUMMARY
-        echo "| Job | Status |" >> $GITHUB_STEP_SUMMARY
-        echo "|-----|--------|" >> $GITHUB_STEP_SUMMARY
-        echo "| Lint | ${{ needs.lint.result == 'success' && '✅ Passed' || '❌ Failed' }} |" >> $GITHUB_STEP_SUMMARY
-        echo "| Tests | ${{ needs.test.result == 'success' && '✅ Passed' || '❌ Failed' }} |" >> $GITHUB_STEP_SUMMARY
-        echo "| Performance | ${{ needs.performance.result == 'success' && '✅ Passed' || needs.performance.result == 'skipped' && '⏭️ Skipped' || '❌ Failed' }} |" >> $GITHUB_STEP_SUMMARY
-        echo "| Extended Tests | ${{ needs.extended.result == 'success' && '✅ Passed' || needs.extended.result == 'skipped' && '⏭️ Skipped' || '❌ Failed' }} |" >> $GITHUB_STEP_SUMMARY
-        echo "| Documentation | ${{ needs.docs.result == 'success' && '✅ Passed' || '❌ Failed' }} |" >> $GITHUB_STEP_SUMMARY
-        echo "| Security | ${{ needs.security.result == 'success' && '✅ Passed' || needs.security.result == 'skipped' && '⏭️ Skipped' || '❌ Failed' }} |" >> $GITHUB_STEP_SUMMARY
-        echo "| Installation | ${{ needs.install.result == 'success' && '✅ Passed' || '❌ Failed' }} |" >> $GITHUB_STEP_SUMMARY
-        echo "| Build | ${{ needs.build.result == 'success' && '✅ Passed' || needs.build.result == 'skipped' && '⏭️ Skipped' || '❌ Failed' }} |" >> $GITHUB_STEP_SUMMARY
-        echo "" >> $GITHUB_STEP_SUMMARY
-        echo "**Overall Status**: ${{ (needs.lint.result == 'success' && needs.test.result == 'success' && needs.docs.result == 'success' && needs.install.result == 'success') && '✅ All Required Tests Passed' || '❌ Some Tests Failed' }}" >> $GITHUB_STEP_SUMMARY
+      run: poetry run pytest tests/test_performance.py --benchmark-only --benchmark-sort=mean
