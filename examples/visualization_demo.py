@@ -91,10 +91,12 @@ def run_visualization_demo(num_objects: int = 50, realtime: bool = True):
     print("Creating random walk simulation...")
     sim = create_random_walk_simulation(num_objects)
 
+    print("WARNING-BROKEN NON PROBABILISTIC")
     # Create tracker with embeddings
     config = SwarmSortConfig(
         max_distance=100,
         use_embeddings=True,
+        use_probabilistic_costs=False,
         embedding_weight=1,
         min_consecutive_detections=3,
         debug_timings=True,

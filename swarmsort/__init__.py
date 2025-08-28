@@ -86,6 +86,15 @@ try:
 except ImportError:
     INTEGRATION_AVAILABLE = False
 
+# SwarmTracker Pipeline Integration
+from .swarmtracker_adapter import (
+    RawTrackerSwarmSORT,
+    create_swarmsort_tracker,
+    TrackingResult,
+    create_tracked_object_fast,
+    FastMultiHypothesisTracker
+)
+
 # Visualization and simulation tools (optional)
 try:
     from .drawing_utils import (

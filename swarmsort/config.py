@@ -64,7 +64,7 @@ class SwarmSortConfig(BaseConfig):
     
     # Embedding parameters
     use_embeddings: bool = True  # Whether to use embedding features
-    embedding_weight: float = 0.3  # Weight for embedding similarity in cost function
+    embedding_weight: float = 1  # Weight for embedding similarity in cost function
     max_embeddings_per_track: int = 15  # Maximum embeddings stored per track
     embedding_matching_method: Literal['average', 'weighted_average', 'best_match'] = 'weighted_average'
     
@@ -78,12 +78,12 @@ class SwarmSortConfig(BaseConfig):
     reid_max_frames: int = 10  # Maximum frames to keep lost tracks for ReID
     
     # Track initialization parameters
-    min_consecutive_detections: int = 3  # Minimum consecutive detections to create track
-    max_detection_gap: int = 2  # Maximum gap between detections for same pending track
-    pending_detection_distance: float = 50.0  # Distance threshold for pending detection matching
+    min_consecutive_detections: int = 5  # Minimum consecutive detections to create track
+    max_detection_gap: int = 3  # Maximum gap between detections for same pending track
+    pending_detection_distance: float = 80.0  # Distance threshold for pending detection matching
     
     # Duplicate detection removal
-    duplicate_detection_threshold: float = 25.0  # Distance threshold for duplicate removal
+    duplicate_detection_threshold: float = 10.0  # Distance threshold for duplicate removal
     
     # Embedding distance scaling
     embedding_scaling_method: str = 'min_robustmax'  # Method for scaling embedding distances

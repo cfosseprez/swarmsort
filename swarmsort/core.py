@@ -516,7 +516,7 @@ class FastTrackState:
     embedding_history: deque = field(default_factory=lambda: deque(maxlen=5))
     embedding_method: Literal['average', 'best_match', 'weighted_average'] = 'average'
 
-    # OPTIMIZATION: Cache for average embedding
+    # Cache for average embedding
     _cached_avg_embedding: Optional[np.ndarray] = None
     _cache_valid: bool = False
     
@@ -557,7 +557,7 @@ class FastTrackState:
             if norm > 0:
                 normalized_emb = embedding / norm
                 
-                # OPTIMIZATION: Only invalidate if embedding is significantly different
+                # Only invalidate if embedding is significantly different
                 should_invalidate = True
                 if (len(self.embedding_history) > 0 and 
                     self._cached_representative_embedding is not None):
@@ -770,7 +770,7 @@ class SwarmSortTracker:
         # Pre-compile Numba
         self._precompile_numba()
         
-        # OPTIMIZATION: Pre-allocate reusable arrays
+        # Pre-allocate reusable arrays
         self._reusable_det_embeddings = None
         self._reusable_track_embeddings = None
         self._reusable_cost_matrix = None
@@ -1114,7 +1114,7 @@ class SwarmSortTracker:
             max_dist_sq = (self.max_distance * 1.2) ** 2  # Slightly larger threshold, squared
             spatial_mask = spatial_distances_sq <= max_dist_sq
             
-            # SUPER OPTIMIZATION: Check if we have enough close pairs to justify embedding computation
+            # SUPER Check if we have enough close pairs to justify embedding computation
             close_pairs_ratio = np.sum(spatial_mask) / (n_dets * n_tracks)
             
             if close_pairs_ratio > 0.1:  # Only compute if >10% of pairs are spatially feasible
@@ -1167,7 +1167,7 @@ class SwarmSortTracker:
                 
                 track_embeddings = self._reusable_track_embeddings[:n_tracks]
 
-                # OPTIMIZED: Use faster distance computation
+                # Use faster distance computation
                 raw_distances_matrix = compute_embedding_distances_optimized(det_embeddings, track_embeddings)
             else:
                 # Skip embedding computation entirely - all pairs too far apart
@@ -1181,7 +1181,7 @@ class SwarmSortTracker:
 
             if stop: stop("embedding_computation")
             
-            # OPTIMIZATION: Only do debug output if explicitly requested (saves time)
+            # Only do debug output if explicitly requested (saves time)
             # if self.debug_embeddings and self.frame_count % 50 == 0:  # Less frequent
             #     logger.info(f"OPTIMIZED assignment: method={self.embedding_matching_method}")
             #     logger.info(f"Using cached representative embeddings")
@@ -1244,13 +1244,13 @@ class SwarmSortTracker:
         scaled_embedding_matrix = np.zeros((n_dets, n_tracks), dtype=np.float32)
 
         if use_embeddings:
-            # OPTIMIZED: Same as regular assignment - use cached representatives
+            # Same as regular assignment - use cached representatives
             det_embeddings = np.array([
                 np.asarray(det.embedding, dtype=np.float32) / np.linalg.norm(det.embedding)
                 for det in detections
             ], dtype=np.float32)
 
-            # OPTIMIZED: Get representative embeddings with caching (reuse array from regular assignment)
+            # Get representative embeddings with caching (reuse array from regular assignment)
             if (self._reusable_track_embeddings is None or 
                 self._reusable_track_embeddings.shape[0] < n_tracks or
                 n_tracks > self._max_tracks_seen):
@@ -1259,7 +1259,7 @@ class SwarmSortTracker:
                 self._max_tracks_seen = max(n_tracks, self._max_tracks_seen)
             
             for i, track in enumerate(tracks):
-                # SUPER OPTIMIZED: Only recompute if cache is invalid
+                # Only recompute if cache is invalid
                 if not track._representative_cache_valid:
                     repr_emb = track.get_representative_embedding_for_assignment(det_embeddings)
                     if repr_emb is not None:
@@ -1276,7 +1276,7 @@ class SwarmSortTracker:
             
             track_embeddings = self._reusable_track_embeddings[:n_tracks]
 
-            # OPTIMIZED: Use faster distance computation
+            # Use faster distance computation
             raw_distances_matrix = compute_embedding_distances_optimized(det_embeddings, track_embeddings)
 
             raw_distances_flat = raw_distances_matrix.flatten()
@@ -1399,7 +1399,7 @@ class SwarmSortTracker:
             
         tracks = list(self.tracks.values())
 
-        # OPTIMIZATION: Batch position and confidence extraction
+        # Batch position and confidence extraction
         positions = []
         embeddings = []
         bboxes = []
