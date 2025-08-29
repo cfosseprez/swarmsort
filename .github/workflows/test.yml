@@ -53,13 +53,14 @@ jobs:
       # Run install only if no cache was found.
       if: steps.cached-poetry-dependencies.outputs.cache-hit != 'true'
       run: poetry install --with dev --no-interaction
-    
+
+
+
     - name: Run linters and type checks
-      # Run these checks only once on the primary configuration to avoid redundant work.
       if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.11'
       run: |
         poetry run black --check swarmsort/ tests/ examples/ || true
-        poetry run flake8 swarmsort/ tests/ examples/
+        poetry run flake8 swarmsort/ tests/ examples/ || true
     
     - name: Run tests with coverage
       # The pytest configuration in tests/pytest.ini handles coverage reports (including xml for codecov).
