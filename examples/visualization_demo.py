@@ -93,8 +93,7 @@ def run_visualization_demo(num_objects: int = 50, realtime: bool = True):
     print("Creating random walk simulation...")
     sim = create_random_walk_simulation(num_objects)
 
-    print("WARNING-BROKEN NON PROBABILISTIC")
-    # Create tracker with embeddings
+    # Create tracker with embeddings (FIXED: Both ReID and assignment stability now work in both modes)
     config = SwarmSortConfig(
         max_distance=100,
         use_embeddings=True,
