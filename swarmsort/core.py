@@ -1403,7 +1403,7 @@ class SwarmSortTracker:
         return matches, unmatched_dets, unmatched_tracks
 
     def _fast_assignment_probabilistic(self, detections, timer=None, start=None, stop=None):
-        """FIXED probabilistic assignment with proper multi-embedding support"""
+        """probabilistic assignment with proper multi-embedding support"""
         n_dets = len(detections)
         n_tracks = len(self.tracks)
 
@@ -1654,7 +1654,7 @@ class SwarmSortTracker:
                 del self.tracks[track_id]
 
     def _attempt_reid(self, detections, unmatched_det_indices):
-        """FIXED ReID with proper multi-embedding support"""
+        """ReID with proper multi-embedding support"""
         reid_matches = []
 
         if not self.lost_tracks or not unmatched_det_indices:

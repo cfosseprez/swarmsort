@@ -30,3 +30,7 @@ Thumbs.db
 
 # Logs
 *.log
+
+# MOT test
+/MOT20/test
+/MOT20/train
