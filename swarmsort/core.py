@@ -812,7 +812,40 @@ class FastTrackState:
         self.misses += 1
         self.lost_frames += 1
 
+    def add_embedding_fast(self, embedding: np.ndarray, pre_normalized: bool = True):
+        """Fast embedding addition without expensive checks"""
+        if embedding is None:
+            return
 
+        if not pre_normalized:
+            norm = np.linalg.norm(embedding)
+            if norm > 0:
+                embedding = embedding / norm
+
+        # Only invalidate if deque is full
+        if len(self.embedding_history) == self.embedding_history.maxlen:
+            self._cache_valid = False
+            self._representative_cache_valid = False
+
+        self.embedding_history.append(embedding)
+        self.embedding_update_count += 1
+        self.avg_embedding = None  # Mark dirty for lazy evaluation
+
+    @property
+    def avg_embedding_lazy(self):
+        """Compute average embedding only when accessed"""
+        if self.avg_embedding is None and len(self.embedding_history) > 0:
+            if self.embedding_method == "average":
+                self.avg_embedding = np.mean(np.array(self.embedding_history), axis=0)
+            elif self.embedding_method == "weighted_average":
+                weights = np.exp(np.linspace(-1, 0, len(self.embedding_history)))
+                weights /= weights.sum()
+                self.avg_embedding = np.average(
+                    np.array(self.embedding_history), axis=0, weights=weights
+                )
+            else:
+                self.avg_embedding = self.embedding_history[-1]
+        return self.avg_embedding
 # ============================================================================
 # SWARM SORT TRACKER - PORT OF SWARMTRACKER IMPLEMENTATION
 # ============================================================================
@@ -989,6 +1022,14 @@ class SwarmSortTracker:
             start("debug_embeddings")
             self._debug_embeddings(valid_detections)
             stop("debug_embeddings")
+
+        # Pre-normalize all embeddings once at the start
+        for det in valid_detections:
+            if hasattr(det, 'embedding') and det.embedding is not None:
+                emb = np.asarray(det.embedding, dtype=np.float32)
+                norm = np.linalg.norm(emb)
+                if norm > 0:
+                    det.embedding = emb / norm  # Store normalized version
 
         start("predict_tracks")
         for track in self.tracks.values():
@@ -1243,7 +1284,7 @@ class SwarmSortTracker:
         self.next_id += 1
 
     def _fast_assignment(self, detections, timer=None, start=None, stop=None):
-        """OPTIMIZED assignment with cached representative embeddings (same logic, faster)"""
+        """OPTIMIZED assignment with spatial filtering"""
         n_dets = len(detections)
         n_tracks = len(self.tracks)
 
@@ -1259,10 +1300,19 @@ class SwarmSortTracker:
         track_last_positions = np.array([t.last_detection_pos for t in tracks], dtype=np.float32)
         track_kalman_positions = np.array([t.position for t in tracks], dtype=np.float32)
 
-        # Check embeddings
-        use_embeddings = all(
-            hasattr(det, "embedding") and det.embedding is not None for det in detections
-        ) and all(len(t.embedding_history) > 0 for t in tracks)
+        # Quick spatial pre-filter
+        spatial_distances = np.minimum(
+            np.sum((det_positions[:, None, :] - track_last_positions[None, :, :]) ** 2, axis=2),
+            np.sum((det_positions[:, None, :] - track_kalman_positions[None, :, :]) ** 2, axis=2)
+        )
+        spatial_mask = spatial_distances <= (self.max_distance ** 2)
+
+        # Check if we need embeddings
+        use_embeddings = (
+                any(spatial_mask.flatten()) and  # Only if there are possible matches
+                all(hasattr(det, "embedding") and det.embedding is not None for det in detections) and
+                all(len(t.embedding_history) > 0 for t in tracks)
+        )
 
         scaled_embedding_matrix = np.zeros((n_dets, n_tracks), dtype=np.float32)
 
@@ -1270,92 +1320,44 @@ class SwarmSortTracker:
             if start:
                 start("embedding_computation")
 
-            # EARLY SPATIAL FILTER: Only compute embeddings for spatially feasible pairs
-            # Use squared distances to avoid sqrt computation
-            spatial_distances_sq = np.sum(
-                (det_positions[:, None, :] - track_last_positions[None, :, :]) ** 2, axis=2
-            )
-            max_dist_sq = (self.max_distance * 1.2) ** 2  # Slightly larger threshold, squared
-            spatial_mask = spatial_distances_sq <= max_dist_sq
-            
-            # Always compute embeddings if they are available. A previous optimization
-            # here was too aggressive and disabled embeddings in sparse scenes,
-            # leading to mismatches that corrupt track state and break ReID.
+            # Only compute embeddings for spatially feasible pairs
+            feasible_pairs = np.where(spatial_mask)
 
-            # OPTIMIZED: Reuse embedding arrays when possible
-            try:
-                first_emb = detections[0].embedding
-                emb_dim = (
-                    len(first_emb) if hasattr(first_emb, "__len__") else first_emb.shape[0]
-                )
-            except:
-                emb_dim = 128  # fallback dimension
+            if len(feasible_pairs[0]) > 0:
+                # Get embeddings (reuse normalized ones from frame cache)
+                if self._frame_det_embeddings_valid != self.frame_count:
+                    # Normalize once per frame
+                    emb_dim = len(detections[0].embedding) if hasattr(detections[0].embedding, '__len__') else \
+                    detections[0].embedding.shape[0]
+                    if self._reusable_det_embeddings is None or self._reusable_det_embeddings.shape[0] < n_dets:
+                        self._reusable_det_embeddings = np.empty((n_dets, emb_dim), dtype=np.float32)
 
-            if (
-                self._reusable_det_embeddings is None
-                or self._reusable_det_embeddings.shape[0] < n_dets
-                or n_dets > self._max_dets_seen
-            ):
-                self._reusable_det_embeddings = np.empty(
-                    (max(n_dets, self._max_dets_seen + 10), emb_dim), dtype=np.float32
-                )
-                self._max_dets_seen = max(n_dets, self._max_dets_seen)
+                    for i, det in enumerate(detections):
+                        emb = np.asarray(det.embedding, dtype=np.float32)
+                        norm = np.linalg.norm(emb)
+                        self._reusable_det_embeddings[i] = emb / norm if norm > 0 else emb
+                    self._frame_det_embeddings_valid = self.frame_count
 
-            # OPTIMIZED: Normalize only once per frame, reuse across all assignment methods
-            if (
-                not hasattr(self, "_frame_det_embeddings_valid")
-                or self._frame_det_embeddings_valid != self.frame_count
-            ):
-                for i, det in enumerate(detections):
-                    emb = np.asarray(det.embedding, dtype=np.float32)
-                    norm = np.linalg.norm(emb)
-                    self._reusable_det_embeddings[i] = emb / norm if norm > 0 else emb
-                self._frame_det_embeddings_valid = self.frame_count
+                det_embeddings = self._reusable_det_embeddings[:n_dets]
 
-            det_embeddings = self._reusable_det_embeddings[:n_dets]
-
-            # OPTIMIZED: Get representative embeddings with caching
-            if (
-                self._reusable_track_embeddings is None
-                or self._reusable_track_embeddings.shape[0] < n_tracks
-                or n_tracks > self._max_tracks_seen
-            ):
-                emb_dim = (
-                    det_embeddings.shape[1] if det_embeddings.size > 0 else 128
-                )  # fallback
-                self._reusable_track_embeddings = np.empty(
-                    (max(n_tracks, self._max_tracks_seen + 10), emb_dim), dtype=np.float32
-                )
-                self._max_tracks_seen = max(n_tracks, self._max_tracks_seen)
-
-            # OPTIMIZED: Batch check cache validity
-            for i, track in enumerate(tracks):
-                if not track._representative_cache_valid:
-                    repr_emb = track.get_representative_embedding_for_assignment(det_embeddings)
-                    if repr_emb is not None:
-                        self._reusable_track_embeddings[i] = repr_emb
+                # Get track embeddings (use cached representatives)
+                track_embeddings = np.empty((n_tracks, det_embeddings.shape[1]), dtype=np.float32)
+                for i, track in enumerate(tracks):
+                    if track._representative_cache_valid and track._cached_representative_embedding is not None:
+                        track_embeddings[i] = track._cached_representative_embedding
                     else:
-                        self._reusable_track_embeddings[i] = np.zeros(emb_dim, dtype=np.float32)
-                else:
-                    # Use cached embedding directly
-                    cached_emb = track._cached_representative_embedding
-                    if cached_emb is not None:
-                        self._reusable_track_embeddings[i] = cached_emb
-                    else:
-                        self._reusable_track_embeddings[i] = np.zeros(emb_dim, dtype=np.float32)
+                        # Simple fallback - most recent embedding
+                        if len(track.embedding_history) > 0:
+                            track_embeddings[i] = track.embedding_history[-1]
+                        else:
+                            track_embeddings[i] = np.zeros(det_embeddings.shape[1], dtype=np.float32)
 
-            track_embeddings = self._reusable_track_embeddings[:n_tracks]
-
-            # Use faster distance computation
-            raw_distances_matrix = compute_embedding_distances_optimized(
-                det_embeddings, track_embeddings
-            )
-
-            # Apply scaling
-            raw_distances_flat = raw_distances_matrix.flatten()
-            scaled_distances_flat = self.embedding_scaler.scale_distances(raw_distances_flat)
-            self.embedding_scaler.update_statistics(raw_distances_flat)
-            scaled_embedding_matrix = scaled_distances_flat.reshape(n_dets, n_tracks)
+                # Compute distances ONLY for feasible pairs
+                for det_idx, track_idx in zip(feasible_pairs[0], feasible_pairs[1]):
+                    # Direct cosine distance computation (faster for sparse matrices)
+                    cos_sim = np.dot(det_embeddings[det_idx], track_embeddings[track_idx])
+                    raw_dist = (1.0 - cos_sim) / 2.0
+                    scaled_embedding_matrix[det_idx, track_idx] = self.embedding_scaler.scale_distances(raw_dist)
 
             if stop:
                 stop("embedding_computation")
@@ -1601,34 +1603,66 @@ class SwarmSortTracker:
         logger.info("=== END EMBEDDING DEBUG ===\n")
 
     def _update_matched_tracks(self, matches, detections):
-        """update matched tracks with batched operations"""
+        """Optimized update with minimal overhead"""
         if not matches:
             return
 
         tracks = list(self.tracks.values())
 
-        # Batch position and confidence extraction
-        positions = []
-        embeddings = []
-        bboxes = []
-        confidences = []
-        track_objects = []
-
+        # Process all updates in a single pass
         for det_idx, track_idx in matches:
             detection = detections[det_idx]
             track = tracks[track_idx]
 
-            positions.append(detection.position.flatten()[:2].astype(np.float32))
-            embeddings.append(getattr(detection, "embedding", None))
-            bboxes.append(getattr(detection, "bbox", None))
-            confidences.append(self._get_detection_confidence(detection))
-            track_objects.append(track)
+            # Direct update without intermediate storage
+            position = detection.position.flatten()[:2].astype(np.float32)
 
-        # Batch update all tracks (reduces individual cache invalidations)
-        for i, track in enumerate(track_objects):
-            track.update_with_detection(
-                positions[i], embeddings[i], bboxes[i], self.frame_count, confidences[i]
-            )
+            # Update spatial state (fast path)
+            track.last_detection_pos = position
+            track.last_detection_frame = self.frame_count
+            track.detection_confidence = detection.confidence
+            track.confidence_score = detection.confidence
+
+            # Fast Kalman update
+            track.kalman_state = simple_kalman_update(track.kalman_state, position)
+
+            if track.hits > 0:
+                dt = 1.0
+                new_velocity = (position - track.position) / dt
+                track.kalman_state[2] = 0.7 * new_velocity[0] + 0.3 * track.kalman_state[2]
+                track.kalman_state[3] = 0.7 * new_velocity[1] + 0.3 * track.kalman_state[3]
+
+            track.position = track.kalman_state[:2].copy()
+            track.velocity = track.kalman_state[2:].copy()
+            track.predicted_position = track.position + track.velocity
+
+            # Handle embedding with minimal overhead
+            if hasattr(detection, 'embedding') and detection.embedding is not None:
+                # Assume embeddings are pre-normalized (do this once in detection creation)
+                embedding = detection.embedding
+                if len(track.embedding_history) == track.embedding_history.maxlen:
+                    # Only invalidate cache when deque is full and will pop oldest
+                    track._cache_valid = False
+                    track._representative_cache_valid = False
+                track.embedding_history.append(embedding)
+                track.embedding_update_count += 1
+
+                # Lazy update - don't compute avg_embedding unless needed
+                track.avg_embedding = None  # Mark as dirty, compute on demand
+
+            # Update bbox if present
+            if hasattr(detection, 'bbox') and detection.bbox is not None:
+                track.bbox = np.asarray(detection.bbox, dtype=np.float32)
+
+            # Update counters
+            track.hits += 1
+            track.age += 1
+            track.misses = 0
+            track.lost_frames = 0
+
+            if track.hits >= 3:
+                track.confirmed = True
+
 
     def _handle_unmatched_tracks(self, unmatched_track_indices):
         """Handle unmatched tracks - move to lost for potential ReID"""

@@ -131,6 +131,7 @@ class EmbeddingDistanceScaler:
             logger.warning(f"Scaling method {self.method} failed: {e}, using fallback")
             return np.clip(distances * 5.0, 0, 1)
 
+
     def _min_robustmax(self, distances):
         """Asymmetric scaling: actual minimum with robust maximum (P95)"""
         if self.min_distance is None or self.p95 is None:
