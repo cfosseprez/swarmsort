@@ -86,13 +86,13 @@ class SwarmSortConfig(BaseConfig):
     # Re-identification (ReID) parameters
     reid_enabled: bool = True  # Enable re-identification of lost tracks
     reid_max_distance: float = 150.0  # Maximum distance for ReID
-    reid_embedding_threshold: float = 0.4  # Embedding threshold for ReID
+    reid_embedding_threshold: float = 0.8  # Embedding threshold for ReID
     reid_max_frames: int = 10  # Maximum frames to keep lost tracks for ReID
 
     # Track initialization parameters
-    min_consecutive_detections: int = 5  # Minimum consecutive detections to create track
-    max_detection_gap: int = 3  # Maximum gap between detections for same pending track
-    pending_detection_distance: float = 80.0  # Distance threshold for pending detection matching
+    min_consecutive_detections: int = 10  # Minimum consecutive detections to create track
+    max_detection_gap: int = 10  # Maximum gap between detections for same pending track
+    pending_detection_distance: float = 120.0  # Distance threshold for pending detection matching
 
     # Duplicate detection removal
     duplicate_detection_threshold: float = 10.0  # Distance threshold for duplicate removal

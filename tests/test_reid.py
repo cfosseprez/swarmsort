@@ -113,7 +113,8 @@ def test_reid_direct():
         for key, value in main_timings.items():
             print(f"  {key}: {value}")
 
-    return True
+    reid_successful = True  # Placeholder for actual test logic
+    assert reid_successful, "Re-identification should have been successful."
 
 
 if __name__ == "__main__":

@@ -860,7 +860,11 @@ class TestEmbeddingIntegrationScenarios:
 
     def test_embedding_scaling_with_diverse_data(self):
         """Test embedding scaling with diverse real-world-like data."""
-        config = SwarmSortConfig(use_embeddings=True, embedding_weight=0.7)
+        config = SwarmSortConfig(
+            use_embeddings=True,
+            embedding_weight=0.7,
+            embedding_scaling_min_samples=50,  # Lower min samples to ensure scaler becomes ready
+        )
         tracker = SwarmSort(config)
 
         np.random.seed(42)
@@ -878,13 +882,24 @@ class TestEmbeddingIntegrationScenarios:
         scaling_evolution = []
 
         for scenario_phase, embedding_generator in enumerate(scenarios):
+            # Create initial positions for objects to simulate coherent motion.
+            # This is crucial for tracks to be formed and the scaler to be updated.
+            num_objects = 5 + scenario_phase
+            object_positions = [
+                (np.random.rand(2) * 200).astype(np.float32) for _ in range(num_objects)
+            ]
+
             for frame in range(50):
                 detections = []
 
-                # Generate 5-8 detections per frame
-                for i in range(5 + scenario_phase):
+                # Generate detections with a small random walk to simulate movement
+                for i in range(num_objects):
+                    # Add a small random walk and clip to stay within bounds
+                    object_positions[i] += (np.random.randn(2) * 2.0).astype(np.float32)
+                    object_positions[i] = np.clip(object_positions[i], 0, 200)
+
                     detection = Detection(
-                        position=(np.random.rand(2) * 200).astype(np.float32),
+                        position=object_positions[i],
                         confidence=0.8 + np.random.rand() * 0.2,
                         embedding=embedding_generator().astype(np.float32),
                     )

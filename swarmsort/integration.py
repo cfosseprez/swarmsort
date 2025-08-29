@@ -7,6 +7,7 @@ maintaining standalone functionality.
 """
 import sys
 import importlib
+import numpy as np
 from typing import Optional, Any, Type, Union, TYPE_CHECKING
 
 if TYPE_CHECKING:

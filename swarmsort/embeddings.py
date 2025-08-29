@@ -764,6 +764,449 @@ class CupyTextureEmbedding(EmbeddingExtractor):
         return self._dim
 
 
+class CupyTextureColorEmbedding(EmbeddingExtractor):
+    """
+    CuPy-accelerated texture embedding with rich color features.
+    
+    Combines the robust texture analysis of CupyTextureEmbedding with comprehensive
+    color-based features for improved tracking and re-identification performance.
+    
+    Feature composition (84 total features):
+    - Grayscale texture features (32) - from base CupyTextureEmbedding
+    - RGB color histograms (24) - 8 bins per channel
+    - HSV color histograms (24) - 8 bins per channel  
+    - Color moments (4) - mean and std of RGB channels
+    
+    This embedding is particularly effective for scenarios where both texture
+    and color information are important for distinguishing between objects.
+    """
+    
+    def __init__(self, patch_size: int = 32, use_gpu: bool = True):
+        self.patch_size = patch_size
+        self.use_gpu = use_gpu and CUPY_AVAILABLE
+        self._dim = 84  # 32 texture + 24 RGB hist + 24 HSV hist + 4 color moments
+        
+        if self.use_gpu:
+            logger.info(f"CupyTextureColorEmbedding initialized with GPU acceleration. Dim={self._dim}")
+        else:
+            logger.info(f"CupyTextureColorEmbedding initialized with CPU-only mode. Dim={self._dim}")
+
+    def _prepare_patch(self, frame: np.ndarray, bbox: np.ndarray) -> Optional[np.ndarray]:
+        """Extract and resize patch from frame using bbox."""
+        x1, y1, x2, y2 = map(int, bbox[:4])
+        h_frame, w_frame = frame.shape[:2]
+        x1, y1 = max(0, x1), max(0, y1)
+        x2, y2 = min(w_frame, x2), min(h_frame, y2)
+
+        if x1 >= x2 or y1 >= y2:
+            return None
+
+        roi = frame[y1:y2, x1:x2]
+        if roi.size == 0:
+            return None
+
+        # Resize to standard patch size for consistency
+        patch = cv2.resize(roi, (self.patch_size, self.patch_size), interpolation=cv2.INTER_AREA)
+        return patch
+
+    def extract(self, frame: np.ndarray, bbox: np.ndarray) -> np.ndarray:
+        """Extract features for a single patch."""
+        patch = self._prepare_patch(frame, bbox)
+        if patch is None:
+            return np.zeros(self._dim, dtype=np.float32)
+
+        # Use batch processing even for single patch for consistency
+        patches = np.expand_dims(patch, axis=0)
+        if self.use_gpu:
+            try:
+                features = self._extract_features_gpu(patches)
+                return features[0]
+            except Exception as e:
+                logger.error(f"GPU extraction failed: {e}. Falling back to CPU.")
+                self.use_gpu = False
+        
+        features = self._extract_features_cpu(patches)
+        return features[0]
+
+    def _extract_features_cpu(self, patches: np.ndarray) -> np.ndarray:
+        """CPU-based feature extraction with color features."""
+        n_patches = patches.shape[0]
+        features = np.zeros((n_patches, self._dim), dtype=np.float32)
+        
+        for i in range(n_patches):
+            patch = patches[i]  # Shape: (H, W, 3)
+            H, W = patch.shape[:2]
+            
+            feature_idx = 0
+            
+            # === GRAYSCALE TEXTURE FEATURES (32 features) ===
+            # Convert to grayscale
+            gray = np.zeros((H, W), dtype=np.float32)
+            for y in range(H):
+                for x in range(W):
+                    gray[y, x] = (
+                        0.114 * patch[y, x, 0] +  # Blue
+                        0.587 * patch[y, x, 1] +  # Green
+                        0.299 * patch[y, x, 2]    # Red
+                    )
+            
+            # Basic grayscale stats (4 features)
+            features[i, feature_idx] = np.mean(gray)
+            features[i, feature_idx + 1] = np.std(gray)
+            features[i, feature_idx + 2] = np.min(gray)
+            features[i, feature_idx + 3] = np.max(gray)
+            feature_idx += 4
+            
+            # Gradient features (8 features)
+            grad_x = np.zeros_like(gray)
+            grad_y = np.zeros_like(gray)
+            for y in range(1, H - 1):
+                for x in range(1, W - 1):
+                    grad_x[y, x] = gray[y, x + 1] - gray[y, x - 1]
+                    grad_y[y, x] = gray[y + 1, x] - gray[y - 1, x]
+            
+            grad_magnitude = np.sqrt(grad_x**2 + grad_y**2)
+            features[i, feature_idx] = np.mean(grad_magnitude)
+            features[i, feature_idx + 1] = np.std(grad_magnitude)
+            features[i, feature_idx + 2] = np.max(grad_magnitude)
+            features[i, feature_idx + 3] = np.mean(np.abs(grad_x))
+            features[i, feature_idx + 4] = np.mean(np.abs(grad_y))
+            features[i, feature_idx + 5] = np.std(grad_x)
+            features[i, feature_idx + 6] = np.std(grad_y)
+            features[i, feature_idx + 7] = np.mean(np.arctan2(grad_y, grad_x + 1e-8))
+            feature_idx += 8
+            
+            # Center of mass and moments (8 features)
+            total_intensity = np.sum(gray)
+            if total_intensity > 0:
+                y_coords, x_coords = np.meshgrid(range(H), range(W), indexing='ij')
+                cm_x = np.sum(gray * x_coords) / total_intensity
+                cm_y = np.sum(gray * y_coords) / total_intensity
+                
+                dx = x_coords - cm_x
+                dy = y_coords - cm_y
+                m20 = np.sum(gray * dx * dx) / total_intensity
+                m02 = np.sum(gray * dy * dy) / total_intensity
+                m11 = np.sum(gray * dx * dy) / total_intensity
+                
+                features[i, feature_idx] = cm_x / W
+                features[i, feature_idx + 1] = cm_y / H
+                features[i, feature_idx + 2] = m20
+                features[i, feature_idx + 3] = m02
+                features[i, feature_idx + 4] = m11
+                features[i, feature_idx + 5] = np.sqrt(m20)
+                features[i, feature_idx + 6] = np.sqrt(m02)
+                features[i, feature_idx + 7] = m20 + m02  # Total moment
+            feature_idx += 8
+            
+            # LBP-like texture features (8 features)
+            lbp_hist = np.zeros(8)
+            for y in range(1, H - 1):
+                for x in range(1, W - 1):
+                    center = gray[y, x]
+                    pattern = 0
+                    if gray[y - 1, x - 1] > center: pattern |= 1
+                    if gray[y - 1, x] > center: pattern |= 2
+                    if gray[y - 1, x + 1] > center: pattern |= 4
+                    if gray[y, x + 1] > center: pattern |= 8
+                    if gray[y + 1, x + 1] > center: pattern |= 16
+                    if gray[y + 1, x] > center: pattern |= 32
+                    if gray[y + 1, x - 1] > center: pattern |= 64
+                    if gray[y, x - 1] > center: pattern |= 128
+                    
+                    # Simplified uniform patterns
+                    bin_idx = bin(pattern).count('1') % 8
+                    lbp_hist[bin_idx] += 1
+            
+            # Normalize histogram
+            if np.sum(lbp_hist) > 0:
+                lbp_hist = lbp_hist / np.sum(lbp_hist)
+            features[i, feature_idx:feature_idx + 8] = lbp_hist
+            feature_idx += 8
+            
+            # Edge and corner features (4 features)
+            # Simple edge detection
+            edge_horizontal = np.abs(np.diff(gray, axis=1)).mean()
+            edge_vertical = np.abs(np.diff(gray, axis=0)).mean()
+            corner_strength = 0.0
+            variance = np.var(gray)
+            
+            features[i, feature_idx] = edge_horizontal
+            features[i, feature_idx + 1] = edge_vertical
+            features[i, feature_idx + 2] = corner_strength
+            features[i, feature_idx + 3] = variance
+            feature_idx += 4
+            
+            # === COLOR FEATURES ===
+            
+            # RGB Color Histogram (24 features - 8 bins per channel)
+            rgb_hist = np.zeros(24)
+            for c in range(3):  # B, G, R channels
+                channel = patch[:, :, c]
+                hist, _ = np.histogram(channel, bins=8, range=(0, 256))
+                if np.sum(hist) > 0:
+                    hist = hist.astype(np.float32) / np.sum(hist)
+                rgb_hist[c * 8:(c + 1) * 8] = hist
+            features[i, feature_idx:feature_idx + 24] = rgb_hist
+            feature_idx += 24
+            
+            # HSV Color Histogram (24 features - 8 bins per channel)
+            # Convert BGR to HSV
+            hsv_patch = cv2.cvtColor(patch.astype(np.uint8), cv2.COLOR_BGR2HSV)
+            hsv_hist = np.zeros(24)
+            
+            # H channel (0-179)
+            hist_h, _ = np.histogram(hsv_patch[:, :, 0], bins=8, range=(0, 180))
+            if np.sum(hist_h) > 0:
+                hist_h = hist_h.astype(np.float32) / np.sum(hist_h)
+            hsv_hist[0:8] = hist_h
+            
+            # S channel (0-255)
+            hist_s, _ = np.histogram(hsv_patch[:, :, 1], bins=8, range=(0, 256))
+            if np.sum(hist_s) > 0:
+                hist_s = hist_s.astype(np.float32) / np.sum(hist_s)
+            hsv_hist[8:16] = hist_s
+            
+            # V channel (0-255)
+            hist_v, _ = np.histogram(hsv_patch[:, :, 2], bins=8, range=(0, 256))
+            if np.sum(hist_v) > 0:
+                hist_v = hist_v.astype(np.float32) / np.sum(hist_v)
+            hsv_hist[16:24] = hist_v
+            
+            features[i, feature_idx:feature_idx + 24] = hsv_hist
+            feature_idx += 24
+            
+            # Color Moments (4 features - mean and std for each RGB channel, normalized)
+            rgb_means = np.mean(patch.astype(np.float32), axis=(0, 1)) / 255.0
+            rgb_stds = np.std(patch.astype(np.float32), axis=(0, 1)) / 255.0
+            
+            features[i, feature_idx] = np.mean(rgb_means)  # Overall color brightness
+            features[i, feature_idx + 1] = np.std(rgb_means)   # Color balance variation
+            features[i, feature_idx + 2] = np.mean(rgb_stds)   # Overall color consistency
+            features[i, feature_idx + 3] = np.std(rgb_stds)    # Color channel variation
+            feature_idx += 4
+        
+        return features
+
+    def _extract_features_gpu(self, patches: np.ndarray) -> np.ndarray:
+        """GPU-accelerated feature extraction with color features."""
+        if not CUPY_AVAILABLE:
+            raise RuntimeError("CuPy not available for GPU computation")
+        
+        n_patches = patches.shape[0]
+        patches_gpu = cp.asarray(patches, dtype=cp.float32)
+        H, W = patches.shape[1:3]
+        features = cp.zeros((n_patches, self._dim), dtype=cp.float32)
+        
+        feature_idx = 0
+        
+        # === GRAYSCALE TEXTURE FEATURES (32 features) ===
+        # Convert to grayscale
+        gray_gpu = cp.sum(patches_gpu * cp.array([0.114, 0.587, 0.299]), axis=3)
+        
+        # Basic grayscale stats (4 features)
+        features[:, feature_idx] = cp.mean(gray_gpu, axis=(1, 2))
+        features[:, feature_idx + 1] = cp.std(gray_gpu, axis=(1, 2))
+        features[:, feature_idx + 2] = cp.min(gray_gpu, axis=(1, 2))
+        features[:, feature_idx + 3] = cp.max(gray_gpu, axis=(1, 2))
+        feature_idx += 4
+        
+        # Gradient features (8 features)
+        grad_y, grad_x = cp.gradient(gray_gpu, axis=(1, 2))
+        grad_magnitude = cp.sqrt(grad_x**2 + grad_y**2)
+        
+        features[:, feature_idx] = cp.mean(grad_magnitude, axis=(1, 2))
+        features[:, feature_idx + 1] = cp.std(grad_magnitude, axis=(1, 2))
+        features[:, feature_idx + 2] = cp.max(grad_magnitude, axis=(1, 2))
+        features[:, feature_idx + 3] = cp.mean(cp.abs(grad_x), axis=(1, 2))
+        features[:, feature_idx + 4] = cp.mean(cp.abs(grad_y), axis=(1, 2))
+        features[:, feature_idx + 5] = cp.std(grad_x, axis=(1, 2))
+        features[:, feature_idx + 6] = cp.std(grad_y, axis=(1, 2))
+        features[:, feature_idx + 7] = cp.mean(cp.arctan2(grad_y, grad_x + 1e-8), axis=(1, 2))
+        feature_idx += 8
+        
+        # Center of mass and moments (8 features)
+        total_intensity = cp.sum(gray_gpu, axis=(1, 2))
+        y_coords = cp.arange(H, dtype=cp.float32).reshape(H, 1)
+        x_coords = cp.arange(W, dtype=cp.float32).reshape(1, W)
+        
+        safe_total = cp.maximum(total_intensity, 1e-8)
+        cm_y = cp.sum(gray_gpu * y_coords, axis=(1, 2)) / safe_total
+        cm_x = cp.sum(gray_gpu * x_coords, axis=(1, 2)) / safe_total
+        
+        # Compute moments
+        dy = y_coords - cm_y.reshape(-1, 1, 1)
+        dx = x_coords - cm_x.reshape(-1, 1, 1)
+        
+        m20 = cp.sum(gray_gpu * dx * dx, axis=(1, 2)) / safe_total
+        m02 = cp.sum(gray_gpu * dy * dy, axis=(1, 2)) / safe_total
+        m11 = cp.sum(gray_gpu * dx * dy, axis=(1, 2)) / safe_total
+        
+        features[:, feature_idx] = cm_x / W
+        features[:, feature_idx + 1] = cm_y / H
+        features[:, feature_idx + 2] = m20
+        features[:, feature_idx + 3] = m02
+        features[:, feature_idx + 4] = m11
+        features[:, feature_idx + 5] = cp.sqrt(cp.maximum(m20, 0))
+        features[:, feature_idx + 6] = cp.sqrt(cp.maximum(m02, 0))
+        features[:, feature_idx + 7] = m20 + m02
+        feature_idx += 8
+        
+        # LBP-like simplified features (8 features)
+        # Use multi-scale standard deviation as texture proxy
+        for scale in range(8):
+            kernel_size = 2 + scale
+            if kernel_size < min(H, W):
+                from cupyx.scipy import ndimage
+                smoothed = ndimage.uniform_filter(gray_gpu, size=kernel_size)
+                features[:, feature_idx + scale] = cp.std(smoothed, axis=(1, 2))
+            else:
+                features[:, feature_idx + scale] = cp.std(gray_gpu, axis=(1, 2))
+        feature_idx += 8
+        
+        # Edge and variance features (4 features)
+        edge_h = cp.mean(cp.abs(cp.diff(gray_gpu, axis=2)), axis=(1, 2))
+        edge_v = cp.mean(cp.abs(cp.diff(gray_gpu, axis=1)), axis=(1, 2))
+        variance = cp.var(gray_gpu, axis=(1, 2))
+        
+        features[:, feature_idx] = edge_h
+        features[:, feature_idx + 1] = edge_v
+        features[:, feature_idx + 2] = variance  # Using variance instead of corner strength
+        features[:, feature_idx + 3] = variance
+        feature_idx += 4
+        
+        # === COLOR FEATURES ===
+        
+        # RGB Color Histogram (24 features)
+        for c in range(3):  # B, G, R channels
+            channel = patches_gpu[:, :, :, c]
+            for b in range(8):
+                bin_min = b * 32.0  # 256/8 = 32
+                bin_max = (b + 1) * 32.0 if b < 7 else 256.0
+                mask = (channel >= bin_min) & (channel < bin_max)
+                features[:, feature_idx + c * 8 + b] = cp.mean(mask.astype(cp.float32), axis=(1, 2))
+        feature_idx += 24
+        
+        # HSV Color Features (simplified, 24 features)
+        # Use RGB-to-HSV approximation for GPU efficiency
+        r_norm = patches_gpu[:, :, :, 2] / 255.0
+        g_norm = patches_gpu[:, :, :, 1] / 255.0  
+        b_norm = patches_gpu[:, :, :, 0] / 255.0
+        
+        max_rgb = cp.maximum(cp.maximum(r_norm, g_norm), b_norm)
+        min_rgb = cp.minimum(cp.minimum(r_norm, g_norm), b_norm)
+        delta = max_rgb - min_rgb
+        
+        # Hue approximation
+        hue_approx = cp.where(delta > 1e-8, 
+                             cp.where(max_rgb == r_norm, (g_norm - b_norm) / delta,
+                                    cp.where(max_rgb == g_norm, 2.0 + (b_norm - r_norm) / delta,
+                                           4.0 + (r_norm - g_norm) / delta)), 0.0)
+        hue_approx = (hue_approx * 60.0) % 360.0
+        
+        # Saturation
+        saturation = cp.where(max_rgb > 1e-8, delta / max_rgb, 0.0)
+        
+        # Value (brightness)
+        value = max_rgb
+        
+        # Create histograms for HSV
+        for b in range(8):
+            # H bins (0-360)
+            h_min, h_max = b * 45.0, (b + 1) * 45.0
+            features[:, feature_idx + b] = cp.mean((hue_approx >= h_min) & (hue_approx < h_max), axis=(1, 2))
+            
+            # S bins (0-1)
+            s_min, s_max = b * 0.125, (b + 1) * 0.125
+            features[:, feature_idx + 8 + b] = cp.mean((saturation >= s_min) & (saturation < s_max), axis=(1, 2))
+            
+            # V bins (0-1)
+            v_min, v_max = b * 0.125, (b + 1) * 0.125
+            features[:, feature_idx + 16 + b] = cp.mean((value >= v_min) & (value < v_max), axis=(1, 2))
+        
+        feature_idx += 24
+        
+        # Color Moments (4 features)
+        rgb_means = cp.mean(patches_gpu, axis=(1, 2)) / 255.0
+        rgb_stds = cp.std(patches_gpu, axis=(1, 2)) / 255.0
+        
+        features[:, feature_idx] = cp.mean(rgb_means, axis=1)
+        features[:, feature_idx + 1] = cp.std(rgb_means, axis=1)
+        features[:, feature_idx + 2] = cp.mean(rgb_stds, axis=1)
+        features[:, feature_idx + 3] = cp.std(rgb_stds, axis=1)
+        feature_idx += 4
+        
+        return cp.asnumpy(features)
+
+    def extract_batch_cpu(self, frame: np.ndarray, bboxes: np.ndarray) -> List[np.ndarray]:
+        """CPU batch extraction."""
+        if len(bboxes) == 0:
+            return []
+
+        patches = []
+        valid_indices = []
+
+        for i, bbox in enumerate(bboxes):
+            patch = self._prepare_patch(frame, bbox)
+            if patch is not None:
+                patches.append(patch)
+                valid_indices.append(i)
+
+        if not patches:
+            return [np.zeros(self._dim, dtype=np.float32) for _ in bboxes]
+
+        patches = np.array(patches)
+        features = self._extract_features_cpu(patches)
+
+        result = [np.zeros(self._dim, dtype=np.float32) for _ in bboxes]
+        for i, valid_idx in enumerate(valid_indices):
+            result[valid_idx] = features[i]
+        return result
+
+    def extract_batch_gpu(self, frame: np.ndarray, bboxes: np.ndarray) -> List[np.ndarray]:
+        """GPU batch extraction."""
+        if not CUPY_AVAILABLE:
+            raise RuntimeError("CuPy not available for GPU computation")
+
+        if len(bboxes) == 0:
+            return []
+
+        patches = []
+        valid_indices = []
+
+        for i, bbox in enumerate(bboxes):
+            patch = self._prepare_patch(frame, bbox)
+            if patch is not None:
+                patches.append(patch)
+                valid_indices.append(i)
+
+        if not patches:
+            return [np.zeros(self._dim, dtype=np.float32) for _ in bboxes]
+
+        patches = np.array(patches)
+        features = self._extract_features_gpu(patches)
+
+        result = [np.zeros(self._dim, dtype=np.float32) for _ in bboxes]
+        for i, valid_idx in enumerate(valid_indices):
+            result[valid_idx] = features[i]
+        return result
+
+    def extract_batch(self, frame: np.ndarray, bboxes: np.ndarray) -> List[np.ndarray]:
+        """Extract batch of embeddings with GPU/CPU selection."""
+        if self.use_gpu:
+            try:
+                return self.extract_batch_gpu(frame, bboxes)
+            except Exception as e:
+                logger.error(f"GPU extraction failed: {e}. Falling back to CPU.")
+                self.use_gpu = False
+                return self.extract_batch_cpu(frame, bboxes)
+        return self.extract_batch_cpu(frame, bboxes)
+
+    @property
+    def embedding_dim(self) -> int:
+        return self._dim
+
+
 class MegaCupyTextureEmbedding(EmbeddingExtractor):
     """
     Mega Microbe Embedding: Combines the best of shape, color, and texture analysis.
@@ -1004,6 +1447,7 @@ def compute_embedding_distances_batch(emb: np.ndarray, embs: List[np.ndarray]) -
 # Available embedding extractors
 AVAILABLE_EMBEDDINGS = {
     "cupytexture": CupyTextureEmbedding,
+    "cupytexture_color": CupyTextureColorEmbedding,
     "mega_cupytexture": MegaCupyTextureEmbedding,
 }
 

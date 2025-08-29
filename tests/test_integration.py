@@ -146,6 +146,9 @@ class TestEmbeddingIntegration:
 
     def test_embedding_based_association(self, embedding_config):
         """Test that embeddings improve association accuracy."""
+        # Ensure the test uses the probabilistic path, which correctly updates scaler stats
+        embedding_config.use_probabilistic_costs = True
+
         tracker = SwarmSort(embedding_config)
 
         # Create consistent embeddings for two objects

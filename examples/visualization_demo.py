@@ -97,7 +97,7 @@ def run_visualization_demo(num_objects: int = 50, realtime: bool = True):
     config = SwarmSortConfig(
         max_distance=100,
         use_embeddings=True,
-        use_probabilistic_costs=False,
+        use_probabilistic_costs=True,
         embedding_weight=1,
         min_consecutive_detections=3,
         debug_timings=True,

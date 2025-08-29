@@ -84,6 +84,7 @@ from .embedding_scaler import EmbeddingDistanceScaler
 # Embedding functionality
 from .embeddings import (
     CupyTextureEmbedding,
+    CupyTextureColorEmbedding,
     MegaCupyTextureEmbedding,
     get_embedding_extractor,
     list_available_embeddings,
@@ -158,6 +159,7 @@ __all__ = [
     "EmbeddingDistanceScaler",
     # Embedding classes
     "CupyTextureEmbedding",
+    "CupyTextureColorEmbedding",
     "MegaCupyTextureEmbedding",
     "get_embedding_extractor",
     "list_available_embeddings",
@@ -249,8 +251,3 @@ def print_package_info():
     print(f"Available Embeddings: {', '.join(info['available_embeddings'])}")
     print("=" * 50)
 
-
-# Convenient aliases for common usage
-Tracker = SwarmSortTracker  # Short alias
-GPUTracker = lambda **kwargs: SwarmSortTracker(embedding_type="cupytexture", use_gpu=True, **kwargs)
-CPUTracker = lambda **kwargs: SwarmSortTracker(embedding_type="histogram", use_gpu=False, **kwargs)
