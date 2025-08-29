@@ -1352,12 +1352,27 @@ class SwarmSortTracker:
                         else:
                             track_embeddings[i] = np.zeros(det_embeddings.shape[1], dtype=np.float32)
 
-                # Compute distances ONLY for feasible pairs
-                for det_idx, track_idx in zip(feasible_pairs[0], feasible_pairs[1]):
-                    # Direct cosine distance computation (faster for sparse matrices)
-                    cos_sim = np.dot(det_embeddings[det_idx], track_embeddings[track_idx])
-                    raw_dist = (1.0 - cos_sim) / 2.0
-                    scaled_embedding_matrix[det_idx, track_idx] = self.embedding_scaler.scale_distances(raw_dist)
+                # Compute cosine similarities: (n_dets, n_tracks) = (n_dets, emb_dim) @ (emb_dim, n_tracks)
+                cos_similarities = det_embeddings @ track_embeddings.T
+
+                # Convert to distances
+                raw_distances = (1.0 - cos_similarities) / 2.0
+
+                # Apply scaling in batch
+                scaled_embedding_matrix = self.embedding_scaler.scale_distances(raw_distances.flatten()).reshape(n_dets,
+                                                                                                                 n_tracks)
+
+                # Optional: Apply spatial mask to zero out impossible matches
+                # This saves computation in the cost matrix step
+                spatial_distances_sq = np.minimum(
+                    np.sum((det_positions[:, None, :] - track_last_positions[None, :, :]) ** 2, axis=2),
+                    np.sum((det_positions[:, None, :] - track_kalman_positions[None, :, :]) ** 2, axis=2)
+                )
+                far_mask = spatial_distances_sq > (self.max_distance * 1.5) ** 2
+                scaled_embedding_matrix[far_mask] = 1.0  # Max distance for impossible matches
+
+                if stop:
+                    stop("embedding_computation")
 
             if stop:
                 stop("embedding_computation")
