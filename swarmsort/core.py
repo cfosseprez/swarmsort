@@ -895,7 +895,13 @@ class SwarmSortTracker:
         >>> print(f"Tracking {len(tracked_objects)} objects")
     """
 
-    def __init__(self, config: Optional[Union[SwarmSortConfig, dict]] = None):
+    def __init__(
+        self,
+        config: Optional[Union[SwarmSortConfig, dict]] = None,
+        embedding_type: Optional[str] = None,
+        use_gpu: Optional[bool] = None,
+        **kwargs,
+    ):
         # Handle configuration
         if config is None:
             self.config = SwarmSortConfig()
@@ -903,6 +909,18 @@ class SwarmSortTracker:
             self.config = SwarmSortConfig.from_dict(config)
         else:
             self.config = config
+
+        # Handle embedding extractor setup if provided
+        self.embedding_extractor = None
+        if embedding_type is not None:
+            try:
+                from .embeddings import get_embedding_extractor
+                self.embedding_extractor = get_embedding_extractor(
+                    embedding_type, 
+                    use_gpu=(use_gpu if use_gpu is not None else True)
+                )
+            except Exception as e:
+                logger.warning(f"Failed to create embedding extractor '{embedding_type}': {e}")
 
         # Map config to internal parameters
         self.use_probabilistic_costs = getattr(self.config, "use_probabilistic_costs", True)
@@ -990,7 +1008,7 @@ class SwarmSortTracker:
         except Exception as e:
             logger.warning(f"Numba compilation failed: {e}")
 
-    def update(self, detections: List[Detection]) -> List[TrackedObject]:
+    def update(self, detections: List[Detection], frame: Optional[np.ndarray] = None) -> List[TrackedObject]:
         """Main update with optional timing per call"""
         self.frame_count += 1
 

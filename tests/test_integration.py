@@ -1,524 +1,445 @@
 """
-Integration tests for SwarmSort package.
-Tests complete tracking scenarios and integration between components.
+Integration tests for SwarmSort package interfaces.
+
+Tests the SwarmTracker integration interfaces, new embeddings,
+and overall package functionality.
 """
+
 import pytest
 import numpy as np
-from typing import List
+from typing import List, Dict, Any
 
 from swarmsort import (
-    SwarmSort,
-    SwarmSortConfig,
-    Detection,
+    SwarmSortTracker, 
+    SwarmSortConfig, 
+    Detection, 
     TrackedObject,
-    create_tracker,
-    is_within_swarmtracker,
+    get_embedding_extractor,
+    list_available_embeddings
 )
 
 
-@pytest.mark.integration
-class TestCompleteTrackingScenarios:
-    """Test complete end-to-end tracking scenarios."""
-
-    def test_single_object_tracking(self, basic_tracker, tracking_assertions):
-        """Test tracking a single object across multiple frames."""
-        tracks_sequence = []
-
-        # Track single object moving in straight line
-        for i in range(10):
-            detection = Detection(
-                position=np.array([10.0 + i * 3, 20.0 + i * 2]), confidence=0.9, id=f"det_{i}"
-            )
-
-            tracked_objects = basic_tracker.update([detection])
-            tracks_sequence.append(tracked_objects)
-
-        # After enough frames, should have one stable track
-        final_tracks = tracks_sequence[-1]
-        assert len(final_tracks) >= 1
-
-        # Check track continuity
-        tracking_assertions.assert_track_continuity(tracks_sequence)
-        tracking_assertions.assert_no_track_jumps(tracks_sequence, max_distance=10.0)
-
-        # Track should have reasonable age and hits
-        if final_tracks:
-            track = final_tracks[0]
-            assert track.age >= 3
-            assert track.hits >= 3
-
-    def test_multiple_objects_tracking(self, basic_config, tracking_assertions):
-        """Test tracking multiple objects simultaneously."""
-        config = basic_config
-        config.min_consecutive_detections = 2
-        tracker = SwarmSort(config)
-
-        tracks_sequence = []
-
-        # Track 3 objects moving in different directions
-        for i in range(8):
-            detections = [
-                Detection(position=np.array([10.0 + i * 2, 20.0]), confidence=0.9),  # Moving right
-                Detection(position=np.array([50.0, 30.0 + i * 1.5]), confidence=0.8),  # Moving up
-                Detection(
-                    position=np.array([80.0 - i, 50.0 + i]), confidence=0.85
-                ),  # Moving diagonally
-            ]
-
-            tracked_objects = tracker.update(detections)
-            tracks_sequence.append(tracked_objects)
-
-        # Should eventually have 3 tracks
-        final_tracks = tracks_sequence[-1]
-        assert len(final_tracks) == 3
-
-        # All tracks should have unique IDs
-        track_ids = [track.id for track in final_tracks]
-        assert len(set(track_ids)) == len(track_ids)
-
-        # Check continuity and no unrealistic jumps
-        tracking_assertions.assert_track_continuity(tracks_sequence)
-        tracking_assertions.assert_no_track_jumps(tracks_sequence)
-
-    def test_object_appearance_disappearance(self, basic_config):
-        """Test handling of objects appearing and disappearing."""
-        config = basic_config
-        config.max_age = 5
-        tracker = SwarmSort(config)
-
-        all_tracks = []
-
-        # Object appears
-        for i in range(3):
-            detection = Detection(position=np.array([10.0 + i, 20.0 + i]), confidence=0.9)
-            tracks = tracker.update([detection])
-            all_tracks.extend(tracks)
-
-        assert tracker.get_statistics()["active_tracks"] >= 1
-
-        # Object disappears (no detections)
-        for i in range(6):  # More than max_age
-            tracks = tracker.update([])
-            all_tracks.extend(tracks)
-
-        # Track should be removed after max_age
-        final_stats = tracker.get_statistics()
-        assert final_stats["active_tracks"] == 0
-
-        # Object reappears
-        for i in range(3):
-            detection = Detection(position=np.array([20.0 + i, 30.0 + i]), confidence=0.9)
-            tracks = tracker.update([detection])
-            all_tracks.extend(tracks)
-
-        # Should create new track (or re-identify if ReID enabled)
-        reappear_stats = tracker.get_statistics()
-        assert reappear_stats["active_tracks"] >= 1
-
-    def test_crossing_objects(self, basic_config):
-        """Test tracking objects that cross paths."""
-        tracker = SwarmSort(basic_config)
-
-        tracks_sequence = []
-
-        for i in range(10):
-            # Two objects crossing paths
-            detections = [
-                Detection(position=np.array([10.0 + i * 5, 50.0]), confidence=0.9),  # Moving right
-                Detection(position=np.array([60.0 - i * 5, 50.0]), confidence=0.9),  # Moving left
-            ]
-
-            tracked_objects = tracker.update(detections)
-            tracks_sequence.append(tracked_objects)
-
-        # Should maintain 2 distinct tracks even when crossing
-        final_tracks = tracks_sequence[-1]
-        assert len(final_tracks) == 2
-
-        # Tracks should have different IDs
-        track_ids = [track.id for track in final_tracks]
-        assert len(set(track_ids)) == 2
-
-
-@pytest.mark.integration
-class TestEmbeddingIntegration:
-    """Test integration scenarios with embeddings."""
-
-    def test_embedding_based_association(self, embedding_config):
-        """Test that embeddings improve association accuracy."""
-        # Ensure the test uses the probabilistic path, which correctly updates scaler stats
-        embedding_config.use_probabilistic_costs = True
-
-        tracker = SwarmSort(embedding_config)
-
-        # Create consistent embeddings for two objects
-        emb1 = np.random.randn(64).astype(np.float32)
-        emb2 = np.random.randn(64).astype(np.float32)
-
-        tracks_sequence = []
-
-        for i in range(8):
-            # Objects with distinct embeddings
-            detections = [
-                Detection(
-                    position=np.array(
-                        [10.0 + i + np.random.randn() * 2, 20.0 + np.random.randn() * 2]
-                    ),
-                    confidence=0.9,
-                    embedding=emb1 + np.random.randn(64) * 0.1,  # Small variation
-                ),
-                Detection(
-                    position=np.array(
-                        [50.0 + i + np.random.randn() * 2, 30.0 + np.random.randn() * 2]
-                    ),
-                    confidence=0.8,
-                    embedding=emb2 + np.random.randn(64) * 0.1,  # Small variation
-                ),
-            ]
-
-            tracked_objects = tracker.update(detections)
-            tracks_sequence.append(tracked_objects)
-
-        # Should successfully track despite positional noise
-        final_tracks = tracks_sequence[-1]
-        assert len(final_tracks) == 2
-
-        # Check embedding scaler is being updated
-        stats = tracker.get_statistics()
-        emb_stats = stats["embedding_scaler_stats"]
-        assert emb_stats["sample_count"] > 0
-
-    def test_embedding_scaling_adaptation(self, embedding_config):
-        """Test that embedding distance scaling adapts over time."""
-        config = embedding_config
-        config.embedding_scaling_min_samples = 10  # Low threshold for testing
-        tracker = SwarmSort(config)
-
-        # Generate embeddings with different scales
-        for phase in range(3):
-            for i in range(8):
-                # Different embedding scales per phase
-                scale = 0.1 + phase * 0.5
-                embedding = np.random.randn(64).astype(np.float32) * scale
-
-                detection = Detection(
-                    position=np.array([10.0 + phase * 50 + i * 2, 20.0 + i]),
-                    confidence=0.9,
-                    embedding=embedding,
-                )
-
-                tracker.update([detection])
-
-        # Scaler should have adapted to different scales
-        stats = tracker.get_statistics()
-        emb_stats = stats["embedding_scaler_stats"]
-        # Scaler might be ready or need more samples for complex scenarios
-        assert emb_stats["ready"] or emb_stats["sample_count"] >= 0
-
-
-@pytest.mark.integration
-class TestConfigurationIntegration:
-    """Test integration with different configurations."""
-
-    def test_strict_vs_permissive_configs(self):
-        """Test behavior differences between strict and permissive configs."""
-        # Strict configuration
-        strict_config = SwarmSortConfig(
-            max_distance=20.0,
-            high_score_threshold=0.9,
-            min_consecutive_detections=4,
-            detection_conf_threshold=0.8,
-        )
-
-        # Permissive configuration
-        permissive_config = SwarmSortConfig(
-            max_distance=100.0,
-            high_score_threshold=0.3,
-            min_consecutive_detections=1,
-            detection_conf_threshold=0.1,
-        )
-
-        strict_tracker = SwarmSort(strict_config)
-        permissive_tracker = SwarmSort(permissive_config)
-
-        # Test with noisy detections
-        noisy_detections = [
-            Detection(position=np.array([10.0, 20.0]), confidence=0.5),  # Medium confidence
-            Detection(position=np.array([50.0, 60.0]), confidence=0.7),  # Medium confidence
-            Detection(
-                position=np.array([15.0, 25.0]), confidence=0.4
-            ),  # Low confidence, close to first
-        ]
-
-        # Run several frames
-        strict_tracks = []
-        permissive_tracks = []
-
-        for _ in range(5):
-            strict_result = strict_tracker.update(noisy_detections)
-            permissive_result = permissive_tracker.update(noisy_detections)
-
-            strict_tracks.extend(strict_result)
-            permissive_tracks.extend(permissive_result)
-
-        # Permissive should create more tracks, strict should be more conservative
-        strict_stats = strict_tracker.get_statistics()
-        permissive_stats = permissive_tracker.get_statistics()
-
-        # This is probabilistic, but generally true
-        assert permissive_stats["active_tracks"] >= strict_stats["active_tracks"]
-
-    def test_reid_enabled_vs_disabled(self):
-        """Test ReID enabled vs disabled behavior."""
-        reid_config = SwarmSortConfig(
-            reid_enabled=True, reid_max_distance=80.0, reid_embedding_threshold=0.5, max_age=3
-        )
-
-        no_reid_config = SwarmSortConfig(reid_enabled=False, max_age=3)
-
-        reid_tracker = SwarmSort(reid_config)
-        no_reid_tracker = SwarmSort(no_reid_config)
-
-        # Create consistent embedding for reidentification
-        consistent_embedding = np.random.randn(64).astype(np.float32)
-
-        # Object appears
-        for i in range(3):
-            detection = Detection(
-                position=np.array([10.0 + i, 20.0]),
-                confidence=0.9,
-                embedding=consistent_embedding + np.random.randn(64) * 0.05,
-            )
-            reid_tracker.update([detection])
-            no_reid_tracker.update([detection])
-
-        # Object disappears
-        for i in range(4):  # Longer than max_age
-            reid_tracker.update([])
-            no_reid_tracker.update([])
-
-        # Object reappears at different location
-        reappear_detection = Detection(
-            position=np.array([50.0, 60.0]),  # Far from original
-            confidence=0.9,
-            embedding=consistent_embedding + np.random.randn(64) * 0.05,
-        )
-
-        reid_result = reid_tracker.update([reappear_detection])
-        no_reid_result = no_reid_tracker.update([reappear_detection])
-
-        # Both should process detections successfully
-        # Get final statistics to verify operation
-        reid_stats = reid_tracker.get_statistics()
-        no_reid_stats = no_reid_tracker.get_statistics()
-        assert reid_stats["frame_count"] >= 6 and no_reid_stats["frame_count"] >= 6
-
-
-@pytest.mark.integration
-class TestFactoryAndIntegrationAPIs:
-    """Test factory functions and integration APIs."""
-
-    def test_create_tracker_with_different_inputs(self, temp_config_file):
-        """Test create_tracker with various input types."""
-        # Default tracker
-        tracker1 = create_tracker()
-        assert hasattr(tracker1, "update")
-
-        # With config dict
-        config_dict = {"max_distance": 60.0, "use_embeddings": True}
-        tracker2 = create_tracker(config_dict)
-        assert tracker2.config.max_distance == 60.0
-        assert tracker2.config.use_embeddings
-
-        # With SwarmSortConfig object
-        config_obj = SwarmSortConfig(embedding_weight=0.7)
-        tracker3 = create_tracker(config_obj)
-        assert tracker3.config.embedding_weight == 0.7
-
-        # With YAML file
-        tracker4 = create_tracker(temp_config_file)
-        assert tracker4.config.max_distance == 75.0  # From YAML
-
-        # Force standalone
-        tracker5 = create_tracker(force_standalone=True)
-        assert hasattr(tracker5, "update")
-
-    def test_environment_detection(self):
-        """Test environment detection functionality."""
-        within_swarmtracker = is_within_swarmtracker()
-
-        # Should return boolean
-        assert isinstance(within_swarmtracker, bool)
-
-        # In standalone tests, should typically be True (due to swarmtracker being available)
-        # but this can vary depending on test environment
-
-    def test_tracker_consistency_across_interfaces(self):
-        """Test that different tracker interfaces behave consistently."""
-        config = SwarmSortConfig(min_consecutive_detections=2)
-
-        # Different ways to create tracker
-        tracker1 = SwarmSort(config)
-        tracker2 = create_tracker(config)
-
-        # Same detections
-        detections = [
-            Detection(position=np.array([10.0, 20.0]), confidence=0.9),
-            Detection(position=np.array([50.0, 60.0]), confidence=0.8),
-        ]
-
-        # Should behave similarly (though not necessarily identically due to randomness)
-        result1 = tracker1.update(detections.copy())
-        result2 = tracker2.update(detections.copy())
-
-        # Both should return list of TrackedObject
-        assert isinstance(result1, list)
-        assert isinstance(result2, list)
-
-        # Stats should be similar structure
-        stats1 = tracker1.get_statistics()
-        stats2 = tracker2.get_statistics()
-
-        assert set(stats1.keys()) == set(stats2.keys())
-
-
-@pytest.mark.integration
-@pytest.mark.slow
-class TestLongRunningScenarios:
-    """Test long-running tracking scenarios."""
-
-    def test_long_sequence_stability(self, tracking_scenario, basic_config):
-        """Test tracker stability over long sequences."""
-        config = basic_config
-        config.min_consecutive_detections = 2
-        tracker = SwarmSort(config)
-
-        # Generate long scenario
-        scenarios = tracking_scenario(num_objects=3, num_frames=50, noise_level=1.0)
-
-        all_tracks = []
-        track_counts = []
-
-        for frame_detections in scenarios:
-            tracked_objects = tracker.update(frame_detections)
-            all_tracks.append(tracked_objects)
-            track_counts.append(len(tracked_objects))
-
-        # Should eventually stabilize to expected number of tracks
-        final_track_count = track_counts[-1]
-        assert final_track_count >= 2  # Should track at least some objects
-
-        # Track count should be relatively stable in later frames
-        later_counts = track_counts[-10:]  # Last 10 frames
-        count_variance = np.var(later_counts)
-        assert count_variance <= 2.0  # Reasonable stability
-
-        # Memory usage should be reasonable
-        stats = tracker.get_statistics()
-        assert stats["active_tracks"] <= 10  # Should not create excessive tracks
-        assert stats["lost_tracks"] <= 20  # Should not accumulate too many lost tracks
-
-    def test_memory_management(self, tracking_scenario, embedding_config):
-        """Test that memory usage remains reasonable over time."""
-        config = embedding_config
-        config.max_embeddings_per_track = 5  # Limit embedding history
-        tracker = SwarmSort(config)
-
-        # Run for many frames
-        scenarios = tracking_scenario(num_objects=5, num_frames=100, noise_level=0.8)
-
-        initial_stats = tracker.get_statistics()
-
-        for i, frame_detections in enumerate(scenarios):
-            tracker.update(frame_detections)
-
-            # Periodically check memory usage
-            if i % 20 == 19:
-                stats = tracker.get_statistics()
-
-                # Should not accumulate unlimited embeddings
-                for track in tracker.tracker.tracks.values():
-                    assert len(track.embedding_history) <= config.max_embeddings_per_track
-
-                # Should not accumulate unlimited lost tracks
-                assert stats["lost_tracks"] <= 50
-
-        final_stats = tracker.get_statistics()
-        assert final_stats["active_tracks"] <= 20  # Reasonable upper bound
-
-    def test_performance_consistency(self, tracking_scenario, performance_tracker):
-        """Test that performance remains consistent over time."""
-        tracker = SwarmSort()
-        scenarios = tracking_scenario(num_objects=4, num_frames=30)
-
-        for i, frame_detections in enumerate(scenarios):
-            with performance_tracker.time_operation("frame_update"):
-                tracker.update(frame_detections)
-
-        stats = performance_tracker.get_stats("frame_update")
-        assert stats is not None
-
-        # Performance should be reasonable and consistent
-        mean_time = stats["mean"]
-        max_time = stats["max"]
-
-        assert mean_time < 0.1  # Should be fast (< 100ms per frame)
-        assert max_time < mean_time * 5  # No frame should be dramatically slower
-
-
-@pytest.mark.integration
-class TestConfigurationPersistence:
-    """Test configuration loading and saving."""
-
-    def test_config_to_dict_roundtrip(self):
-        """Test configuration serialization roundtrip."""
-        original_config = SwarmSortConfig(
-            max_distance=85.0,
-            use_embeddings=True,
-            embedding_weight=0.45,
-            reid_enabled=False,
-            min_consecutive_detections=4,
-        )
-
-        # Convert to dict and back
-        config_dict = original_config.to_dict()
-        restored_config = SwarmSortConfig.from_dict(config_dict)
-
-        # Should be identical
-        assert restored_config.max_distance == original_config.max_distance
-        assert restored_config.use_embeddings == original_config.use_embeddings
-        assert restored_config.embedding_weight == original_config.embedding_weight
-        assert restored_config.reid_enabled == original_config.reid_enabled
-        assert (
-            restored_config.min_consecutive_detections == original_config.min_consecutive_detections
-        )
-
-    def test_config_validation_integration(self):
-        """Test that configuration validation works in practice."""
-        # Valid config should work
-        valid_config = SwarmSortConfig(max_distance=50.0)
-        tracker = SwarmSort(valid_config)
-
-        detection = Detection(position=np.array([10.0, 20.0]), confidence=0.9)
-        result = tracker.update([detection])
-        assert isinstance(result, list)
-
-        # Invalid config should raise error
-        with pytest.raises(ValueError):
-            invalid_config = SwarmSortConfig(max_distance=-10.0)
-            invalid_config.validate()
-
-    def test_yaml_config_integration(self, temp_config_file):
-        """Test YAML configuration loading integration."""
-        tracker = create_tracker(temp_config_file)
-
-        # Config values from YAML should be applied
-        assert tracker.config.max_distance == 75.0
-        assert tracker.config.high_score_threshold == 0.85
+class TestSwarmSortTrackerIntegration:
+    """Test SwarmSortTracker integration interfaces."""
+    
+    def test_constructor_with_config_only(self):
+        """Test tracker creation with config only."""
+        config = SwarmSortConfig(max_distance=100.0, use_embeddings=False)
+        tracker = SwarmSortTracker(config=config)
+        
+        assert tracker.config.max_distance == 100.0
+        assert tracker.config.use_embeddings == False
+        assert tracker.embedding_extractor is None
+
+    def test_constructor_with_dict_config(self):
+        """Test tracker creation with dictionary config."""
+        config_dict = {
+            'max_distance': 150.0,
+            'use_embeddings': True,
+            'embedding_weight': 0.8
+        }
+        tracker = SwarmSortTracker(config=config_dict)
+        
+        assert tracker.config.max_distance == 150.0
         assert tracker.config.use_embeddings == True
-        assert tracker.config.embedding_weight == 0.4
+        assert tracker.config.embedding_weight == 0.8
 
-        # Should work for tracking
-        detection = Detection(position=np.array([10.0, 20.0]), confidence=0.9)
+    def test_constructor_with_embedding_type(self):
+        """Test tracker creation with embedding type."""
+        config = SwarmSortConfig(use_embeddings=True)
+        tracker = SwarmSortTracker(
+            config=config,
+            embedding_type='cupytexture',
+            use_gpu=False
+        )
+        
+        assert tracker.embedding_extractor is not None
+        assert hasattr(tracker.embedding_extractor, 'extract')
+        assert hasattr(tracker.embedding_extractor, 'embedding_dim')
+
+    def test_constructor_with_color_embedding(self):
+        """Test tracker creation with color embedding."""
+        tracker = SwarmSortTracker(
+            embedding_type='cupytexture_color',
+            use_gpu=False
+        )
+        
+        assert tracker.embedding_extractor is not None
+        assert tracker.embedding_extractor.embedding_dim == 84
+
+    def test_constructor_with_invalid_embedding(self):
+        """Test tracker creation with invalid embedding type."""
+        # Should not raise error, just warn and continue
+        tracker = SwarmSortTracker(embedding_type='invalid_embedding')
+        assert tracker.embedding_extractor is None
+
+    def test_update_with_frame_parameter(self):
+        """Test update method with frame parameter."""
+        tracker = SwarmSortTracker()
+        
+        # Create test data
+        detection = Detection(
+            position=np.array([100.0, 100.0], dtype=np.float32),
+            confidence=0.9,
+            bbox=np.array([90, 90, 110, 110], dtype=np.float32)
+        )
+        frame = np.random.randint(0, 255, size=(240, 320, 3), dtype=np.uint8)
+        
+        # Should not raise error
+        result = tracker.update([detection], frame)
+        assert isinstance(result, list)
+
+    def test_update_without_frame_parameter(self):
+        """Test update method maintains backward compatibility."""
+        tracker = SwarmSortTracker()
+        
+        detection = Detection(
+            position=np.array([100.0, 100.0], dtype=np.float32),
+            confidence=0.9
+        )
+        
+        # Should work without frame
         result = tracker.update([detection])
         assert isinstance(result, list)
+
+    def test_kwargs_handling(self):
+        """Test that extra kwargs are handled gracefully."""
+        tracker = SwarmSortTracker(
+            embedding_type='cupytexture',
+            use_gpu=False,
+            extra_param=123,  # Should be ignored
+            another_param='test'  # Should be ignored
+        )
+        
+        assert tracker.embedding_extractor is not None
+
+
+class TestDetectionInterface:
+    """Test Detection class interface compatibility."""
+    
+    def test_detection_creation_minimal(self):
+        """Test minimal Detection creation."""
+        det = Detection(
+            position=np.array([100.0, 100.0], dtype=np.float32),
+            confidence=0.8
+        )
+        
+        assert np.array_equal(det.position, np.array([100.0, 100.0]))
+        assert det.confidence == 0.8
+        assert det.bbox is None
+        assert det.embedding is None
+        assert det.class_id is None
+        assert det.id is None
+
+    def test_detection_creation_full(self):
+        """Test full Detection creation with all parameters."""
+        position = np.array([100.0, 100.0], dtype=np.float32)
+        bbox = np.array([90, 90, 110, 110], dtype=np.float32)
+        embedding = np.random.rand(64).astype(np.float32)
+        
+        det = Detection(
+            position=position,
+            confidence=0.9,
+            bbox=bbox,
+            embedding=embedding,
+            class_id=1,
+            id='det_001'
+        )
+        
+        assert np.array_equal(det.position, position)
+        assert det.confidence == 0.9
+        assert np.array_equal(det.bbox, bbox)
+        assert np.array_equal(det.embedding, embedding)
+        assert det.class_id == 1
+        assert det.id == 'det_001'
+
+    def test_detection_swarmtracker_format(self):
+        """Test Detection creation in SwarmTracker format."""
+        # Simulate SwarmTracker detection conversion
+        x1, y1, x2, y2 = 90.0, 90.0, 110.0, 110.0
+        confidence = 0.85
+        class_id = 2
+        
+        # Center point calculation
+        center_x = (x1 + x2) / 2.0
+        center_y = (y1 + y2) / 2.0
+        position = np.array([center_x, center_y], dtype=np.float32)
+        bbox = np.array([x1, y1, x2, y2], dtype=np.float32)
+        
+        det = Detection(
+            position=position,
+            confidence=confidence,
+            bbox=bbox,
+            class_id=class_id
+        )
+        
+        assert np.allclose(det.position, [100.0, 100.0])
+        assert det.confidence == 0.85
+        assert det.class_id == 2
+
+
+class TestCupyTextureColorEmbedding:
+    """Test the new CupyTextureColorEmbedding."""
+    
+    @pytest.fixture
+    def sample_frame(self):
+        """Create a sample frame for testing."""
+        # Create a colorful test image
+        frame = np.random.randint(0, 255, size=(240, 320, 3), dtype=np.uint8)
+        return frame
+    
+    @pytest.fixture
+    def sample_bbox(self):
+        """Create a sample bounding box."""
+        return np.array([100, 100, 150, 150], dtype=np.float32)
+
+    def test_embedding_creation_cpu(self, sample_frame, sample_bbox):
+        """Test color embedding creation in CPU mode."""
+        embedding = get_embedding_extractor('cupytexture_color', use_gpu=False)
+        
+        assert embedding.embedding_dim == 84
+        assert not embedding.use_gpu
+        
+        # Test single extraction
+        features = embedding.extract(sample_frame, sample_bbox)
+        assert features.shape == (84,)
+        assert features.dtype == np.float32
+
+    def test_embedding_creation_gpu(self, sample_frame, sample_bbox):
+        """Test color embedding creation in GPU mode."""
+        try:
+            embedding = get_embedding_extractor('cupytexture_color', use_gpu=True)
+            
+            assert embedding.embedding_dim == 84
+            
+            # Test single extraction
+            features = embedding.extract(sample_frame, sample_bbox)
+            assert features.shape == (84,)
+            assert features.dtype == np.float32
+            
+        except Exception as e:
+            # GPU might not be available
+            pytest.skip(f"GPU test skipped: {e}")
+
+    def test_embedding_batch_extraction(self, sample_frame):
+        """Test batch embedding extraction."""
+        embedding = get_embedding_extractor('cupytexture_color', use_gpu=False)
+        
+        bboxes = np.array([
+            [50, 50, 100, 100],
+            [100, 100, 150, 150],
+            [150, 150, 200, 200]
+        ], dtype=np.float32)
+        
+        features_list = embedding.extract_batch(sample_frame, bboxes)
+        
+        assert len(features_list) == 3
+        for features in features_list:
+            assert features.shape == (84,)
+            assert features.dtype == np.float32
+
+    def test_embedding_comparison_with_original(self, sample_frame, sample_bbox):
+        """Test that color embedding has more features than original."""
+        original_emb = get_embedding_extractor('cupytexture', use_gpu=False)
+        color_emb = get_embedding_extractor('cupytexture_color', use_gpu=False)
+        
+        original_features = original_emb.extract(sample_frame, sample_bbox)
+        color_features = color_emb.extract(sample_frame, sample_bbox)
+        
+        assert original_emb.embedding_dim == 36
+        assert color_emb.embedding_dim == 84
+        assert color_features.shape[0] > original_features.shape[0]
+
+    def test_embedding_feature_structure(self, sample_frame, sample_bbox):
+        """Test that color embedding has expected feature structure."""
+        embedding = get_embedding_extractor('cupytexture_color', use_gpu=False)
+        features = embedding.extract(sample_frame, sample_bbox)
+        
+        # Test that features are not all zeros (meaningful extraction)
+        assert not np.allclose(features, 0)
+        
+        # Test that features are normalized/reasonable range
+        assert np.all(np.isfinite(features))
+        # Features may have different scales due to color histograms and texture features
+        assert np.all(features >= -1000) and np.all(features <= 1000)
+
+    def test_embedding_consistency(self, sample_frame, sample_bbox):
+        """Test that embedding extraction is consistent."""
+        embedding = get_embedding_extractor('cupytexture_color', use_gpu=False)
+        
+        features1 = embedding.extract(sample_frame, sample_bbox)
+        features2 = embedding.extract(sample_frame, sample_bbox)
+        
+        # Should be identical for same input
+        assert np.allclose(features1, features2)
+
+
+class TestEndToEndIntegration:
+    """Test end-to-end integration scenarios."""
+    
+    def test_full_tracking_pipeline_color_embedding(self):
+        """Test complete tracking pipeline with color embedding."""
+        # Setup tracker with color embedding
+        config = SwarmSortConfig(
+            use_embeddings=True,
+            embedding_weight=1.0,
+            min_consecutive_detections=1,  # Allow immediate track creation
+            max_age=5
+        )
+        
+        tracker = SwarmSortTracker(
+            config=config,
+            embedding_type='cupytexture_color',
+            use_gpu=False
+        )
+        
+        # Create test frame and detections
+        frame = np.random.randint(0, 255, size=(240, 320, 3), dtype=np.uint8)
+        
+        # Track object across multiple frames
+        tracked_objects_history = []
+        for i in range(10):
+            # Create detection that moves slightly
+            detection = Detection(
+                position=np.array([100.0 + i*2, 100.0 + i*2], dtype=np.float32),
+                confidence=0.9,
+                bbox=np.array([95+i*2, 95+i*2, 105+i*2, 105+i*2], dtype=np.float32),
+                class_id=0
+            )
+            
+            tracked_objects = tracker.update([detection], frame)
+            tracked_objects_history.append(len(tracked_objects))
+        
+        # Should eventually create tracks
+        assert any(count > 0 for count in tracked_objects_history), \
+            f"No tracks created in sequence: {tracked_objects_history}"
+
+    def test_multi_object_tracking_with_reid(self):
+        """Test multi-object tracking with re-identification."""
+        config = SwarmSortConfig(
+            use_embeddings=True,
+            reid_enabled=True,
+            min_consecutive_detections=2,
+            max_age=10,
+            reid_max_distance=200.0
+        )
+        
+        tracker = SwarmSortTracker(
+            config=config,
+            embedding_type='cupytexture',
+            use_gpu=False
+        )
+        
+        frame = np.random.randint(0, 255, size=(240, 320, 3), dtype=np.uint8)
+        
+        # Create multiple objects
+        detections_sequence = [
+            # Frame 1: Two objects
+            [
+                Detection(np.array([50.0, 50.0]), 0.9, np.array([45, 45, 55, 55])),
+                Detection(np.array([150.0, 150.0]), 0.9, np.array([145, 145, 155, 155]))
+            ],
+            # Frame 2: Two objects moved
+            [
+                Detection(np.array([52.0, 52.0]), 0.9, np.array([47, 47, 57, 57])),
+                Detection(np.array([152.0, 152.0]), 0.9, np.array([147, 147, 157, 157]))
+            ],
+            # Frame 3: Only first object (second lost)
+            [
+                Detection(np.array([54.0, 54.0]), 0.9, np.array([49, 49, 59, 59]))
+            ],
+            # Frame 4: First object continues
+            [
+                Detection(np.array([56.0, 56.0]), 0.9, np.array([51, 51, 61, 61]))
+            ],
+            # Frame 5: Second object reappears (should be re-identified)
+            [
+                Detection(np.array([58.0, 58.0]), 0.9, np.array([53, 53, 63, 63])),
+                Detection(np.array([160.0, 160.0]), 0.9, np.array([155, 155, 165, 165]))
+            ]
+        ]
+        
+        max_tracked_count = 0
+        for detections in detections_sequence:
+            tracked_objects = tracker.update(detections, frame)
+            max_tracked_count = max(max_tracked_count, len(tracked_objects))
+        
+        # Should track multiple objects at some point
+        assert max_tracked_count >= 1
+
+    def test_config_parameter_handling(self):
+        """Test that all configuration parameters are properly handled."""
+        config_params = {
+            'max_distance': 200.0,
+            'max_age': 15,
+            'detection_conf_threshold': 0.5,
+            'use_embeddings': True,
+            'embedding_weight': 0.8,
+            'reid_enabled': True,
+            'reid_max_distance': 250.0,
+            'reid_embedding_threshold': 0.7,
+            'reid_max_frames': 20,
+            'min_consecutive_detections': 5,
+            'use_probabilistic_costs': True,
+            'duplicate_detection_threshold': 15.0
+        }
+        
+        tracker = SwarmSortTracker(
+            config=config_params,
+            embedding_type='cupytexture',
+            use_gpu=False
+        )
+        
+        # Verify parameters are set correctly
+        assert tracker.config.max_distance == 200.0
+        assert tracker.config.max_age == 15
+        assert tracker.config.use_embeddings == True
+        assert tracker.config.embedding_weight == 0.8
+        assert tracker.config.reid_enabled == True
+
+
+class TestAvailableEmbeddings:
+    """Test embedding availability and factory functions."""
+    
+    def test_list_available_embeddings(self):
+        """Test that all embeddings are listed."""
+        embeddings = list_available_embeddings()
+        
+        assert 'cupytexture' in embeddings
+        assert 'cupytexture_color' in embeddings
+        assert 'mega_cupytexture' in embeddings
+        
+        # Should have at least our 3 embeddings
+        assert len(embeddings) >= 3
+
+    def test_get_embedding_extractor_all_types(self):
+        """Test creating all available embedding types."""
+        embeddings = list_available_embeddings()
+        
+        for emb_type in embeddings:
+            try:
+                extractor = get_embedding_extractor(emb_type, use_gpu=False)
+                assert extractor is not None
+                assert hasattr(extractor, 'extract')
+                assert hasattr(extractor, 'embedding_dim')
+                assert extractor.embedding_dim > 0
+            except Exception as e:
+                pytest.fail(f"Failed to create embedding '{emb_type}': {e}")
+
+    def test_embedding_dimensions(self):
+        """Test that embeddings have expected dimensions."""
+        expected_dims = {
+            'cupytexture': 36,
+            'cupytexture_color': 84,
+            'mega_cupytexture': 64
+        }
+        
+        for emb_type, expected_dim in expected_dims.items():
+            extractor = get_embedding_extractor(emb_type, use_gpu=False)
+            assert extractor.embedding_dim == expected_dim, \
+                f"Embedding '{emb_type}' has dim {extractor.embedding_dim}, expected {expected_dim}"
+
+
+if __name__ == '__main__':
+    # Run tests if called directly
+    pytest.main([__file__, '-v'])

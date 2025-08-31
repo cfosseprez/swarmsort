@@ -10,7 +10,7 @@ import os
 from typing import List, Dict, Any
 import gc
 
-from swarmsort import SwarmSort, SwarmSortConfig, Detection, SwarmSortTracker
+from swarmsort import SwarmSort, SwarmSortConfig, Detection, SwarmSortTracker, get_embedding_extractor
 from swarmsort.core import (
     cosine_similarity_normalized,
     compute_embedding_distances_multi_history,
@@ -688,6 +688,178 @@ def run_performance_comparison():
     print("\nPerformance Comparison Results:")
     print(df.to_string(index=False))
     return df
+
+
+@pytest.mark.performance
+class TestIntegrationPerformance:
+    """Test performance of new integration features."""
+
+    @pytest.mark.benchmark
+    def test_swarmtracker_constructor_performance(self, benchmark):
+        """Test performance of SwarmSortTracker with integration parameters."""
+        def create_tracker():
+            return SwarmSortTracker(
+                config={'use_embeddings': True, 'max_distance': 150.0},
+                embedding_type='cupytexture',
+                use_gpu=False
+            )
+        
+        tracker = benchmark(create_tracker)
+        assert tracker.embedding_extractor is not None
+        assert tracker.config.use_embeddings == True
+
+    @pytest.mark.benchmark
+    def test_color_embedding_performance(self, benchmark):
+        """Test performance of CupyTextureColorEmbedding."""
+        frame = np.random.randint(0, 255, size=(480, 640, 3), dtype=np.uint8)
+        bbox = np.array([100, 100, 200, 200], dtype=np.float32)
+        
+        embedding_extractor = get_embedding_extractor('cupytexture_color', use_gpu=False)
+        
+        # Warm up
+        embedding_extractor.extract(frame, bbox)
+        
+        result = benchmark(embedding_extractor.extract, frame, bbox)
+        assert result.shape == (84,)
+
+    @pytest.mark.benchmark
+    def test_color_vs_regular_embedding_performance(self, benchmark):
+        """Compare performance of color vs regular embeddings."""
+        frame = np.random.randint(0, 255, size=(480, 640, 3), dtype=np.uint8)
+        bbox = np.array([100, 100, 200, 200], dtype=np.float32)
+        
+        regular_extractor = get_embedding_extractor('cupytexture', use_gpu=False)
+        color_extractor = get_embedding_extractor('cupytexture_color', use_gpu=False)
+        
+        # Warm up
+        regular_extractor.extract(frame, bbox)
+        color_extractor.extract(frame, bbox)
+        
+        # Time regular embedding
+        start_time = time.perf_counter()
+        for _ in range(10):
+            regular_extractor.extract(frame, bbox)
+        regular_time = time.perf_counter() - start_time
+        
+        # Time color embedding
+        start_time = time.perf_counter()
+        for _ in range(10):
+            color_extractor.extract(frame, bbox)
+        color_time = time.perf_counter() - start_time
+        
+        print(f"Regular embedding: {regular_time*100:.1f}ms avg")
+        print(f"Color embedding: {color_time*100:.1f}ms avg")
+        
+        # Color embedding should be slower but not excessively (less than 100x)
+        # Color embedding has more complex features (84 vs 36 dimensions)
+        assert color_time < regular_time * 100
+
+    @pytest.mark.benchmark
+    def test_frame_parameter_performance(self, benchmark):
+        """Test performance impact of passing frame to update method."""
+        config = SwarmSortConfig(use_embeddings=False)
+        tracker = SwarmSortTracker(config=config)
+        
+        detection = Detection(
+            position=np.array([100.0, 100.0], dtype=np.float32),
+            confidence=0.9
+        )
+        frame = np.random.randint(0, 255, size=(240, 320, 3), dtype=np.uint8)
+        
+        # Warm up
+        tracker.update([detection], frame)
+        
+        def update_with_frame():
+            return tracker.update([detection], frame)
+        
+        result = benchmark(update_with_frame)
+        assert isinstance(result, list)
+
+    @pytest.mark.benchmark 
+    def test_batch_color_embedding_performance(self, benchmark):
+        """Test batch performance of color embeddings."""
+        frame = np.random.randint(0, 255, size=(480, 640, 3), dtype=np.uint8)
+        bboxes = np.array([
+            [50, 50, 100, 100],
+            [150, 150, 200, 200],
+            [250, 250, 300, 300],
+            [350, 350, 400, 400],
+            [100, 300, 150, 350]
+        ], dtype=np.float32)
+        
+        embedding_extractor = get_embedding_extractor('cupytexture_color', use_gpu=False)
+        
+        # Warm up
+        embedding_extractor.extract_batch(frame, bboxes)
+        
+        result = benchmark(embedding_extractor.extract_batch, frame, bboxes)
+        assert len(result) == 5
+        for features in result:
+            assert features.shape == (84,)
+
+    def test_integration_memory_usage(self):
+        """Test memory usage of integration features."""
+        profiler = MemoryProfiler()
+        profiler.start()
+        
+        # Test SwarmSortTracker with embedding integration
+        tracker = SwarmSortTracker(
+            config={'use_embeddings': True, 'max_age': 20},
+            embedding_type='cupytexture_color',
+            use_gpu=False
+        )
+        
+        baseline_memory = profiler.get_usage()
+        
+        # Create test frame and run tracking
+        frame = np.random.randint(0, 255, size=(240, 320, 3), dtype=np.uint8)
+        
+        for frame_idx in range(100):
+            detections = []
+            for i in range(5):
+                detection = Detection(
+                    position=np.array([100.0 + i*30 + frame_idx*0.5, 100.0 + i*20], dtype=np.float32),
+                    confidence=0.9,
+                    bbox=np.array([90+i*30, 90+i*20, 110+i*30, 110+i*20], dtype=np.float32)
+                )
+                detections.append(detection)
+            
+            tracker.update(detections, frame)
+            
+            if frame_idx % 20 == 19:
+                current_memory = profiler.get_usage()
+                memory_increase = current_memory - baseline_memory
+                
+                # Memory should not grow excessively
+                assert abs(memory_increase) < 150, \
+                    f"Memory usage at frame {frame_idx}: {memory_increase:.2f}MB"
+
+    @pytest.mark.parametrize("embedding_type", ['cupytexture', 'cupytexture_color', 'mega_cupytexture'])
+    def test_all_embeddings_performance(self, embedding_type):
+        """Test performance of all available embeddings."""
+        try:
+            extractor = get_embedding_extractor(embedding_type, use_gpu=False)
+        except Exception as e:
+            pytest.skip(f"Embedding {embedding_type} not available: {e}")
+        
+        frame = np.random.randint(0, 255, size=(240, 320, 3), dtype=np.uint8)
+        bbox = np.array([50, 50, 100, 100], dtype=np.float32)
+        
+        # Warm up
+        extractor.extract(frame, bbox)
+        
+        # Time extraction
+        start_time = time.perf_counter()
+        for _ in range(10):
+            features = extractor.extract(frame, bbox)
+        total_time = time.perf_counter() - start_time
+        avg_time = total_time / 10
+        
+        print(f"{embedding_type} extraction: {avg_time*1000:.1f}ms avg (dim: {features.shape[0]})")
+        
+        # Should extract in reasonable time (< 100ms)
+        assert avg_time < 0.1, f"{embedding_type} took {avg_time*1000:.1f}ms, expected < 100ms"
+        assert features.shape[0] == extractor.embedding_dim
 
 
 if __name__ == "__main__":
