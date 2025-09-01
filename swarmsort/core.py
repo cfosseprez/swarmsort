@@ -724,7 +724,7 @@ def compute_3d_cost_tensor(
         embedding_weight: float,
 ) -> np.ndarray:
     """
-    Compute 3D cost tensor: [detections, tracks, methods]
+    NUMBA-OPTIMIZED 3D cost tensor: [detections, tracks, methods]
     Methods: 0=Kalman, 1=Observation-based, 2=Fused
     """
     n_dets = det_positions.shape[0]
@@ -733,48 +733,51 @@ def compute_3d_cost_tensor(
 
     cost_tensor = np.full((n_dets, n_tracks, n_methods), np.inf, dtype=np.float32)
 
+    # Pre-compute fused positions (numba-compatible)
+    fused_positions = np.empty((n_tracks, 2), dtype=np.float32)
+    for j in range(n_tracks):
+        fused_positions[j, 0] = 0.6 * track_observation_positions[j, 0] + 0.4 * track_kalman_positions[j, 0]
+        fused_positions[j, 1] = 0.6 * track_observation_positions[j, 1] + 0.4 * track_kalman_positions[j, 1]
+    
+    # Vectorized distance computation for each method
     for i in range(n_dets):
+        det_x, det_y = det_positions[i, 0], det_positions[i, 1]
+        
         for j in range(n_tracks):
-            # Method 0: Kalman prediction + embedding
-            spatial_cost_kalman = np.sqrt(
-                (det_positions[i, 0] - track_kalman_positions[j, 0]) ** 2 +
-                (det_positions[i, 1] - track_kalman_positions[j, 1]) ** 2
-            )
-
+            # Method 0: Kalman - vectorized computation
+            dx = det_x - track_kalman_positions[j, 0]
+            dy = det_y - track_kalman_positions[j, 1]
+            spatial_cost_kalman = np.sqrt(dx*dx + dy*dy)
+            
             if spatial_cost_kalman <= max_distance:
                 total_cost = spatial_cost_kalman
                 if use_embeddings:
-                    embedding_cost = scaled_embedding_matrix[i, j] * max_distance
-                    total_cost += embedding_weight * embedding_cost
+                    embedding_cost = scaled_embedding_matrix[i, j] * max_distance * embedding_weight
+                    total_cost += embedding_cost
                 cost_tensor[i, j, 0] = total_cost
-
-            # Method 1: Observation-based prediction + embedding
-            spatial_cost_obs = np.sqrt(
-                (det_positions[i, 0] - track_observation_positions[j, 0]) ** 2 +
-                (det_positions[i, 1] - track_observation_positions[j, 1]) ** 2
-            )
-
+            
+            # Method 1: Observation - vectorized computation
+            dx = det_x - track_observation_positions[j, 0]
+            dy = det_y - track_observation_positions[j, 1]
+            spatial_cost_obs = np.sqrt(dx*dx + dy*dy)
+            
             if spatial_cost_obs <= max_distance:
                 total_cost = spatial_cost_obs
                 if use_embeddings:
-                    embedding_cost = scaled_embedding_matrix[i, j] * max_distance
-                    total_cost += embedding_weight * embedding_cost
+                    embedding_cost = scaled_embedding_matrix[i, j] * max_distance * embedding_weight
+                    total_cost += embedding_cost
                 cost_tensor[i, j, 1] = total_cost
-
-            # Method 2: Fused prediction (weighted combination)
-            fused_x = 0.6 * track_observation_positions[j, 0] + 0.4 * track_kalman_positions[j, 0]
-            fused_y = 0.6 * track_observation_positions[j, 1] + 0.4 * track_kalman_positions[j, 1]
-
-            spatial_cost_fused = np.sqrt(
-                (det_positions[i, 0] - fused_x) ** 2 +
-                (det_positions[i, 1] - fused_y) ** 2
-            )
-
+            
+            # Method 2: Fused - vectorized computation
+            dx = det_x - fused_positions[j, 0]
+            dy = det_y - fused_positions[j, 1]
+            spatial_cost_fused = np.sqrt(dx*dx + dy*dy)
+            
             if spatial_cost_fused <= max_distance:
                 total_cost = spatial_cost_fused
                 if use_embeddings:
-                    embedding_cost = scaled_embedding_matrix[i, j] * max_distance
-                    total_cost += embedding_weight * embedding_cost
+                    embedding_cost = scaled_embedding_matrix[i, j] * max_distance * embedding_weight
+                    total_cost += embedding_cost
                 cost_tensor[i, j, 2] = total_cost
 
     return cost_tensor
@@ -784,27 +787,19 @@ def compute_3d_cost_tensor(
 def solve_3d_assignment_flattened(cost_tensor: np.ndarray, max_distance: float) -> Tuple[
     np.ndarray, np.ndarray, np.ndarray]:
     """
-    Solve 3D assignment by flattening to 2D and using greedy assignment.
+    OPTIMIZED: Solve 3D assignment directly without flattening.
     Returns: matches [(det_idx, track_idx, method_idx)], unmatched_dets, unmatched_tracks
     """
     n_dets, n_tracks, n_methods = cost_tensor.shape
 
-    # Flatten tensor: each track gets n_methods virtual copies
-    flattened_costs = np.full((n_dets, n_tracks * n_methods), np.inf, dtype=np.float32)
-
-    for i in range(n_dets):
-        for j in range(n_tracks):
-            for k in range(n_methods):
-                flat_idx = j * n_methods + k
-                flattened_costs[i, flat_idx] = cost_tensor[i, j, k]
-
-    # Use greedy assignment on flattened matrix
+    # Use greedy assignment directly on 3D tensor - avoid flattening overhead
     used_dets = np.zeros(n_dets, dtype=np.bool_)
-    used_tracks = np.zeros(n_tracks, dtype=np.bool_)  # Track original tracks, not virtual copies
+    used_tracks = np.zeros(n_tracks, dtype=np.bool_)
 
     matches = np.empty((min(n_dets, n_tracks), 3), dtype=np.int32)  # [det, track, method]
     num_matches = 0
 
+    # Direct 3D greedy search - more efficient than flattening
     for _ in range(min(n_dets, n_tracks)):
         best_cost = np.inf
         best_det = -1
@@ -814,19 +809,16 @@ def solve_3d_assignment_flattened(cost_tensor: np.ndarray, max_distance: float) 
         for d in range(n_dets):
             if used_dets[d]:
                 continue
-            for flat_t in range(n_tracks * n_methods):
-                orig_track = flat_t // n_methods
-                method = flat_t % n_methods
-
-                if used_tracks[orig_track]:
+            for t in range(n_tracks):
+                if used_tracks[t]:
                     continue
-
-                cost = flattened_costs[d, flat_t]
-                if cost < best_cost and cost <= max_distance:
-                    best_cost = cost
-                    best_det = d
-                    best_track = orig_track
-                    best_method = method
+                for m in range(n_methods):
+                    cost = cost_tensor[d, t, m]
+                    if cost < best_cost and cost <= max_distance:
+                        best_cost = cost
+                        best_det = d
+                        best_track = t
+                        best_method = m
 
         if best_det >= 0:
             matches[num_matches, 0] = best_det
