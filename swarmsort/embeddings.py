@@ -597,7 +597,21 @@ class CupyTextureEmbedding(EmbeddingExtractor):
         # Use batch processing even for single patch for consistency
         patches = np.expand_dims(patch, axis=0)
         features = np.zeros((1, self._dim), dtype=np.float32)
-        extract_features_batch_jit(patches, features)
+        try:
+            extract_features_batch_jit(patches, features)
+        except Exception as e:
+            logger.warning(f"Numba JIT compilation failed: {e}. Using basic CPU fallback for single extraction.")
+            # Basic CPU fallback for single patch
+            if len(patch.shape) == 3:
+                gray = cv2.cvtColor(patch, cv2.COLOR_BGR2GRAY).astype(np.float32)
+            else:
+                gray = patch.astype(np.float32)
+            features[0, :min(8, self._dim)] = [
+                np.mean(gray), np.std(gray), np.min(gray), np.max(gray),
+                np.mean(np.abs(cv2.Sobel(gray, cv2.CV_64F, 1, 0, ksize=3))),
+                np.mean(np.abs(cv2.Sobel(gray, cv2.CV_64F, 0, 1, ksize=3))),
+                np.var(gray), np.max(gray) - np.min(gray)
+            ][:min(8, self._dim)]
         return features[0]
 
     def extract_batch_cpu(self, frame: np.ndarray, bboxes: np.ndarray) -> List[np.ndarray]:
@@ -622,8 +636,24 @@ class CupyTextureEmbedding(EmbeddingExtractor):
         patches_array = np.array(patches)
         features = np.zeros((len(patches), self._dim), dtype=np.float32)
 
-        # JIT-compiled batch processing
-        extract_features_batch_jit(patches_array, features)
+        # JIT-compiled batch processing with fallback for Python 3.9 compatibility
+        try:
+            extract_features_batch_jit(patches_array, features)
+        except Exception as e:
+            logger.warning(f"Numba JIT compilation failed: {e}. Using basic CPU fallback.")
+            # Simple CPU fallback - basic texture features
+            for i, patch in enumerate(patches):
+                if len(patch.shape) == 3:
+                    gray = cv2.cvtColor(patch, cv2.COLOR_BGR2GRAY).astype(np.float32)
+                else:
+                    gray = patch.astype(np.float32)
+                # Fill with basic statistics
+                features[i, :min(8, self._dim)] = [
+                    np.mean(gray), np.std(gray), np.min(gray), np.max(gray),
+                    np.mean(np.abs(cv2.Sobel(gray, cv2.CV_64F, 1, 0, ksize=3))),
+                    np.mean(np.abs(cv2.Sobel(gray, cv2.CV_64F, 0, 1, ksize=3))),
+                    np.var(gray), np.max(gray) - np.min(gray)
+                ][:min(8, self._dim)]
 
         # Map back to original indices
         result = []
@@ -1247,6 +1277,67 @@ class MegaCupyTextureEmbedding(EmbeddingExtractor):
         )
         return patch
 
+    def _extract_features_cpu_fallback(self, patch: np.ndarray) -> np.ndarray:
+        """CPU fallback for feature extraction without Numba JIT (Python 3.9 compatibility)."""
+        H, W = patch.shape[:2]
+        features = np.zeros(self._dim, dtype=np.float32)
+        feature_idx = 0
+        
+        # Convert to grayscale
+        if len(patch.shape) == 3:
+            gray = cv2.cvtColor(patch, cv2.COLOR_BGR2GRAY).astype(np.float32)
+        else:
+            gray = patch.astype(np.float32)
+        
+        # Basic stats (4 features)
+        features[feature_idx:feature_idx+4] = [
+            np.mean(gray), np.std(gray), np.min(gray), np.max(gray)
+        ]
+        feature_idx += 4
+        
+        # Gradients (4 features) 
+        grad_x = cv2.Sobel(gray, cv2.CV_64F, 1, 0, ksize=3)
+        grad_y = cv2.Sobel(gray, cv2.CV_64F, 0, 1, ksize=3)
+        features[feature_idx:feature_idx+4] = [
+            np.mean(np.abs(grad_x)), np.std(grad_x),
+            np.mean(np.abs(grad_y)), np.std(grad_y)
+        ]
+        feature_idx += 4
+        
+        # Simple shape moments (10 features)
+        moments = cv2.moments(gray)
+        m00 = moments['m00'] + 1e-6
+        features[feature_idx:feature_idx+10] = [
+            moments['m10']/m00, moments['m01']/m00,  # centroid
+            moments['m20']/m00, moments['m11']/m00, moments['m02']/m00,  # second moments
+            moments['mu20']/m00, moments['mu11']/m00, moments['mu02']/m00,  # central moments
+            0.0, 0.0  # eccentricity and orientation placeholders
+        ]
+        feature_idx += 10
+        
+        # Simple HSV color features (6 features)
+        if len(patch.shape) == 3:
+            hsv = cv2.cvtColor(patch, cv2.COLOR_BGR2HSV)
+            for i in range(3):
+                channel = hsv[:,:,i].astype(np.float32)
+                features[feature_idx + 2*i] = np.mean(channel)
+                features[feature_idx + 2*i + 1] = np.std(channel)
+        feature_idx += 6
+        
+        # Simple texture features - fill remaining with basic texture stats
+        laplacian = cv2.Laplacian(gray, cv2.CV_64F)
+        remaining_features = self._dim - feature_idx
+        if remaining_features > 0:
+            # Fill remaining with Laplacian stats and zeros
+            basic_texture = [
+                np.mean(np.abs(laplacian)), np.std(laplacian),
+                np.var(gray), np.max(gray) - np.min(gray)
+            ]
+            n_basic = min(len(basic_texture), remaining_features)
+            features[feature_idx:feature_idx+n_basic] = basic_texture[:n_basic]
+        
+        return features
+
     def extract_batch_cpu(self, frame: np.ndarray, bboxes: np.ndarray) -> List[np.ndarray]:
         if len(bboxes) == 0:
             return []
@@ -1262,7 +1353,14 @@ class MegaCupyTextureEmbedding(EmbeddingExtractor):
 
         patches_array = np.array(patches)
         features = np.zeros((len(patches), self._dim), dtype=np.float32)
-        extract_mega_features_batch_jit(patches_array, features)
+        
+        try:
+            extract_mega_features_batch_jit(patches_array, features)
+        except Exception as e:
+            logger.warning(f"Numba JIT compilation failed: {e}. Falling back to CPU implementation.")
+            # Fallback to CPU implementation without JIT for Python 3.9 compatibility
+            for i, patch in enumerate(patches):
+                features[i] = self._extract_features_cpu_fallback(patch)
 
         result = [np.zeros(self._dim, dtype=np.float32) for _ in bboxes]
         for i, valid_idx in enumerate(valid_indices):

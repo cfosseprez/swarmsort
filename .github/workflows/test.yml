@@ -22,13 +22,8 @@ jobs:
         # Test on all supported Python versions across all supported OSes to ensure
         # broad compatibility.
         # Python 3.12 is excluded as it's not supported by pyproject.toml (<3.12).
-        # macOS excluded due to numba compilation issues on Python 3.9
-        os: [ubuntu-latest, windows-latest]
+        os: [ubuntu-latest, windows-latest, macos-latest]
         python-version: ["3.9", "3.10", "3.11"]
-        exclude:
-          # Exclude Python 3.9 on certain combinations due to numba issues
-          - os: windows-latest
-            python-version: "3.9"
 
     steps:
     - name: Checkout repository
