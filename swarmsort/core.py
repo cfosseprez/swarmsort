@@ -1048,16 +1048,13 @@ class SwarmSortTracker:
                     det.embedding = emb / norm  # Store normalized version
 
         start("assignment")
-        # Check for prediction collisions before assignment
-        collision_groups = self._detect_prediction_collisions()
-        
         if self.use_probabilistic_costs:
             matches, unmatched_dets, unmatched_tracks = self._fast_assignment_probabilistic(
-                valid_detections, timer, start, stop, collision_groups
+                valid_detections, timer, start, stop
             )
         else:
             matches, unmatched_dets, unmatched_tracks = self._fast_assignment(
-                valid_detections, timer, start, stop, collision_groups
+                valid_detections, timer, start, stop
             )
         stop("assignment")
 
@@ -1571,6 +1568,7 @@ class SwarmSortTracker:
         unmatched_tracks = [i for i in range(n_tracks) if i not in matched_tracks]
 
         return matches, unmatched_dets, unmatched_tracks
+
 
     def _get_detection_confidence(self, detection: Detection) -> float:
         """Extract confidence from detection object"""
