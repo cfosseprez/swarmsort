@@ -57,6 +57,92 @@ class BaseConfig:
             yaml.dump(self.to_dict(), f, default_flow_style=False)
 
 
+def merge_config_with_priority(default_config: Any,
+                             runtime_config: Optional[Dict] = None,
+                             yaml_config_location=None,
+                             yaml_config_name: str = "swarmsort_config.yaml",
+                             verbose_parameters=False):
+    """
+    Merge configuration from multiple sources with priority:
+    runtime_config > yaml_config > default_config
+    """
+    # Start with hardcoded defaults
+    config = default_config()
+
+    # Override with YAML config (yaml > hardcoded)
+    try:
+        loaded_config = load_local_yaml_config(yaml_config_name, caller_file=yaml_config_location)
+        for k, v in loaded_config.items():
+            if hasattr(config, k):
+                setattr(config, k, v)
+            else:
+                print(f"Warning: Ignoring unknown YAML config key: {k}")
+    except Exception as e:
+        print(f"Warning: Could not load config from {yaml_config_name}, using defaults: {e}")
+
+    # Override with runtime config (runtime > yaml > hardcoded)
+    if runtime_config:
+        for k, v in runtime_config.items():
+            if hasattr(config, k):
+                setattr(config, k, v)
+            else:
+                print(f"Warning: Ignoring unknown runtime config key: {k}")
+
+    if verbose_parameters:
+        config_dict = config.to_dict()
+        lines = [f"     {key} = {value}" for key, value in config_dict.items()]
+        param_str = f"Creating {default_config.__name__} with parameters:\n" + "\n".join(lines)
+        print(param_str)
+
+    return config
+
+
+def load_local_yaml_config(yaml_filename: str, caller_file: Optional[str] = None) -> Dict[str, Any]:
+    """
+    Try to load a local YAML configuration file.
+    
+    Searches in:
+    - Same directory as caller module (if provided)  
+    - Same directory as this module
+    - Parent directories
+    """
+    search_paths = []
+
+    # Add caller's directory first if provided
+    if caller_file:
+        caller_path = Path(caller_file).parent
+        search_paths.extend([
+            caller_path / yaml_filename,
+            caller_path.parent / yaml_filename,
+        ])
+
+    # Add original search paths
+    search_paths.extend([
+        Path(__file__).parent / yaml_filename,
+        Path(__file__).parent.parent / yaml_filename,
+    ])
+
+    for yaml_path in search_paths:
+        try:
+            if yaml_path.exists():
+                with open(yaml_path, 'r', encoding='utf-8') as f:
+                    local_config = yaml.safe_load(f)
+
+                if isinstance(local_config, dict):
+                    print(f"Successfully loaded local YAML config from: {yaml_path}")
+                    return local_config
+                else:
+                    print(f"Warning: Local config file {yaml_path} does not contain a valid dictionary")
+
+        except yaml.YAMLError as e:
+            print(f"Warning: Error parsing YAML file {yaml_path}: {e}")
+        except Exception as e:
+            print(f"Warning: Error reading local config file {yaml_path}: {e}")
+
+    print("Local config could not be loaded from any location, using hardcoded defaults")
+    return {}
+
+
 @dataclass
 class SwarmSortConfig(BaseConfig):
     """
@@ -70,7 +156,7 @@ class SwarmSortConfig(BaseConfig):
     max_distance: float = 80.0  # Maximum distance for association
     high_score_threshold: float = 0.8  # Threshold for high-confidence detections
     max_age: int = 20  # Maximum frames to keep a track alive without detections
-    detection_conf_threshold: float = 0.3  # Minimum confidence for detections
+    detection_conf_threshold: float = 0  # Minimum confidence for detections
 
     # Embedding parameters
     use_embeddings: bool = True  # Whether to use embedding features
@@ -92,10 +178,10 @@ class SwarmSortConfig(BaseConfig):
     # Track initialization parameters
     min_consecutive_detections: int = 3  # Minimum consecutive detections to create track
     max_detection_gap: int = 2  # Maximum gap between detections for same pending track
-    pending_detection_distance: float = 50.0  # Distance threshold for pending detection matching
+    pending_detection_distance: float = 125.0  # Distance threshold for pending detection matching
 
     # Duplicate detection removal
-    duplicate_detection_threshold: float = 25.0  # Distance threshold for duplicate removal
+    duplicate_detection_threshold: float = 0  # Distance threshold for duplicate removal
 
     # Embedding distance scaling
     embedding_scaling_method: str = "min_robustmax"  # Method for scaling embedding distances

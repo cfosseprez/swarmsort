@@ -214,26 +214,107 @@ class RawTrackerSwarmSORT:
 # ============================================================================
 
 
-def create_swarmsort_tracker(runtime_config=None, yaml_config_location=None) -> RawTrackerSwarmSORT:
+def create_swarmsort_tracker(runtime_config=None, yaml_config_location=None):
     """
     Create SwarmSORT tracker with full config handling - SwarmTracker compatible
 
     This function maintains the exact same interface as the old integration,
     ensuring seamless compatibility with the SwarmTracker pipeline.
     """
+    try:
+        from .core import SwarmSortTracker 
+        from .config import SwarmSortConfig
+        from .embeddings import is_gpu_available
+        from dataclasses import asdict
+        
+        # Handle config merging exactly like the old implementation
+        config_dict = {}
+        
+        if runtime_config is not None and hasattr(runtime_config, "get_modified_params"):
+            modified_params = runtime_config.get_modified_params()
+            # Map SwarmTracker parameter names to SwarmSort parameter names
+            param_mapping = {
+                'do_embeddings': 'use_embeddings',
+                # embedding_function is handled separately below
+            }
+            
+            for key, value in modified_params.items():
+                mapped_key = param_mapping.get(key, key)
+                config_dict[mapped_key] = value
+        
+        # Use SwarmSort's own config system
+        try:
+            from .config import merge_config_with_priority, SwarmSortConfig as SWARMSORTConfig
+            
+            # Get YAML config location
+            yaml_config_location = yaml_config_location or __file__
+            
+            # Use SwarmSort's own config system that knows about these fields
+            config_obj = merge_config_with_priority(
+                default_config=SWARMSORTConfig,  # Use SwarmSort package's config that knows about these fields
+                runtime_config=config_dict,
+                yaml_config_location=yaml_config_location,
+                yaml_config_name="swarmsort_config.yaml",
+                verbose_parameters=True
+            )
+            # Convert to dict for parameter extraction
+            config_dict = config_obj.to_dict()
+        except ImportError as e:
+            # If config system fails, use runtime config only
+            print(f"Warning: SwarmSort config system not available: {e}")
+            pass
+        
+        # Convert YAML config to SwarmSort package format
+        embedding_type = config_dict.get('embedding_function', 'cupytexture')
+        use_gpu = config_dict.get('use_gpu', True) if is_gpu_available() else False
+        
+        # Validate and adjust embedding type for GPU availability
+        if not use_gpu and embedding_type in ['cupytexture', 'mega_cupytexture']:
+            print(f"GPU not available, switching from {embedding_type} to histogram")
+            embedding_type = 'histogram'
+        elif use_gpu and embedding_type == 'histogram':
+            # Upgrade to GPU embedding if available
+            embedding_type = 'cupytexture'
+            print("Upgrading to GPU-accelerated cupytexture embedding")
 
-    # Handle config merging exactly like the old implementation
-    config_dict = {}
+        # Create SwarmSort config with parameters from YAML
+        swarmsort_config = SwarmSortConfig(
+            # Use values from YAML config with proper defaults
+            max_distance=float(config_dict.get('max_distance', 80.0)),
+            max_age=int(config_dict.get('max_age', 20)),
+            detection_conf_threshold=float(config_dict.get('detection_conf_threshold', 0.0)),
+            use_embeddings=bool(config_dict.get('do_embeddings', True)),
+            embedding_weight=float(config_dict.get('embedding_weight', 1.0)),
+            reid_enabled=bool(config_dict.get('reid_enabled', True)),
+            reid_max_distance=float(config_dict.get('reid_max_distance', 150.0)),
+            reid_embedding_threshold=float(config_dict.get('reid_embedding_threshold', 0.4)),
+            reid_max_frames=int(config_dict.get('reid_max_frames', 10)),
+            min_consecutive_detections=int(config_dict.get('min_consecutive_detections', 3)),
+            max_detection_gap=int(config_dict.get('max_detection_gap', 2)),
+            pending_detection_distance=float(config_dict.get('pending_detection_distance', 125.0)),
+            use_probabilistic_costs=bool(config_dict.get('use_probabilistic_costs', True)),
+            duplicate_detection_threshold=float(config_dict.get('duplicate_detection_threshold', 0.0)),
+        )
 
-    if runtime_config is not None and hasattr(runtime_config, "get_modified_params"):
-        modified_params = runtime_config.get_modified_params()
-        config_dict.update(modified_params)
+        # Create and return the new SwarmSort package tracker
+        return SwarmSortTracker(
+            config=swarmsort_config,
+            embedding_type=embedding_type,
+            use_gpu=use_gpu
+        )
+        
+    except ImportError as e:
+        # Fallback to old adapter approach if SwarmSort package components fail
+        config_dict = {}
+        if runtime_config is not None and hasattr(runtime_config, "get_modified_params"):
+            modified_params = runtime_config.get_modified_params()
+            config_dict.update(modified_params)
 
-    return RawTrackerSwarmSORT(
-        tracker_config=config_dict,
-        runtime_config=runtime_config,
-        yaml_config_location=yaml_config_location,
-    )
+        return RawTrackerSwarmSORT(
+            tracker_config=config_dict,
+            runtime_config=runtime_config,
+            yaml_config_location=yaml_config_location,
+        )
 
 
 # ============================================================================

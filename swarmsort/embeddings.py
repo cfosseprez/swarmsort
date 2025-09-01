@@ -18,7 +18,7 @@ try:
     from cupyx.scipy.ndimage import uniform_filter
 
     CUPY_AVAILABLE = True
-    logger.info("CuPy detected - GPU acceleration available")
+    logger.debug("CuPy detected - GPU acceleration available")
 except ImportError:
     CUPY_AVAILABLE = False
     cp = None
