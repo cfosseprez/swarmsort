@@ -153,7 +153,7 @@ class SwarmSortConfig(BaseConfig):
     """
 
     # Core tracking parameters
-    max_distance: float = 40.0  # Maximum distance for association
+    max_distance: float = 80.0  # Maximum distance for association
     detection_conf_threshold: float = 0  # Minimum confidence for detections (general filter)
     max_track_age: int = 30  # Maximum frames a track can exist without detection before deletion
 
@@ -169,10 +169,10 @@ class SwarmSortConfig(BaseConfig):
     use_probabilistic_costs: bool = False  # Use probabilistic fusion vs simple costs
 
     # Assignment strategy parameters
-    assignment_strategy: Literal["hungarian", "greedy", "hybrid"] = "greedy"
-    greedy_threshold: float = 30.0  # Distance threshold for greedy assignment
-    greedy_confidence_boost: float = 0.8  # Confidence multiplier for greedy matches  
-    hungarian_fallback_threshold: float = 1.5  # Multiplier of max_distance for Hungarian fallback
+    assignment_strategy: Literal["hungarian", "greedy", "hybrid"] = "hybrid"
+    greedy_threshold: float = max_distance/2  # Distance threshold for greedy assignment
+    greedy_confidence_boost: float = 1  # Confidence multiplier for greedy matches
+    hungarian_fallback_threshold: float = 1  # Multiplier of max_distance for Hungarian fallback
 
     # Re-identification (ReID) parameters
     reid_enabled: bool = True  # Enable re-identification of lost tracks

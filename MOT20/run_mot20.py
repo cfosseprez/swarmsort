@@ -83,14 +83,14 @@ MOT20_CONFIG = SwarmSortConfig(
     embedding_weight=1,             # Balance between motion and appearance (0=motion only, 1=equal)
     
     # Track lifecycle parameters  
-    max_age=40,                       # Keep tracks alive for N frames without detections
+    max_track_age=40,                       # Keep tracks alive for N frames without detections
     min_consecutive_detections=3,     # Require 3 consecutive detections before confirming track (default)
     duplicate_detection_threshold=2,
 
     # Distance thresholds
-    max_distance=100.0,               # Maximum distance for track-detection association
+    max_distance=50.0,               # Maximum distance for track-detection association
     reid_enabled=True,                # Enable re-identification for lost tracks
-    reid_max_distance=125.0,          # Maximum distance for ReID associations
+    reid_max_distance=100.0,          # Maximum distance for ReID associations
     reid_embedding_threshold=0.4,     # Minimum embedding similarity for ReID (0-1, lower=more permissive)
 )
 
