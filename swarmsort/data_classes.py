@@ -88,6 +88,7 @@ class TrackedObject:
     state: int  # e.g., 0: Tentative, 1: Confirmed, 2: Deleted
     bbox: Optional[np.ndarray] = None
     class_id: Optional[int] = None
+    predicted_position: Optional[np.ndarray] = None  # Predicted position for visualization
 
 
 @dataclass

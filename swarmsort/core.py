@@ -2016,6 +2016,7 @@ class SwarmSortTracker:
                     state=1 if track.confirmed else 0,
                     bbox=track.bbox.copy() if track.bbox is not None else None,
                     class_id=None,
+                    predicted_position=(track.position + track.velocity).copy(),  # Add predicted position
                 )
                 results.append(tracked_obj)
         return results
