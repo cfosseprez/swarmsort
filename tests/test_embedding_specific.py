@@ -864,6 +864,9 @@ class TestEmbeddingIntegrationScenarios:
             use_embeddings=True,
             embedding_weight=0.7,
             embedding_scaling_min_samples=50,  # Lower min samples to ensure scaler becomes ready
+            init_conf_threshold=0.0,  # Allow all detections to create tracks
+            min_consecutive_detections=1,  # Tracks confirmed immediately
+            use_probabilistic_costs=True,  # Enable probabilistic mode to trigger embedding scaler
         )
         tracker = SwarmSort(config)
 

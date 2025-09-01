@@ -864,14 +864,13 @@ class SwarmSortTracker:
     - Re-identification for recovering lost tracks
     - Probabilistic cost computation for robust associations
 
-    The tracker maintains active tracks, lost tracks (for ReID), and pending detections
-    (for track initialization). It supports both embedding-based and motion-only tracking
-    modes with extensive configuration options.
+    The tracker maintains active tracks and pending detections (for track initialization).
+    ReID is performed on active tracks that have missed recent detections. It supports 
+    both embedding-based and motion-only tracking modes with extensive configuration options.
 
     Attributes:
         config (SwarmSortConfig): Configuration object containing all tracker parameters
         tracks (dict): Active tracks indexed by track ID
-        lost_tracks (dict): Lost tracks available for re-identification
         pending_detections (dict): Unconfirmed detections being evaluated for track creation
         next_track_id (int): ID counter for new tracks
         frame_count (int): Current frame number
@@ -927,9 +926,9 @@ class SwarmSortTracker:
 
         # Core parameters
         self.max_distance = self.config.max_distance
-        self.high_score_threshold = getattr(self.config, "high_score_threshold", 0.8)
+        self.init_conf_threshold = getattr(self.config, "init_conf_threshold", 0.15)
         self.embedding_weight = self.config.embedding_weight
-        self.max_age = self.config.max_age
+        self.max_track_age = self.config.max_track_age
         self.detection_conf_threshold = self.config.detection_conf_threshold
 
         # Embedding history configuration
@@ -943,7 +942,6 @@ class SwarmSortTracker:
         self.reid_enabled = self.config.reid_enabled
         self.reid_max_distance = self.config.reid_max_distance
         self.reid_embedding_threshold = self.config.reid_embedding_threshold
-        self.reid_max_frames = self.config.reid_max_frames
 
         # INITIALIZATION PARAMETERS
         self.min_consecutive_detections = self.config.min_consecutive_detections
@@ -957,7 +955,6 @@ class SwarmSortTracker:
 
         # Storage
         self.tracks = {}
-        self.lost_tracks = {}
         self.pending_detections = []  # INITIALIZATION LOGIC!
         self.next_id = 1
         self.frame_count = 0
@@ -1075,7 +1072,7 @@ class SwarmSortTracker:
         self._handle_unmatched_tracks(unmatched_tracks)
         stop("handle_unmatched_tracks")
 
-        if self.reid_enabled and self.lost_tracks:
+        if self.reid_enabled and any(track.misses > 0 for track in self.tracks.values()):
             start("reid")
             reid_matches = self._attempt_reid(valid_detections, unmatched_dets)
             unmatched_dets = [idx for idx in unmatched_dets if idx not in reid_matches]
@@ -1113,20 +1110,20 @@ class SwarmSortTracker:
         if not unmatched_det_indices:
             return
 
-        # Filter high-confidence detections
-        high_conf_detections = []
+        # Filter detections that meet initialization confidence threshold
+        init_eligible_detections = []
         for det_idx in unmatched_det_indices:
             detection = detections[det_idx]
             det_conf = self._get_detection_confidence(detection)
-            if det_conf >= self.high_score_threshold:
-                high_conf_detections.append((det_idx, detection))
+            if det_conf >= self.init_conf_threshold:
+                init_eligible_detections.append((det_idx, detection))
 
-        if not high_conf_detections:
+        if not init_eligible_detections:
             return
 
-        # Extract positions of high-confidence detections
+        # Extract positions of initialization-eligible detections
         det_positions = np.array(
-            [detection.position.flatten()[:2] for _, detection in high_conf_detections],
+            [detection.position.flatten()[:2] for _, detection in init_eligible_detections],
             dtype=np.float32,
         )
 
@@ -1147,7 +1144,7 @@ class SwarmSortTracker:
 
             # Process each detection
             matched_pending_indices = set()
-            for i, (det_idx, detection) in enumerate(high_conf_detections):
+            for i, (det_idx, detection) in enumerate(init_eligible_detections):
                 if min_distances[i] < self.pending_detection_distance:
                     # Found a close pending detection
                     pending_idx = closest_pending_indices[i]
@@ -1185,8 +1182,8 @@ class SwarmSortTracker:
                     )
                     self.pending_detections.append(new_pending)
         else:
-            # No existing pending detections - create new ones for all high-confidence detections
-            for det_idx, detection in high_conf_detections:
+            # No existing pending detections - create new ones for all initialization-eligible detections
+            for det_idx, detection in init_eligible_detections:
                 position = detection.position.flatten()[:2].astype(np.float32)
                 embedding = getattr(detection, "embedding", None)
                 bbox = getattr(detection, "bbox", None)
@@ -1394,9 +1391,10 @@ class SwarmSortTracker:
                 raw_distances = (1.0 - cos_similarities) / 2.0
 
                 # Apply scaling in batch
-                scaled_embedding_matrix = self.embedding_scaler.scale_distances(
-                    raw_distances.flatten()
-                ).reshape(n_dets, n_tracks)
+                raw_distances_flat = raw_distances.flatten()
+                scaled_distances_flat = self.embedding_scaler.scale_distances(raw_distances_flat)
+                self.embedding_scaler.update_statistics(raw_distances_flat)
+                scaled_embedding_matrix = scaled_distances_flat.reshape(n_dets, n_tracks)
 
                 # Optional: Apply spatial mask to zero out impossible matches
                 # This saves computation in the cost matrix step
@@ -1720,36 +1718,19 @@ class SwarmSortTracker:
                 track.confirmed = True
 
     def _handle_unmatched_tracks(self, unmatched_track_indices):
-        """Handle unmatched tracks - move to lost for potential ReID"""
+        """Handle unmatched tracks - increment miss counter"""
         tracks = list(self.tracks.values())
-        to_remove = []
 
         for track_idx in unmatched_track_indices:
             if track_idx < len(tracks):
                 track = tracks[track_idx]
-
-                if track.confirmed and track.misses <= 3 and self.reid_enabled:
-                    if self.debug_embeddings:
-                        logger.info(
-                            f"Moving track {track.id} to lost tracks for ReID (misses: {track.misses})"
-                        )
-                    self.lost_tracks[track.id] = track
-                    to_remove.append(track.id)
-                elif track.misses > 5:
-                    to_remove.append(track.id)
-
-        for track_id in to_remove:
-            if track_id in self.tracks:
-                del self.tracks[track_id]
+                # Track misses are already incremented in the track's update method
+                # No need to move tracks anywhere - they stay active until max_track_age
+                pass
 
     def _attempt_reid(self, detections, unmatched_det_indices):
         """ReID with proper multi-embedding support"""
         reid_matches = []
-
-        if not self.lost_tracks or not unmatched_det_indices:
-            return reid_matches
-
-        start_setup = time.perf_counter() if self.debug_timings else None
 
         # Filter detections with embeddings
         unmatched_dets_with_emb = []
@@ -1761,20 +1742,24 @@ class SwarmSortTracker:
         if not unmatched_dets_with_emb:
             return reid_matches
 
-        # Filter valid lost tracks
-        valid_lost_tracks = []
-        for track_id, lost_track in self.lost_tracks.items():
+        # Filter tracks that are missing detections but still eligible for ReID
+        valid_reid_tracks = []
+        for track_id, track in self.tracks.items():
             if (
-                lost_track.lost_frames <= self.reid_max_frames
-                and len(lost_track.embedding_history) > 0
+                track.misses > 0 
+                and track.confirmed
+                and len(track.embedding_history) > 0
+                and track.misses <= self.max_track_age // 2  # Only try ReID in first half of track lifetime
             ):
-                valid_lost_tracks.append((track_id, lost_track))
+                valid_reid_tracks.append((track_id, track))
 
-        if not valid_lost_tracks:
+        if not valid_reid_tracks:
             return reid_matches
 
+        start_setup = time.perf_counter() if self.debug_timings else None
+
         n_dets = len(unmatched_dets_with_emb)
-        n_tracks = len(valid_lost_tracks)
+        n_tracks = len(valid_reid_tracks)
 
         # Extract positions
         det_positions = np.array(
@@ -1782,11 +1767,11 @@ class SwarmSortTracker:
         )
 
         track_kalman_positions = np.array(
-            [track.predicted_position for _, track in valid_lost_tracks], dtype=np.float32
+            [track.predicted_position for _, track in valid_reid_tracks], dtype=np.float32
         )
 
         track_last_positions = np.array(
-            [track.last_detection_pos for _, track in valid_lost_tracks], dtype=np.float32
+            [track.last_detection_pos for _, track in valid_reid_tracks], dtype=np.float32
         )
 
         # Normalize detection embeddings
@@ -1803,7 +1788,7 @@ class SwarmSortTracker:
         # Use representative embeddings for ReID - but avoid per-track computation
         start_repr = time.perf_counter() if self.debug_timings else None
         track_embeddings = []
-        for _, track in valid_lost_tracks:
+        for _, track in valid_reid_tracks:
             # For ReID, use cached representative or fallback to most recent
             if (
                 track._representative_cache_valid
@@ -1844,7 +1829,7 @@ class SwarmSortTracker:
         if self.use_probabilistic_costs:
             # For probabilistic ReID, need additional parameters
             track_frames_since_detection = np.array(
-                [self.frame_count - track.last_detection_frame for _, track in valid_lost_tracks],
+                [self.frame_count - track.last_detection_frame for _, track in valid_reid_tracks],
                 dtype=np.float32,
             )
             embedding_median = (
@@ -1905,11 +1890,11 @@ class SwarmSortTracker:
             if best_cost <= self.reid_max_distance:
                 used_tracks[best_track_idx] = True
                 original_det_idx, detection = unmatched_dets_with_emb[det_idx_in_matrix]
-                track_id, best_track = valid_lost_tracks[best_track_idx]
+                track_id, best_track = valid_reid_tracks[best_track_idx]
 
                 if self.debug_embeddings:
                     logger.info(
-                        f"ReID: Matched detection {original_det_idx} with lost track {track_id}"
+                        f"ReID: Matched detection {original_det_idx} with track {track_id} (misses: {best_track.misses})"
                     )
                     logger.info(
                         f"  Used representative from {len(best_track.embedding_history)} stored embeddings"
@@ -1927,8 +1912,7 @@ class SwarmSortTracker:
                 best_track.update_with_detection(
                     position, embedding, bbox, self.frame_count, det_conf
                 )
-                self.tracks[track_id] = best_track
-                del self.lost_tracks[track_id]
+                # Track is already in self.tracks, no need to move it
                 reid_matches.append(original_det_idx)
 
         end_assignment = time.perf_counter() if self.debug_timings else None
@@ -1959,45 +1943,16 @@ class SwarmSortTracker:
     def _cleanup_tracks(self):
         """Remove old tracks from both active and lost, handle ReID transitions"""
         to_remove = []
-        to_move_to_lost = []
 
         for track_id, track in self.tracks.items():
-            if (
-                track.confirmed
-                and track.misses >= 3
-                and track.misses <= self.max_age
-                and self.reid_enabled
-            ):
-                # Move confirmed tracks to lost for potential ReID
-                to_move_to_lost.append(track_id)
-            elif track.misses > self.max_age or (not track.confirmed and track.misses > 3):
+            if track.misses > self.max_track_age or (not track.confirmed and track.misses > 3):
                 # Remove tracks that are too old or unconfirmed with too many misses
                 to_remove.append(track_id)
-
-        # Move tracks to lost for ReID
-        for track_id in to_move_to_lost:
-            if track_id in self.tracks:
-                track = self.tracks[track_id]
-                if self.debug_embeddings:
-                    logger.info(
-                        f"Moving track {track_id} to lost tracks for ReID (misses: {track.misses})"
-                    )
-                self.lost_tracks[track_id] = track
-                del self.tracks[track_id]
 
         # Remove tracks that should be deleted
         for track_id in to_remove:
             if track_id in self.tracks:
                 del self.tracks[track_id]
-
-        to_remove_lost = [
-            track_id
-            for track_id, track in self.lost_tracks.items()
-            if track.lost_frames > self.reid_max_frames
-        ]
-
-        for track_id in to_remove_lost:
-            del self.lost_tracks[track_id]
 
     def _get_results(self) -> List[TrackedObject]:
         """Get tracking results converted to TrackedObject instances"""
@@ -2024,7 +1979,6 @@ class SwarmSortTracker:
     def reset(self):
         """Reset tracker state."""
         self.tracks.clear()
-        self.lost_tracks.clear()
         self.pending_detections.clear()
         self.next_id = 1
         self.frame_count = 0
@@ -2034,7 +1988,6 @@ class SwarmSortTracker:
         return {
             "frame_count": self.frame_count,
             "active_tracks": len(self.tracks),
-            "lost_tracks": len(self.lost_tracks),
             "pending_detections": len(self.pending_detections),
             "next_id": self.next_id,
             "embedding_scaler_stats": self.embedding_scaler.get_statistics(),

@@ -281,14 +281,13 @@ def create_swarmsort_tracker(runtime_config=None, yaml_config_location=None):
         swarmsort_config = SwarmSortConfig(
             # Use values from YAML config with proper defaults
             max_distance=float(config_dict.get('max_distance', 80.0)),
-            max_age=int(config_dict.get('max_age', 20)),
+            max_track_age=int(config_dict.get('max_age', 20)),
             detection_conf_threshold=float(config_dict.get('detection_conf_threshold', 0.0)),
             use_embeddings=bool(config_dict.get('do_embeddings', True)),
             embedding_weight=float(config_dict.get('embedding_weight', 1.0)),
             reid_enabled=bool(config_dict.get('reid_enabled', True)),
             reid_max_distance=float(config_dict.get('reid_max_distance', 150.0)),
             reid_embedding_threshold=float(config_dict.get('reid_embedding_threshold', 0.4)),
-            reid_max_frames=int(config_dict.get('reid_max_frames', 10)),
             min_consecutive_detections=int(config_dict.get('min_consecutive_detections', 3)),
             max_detection_gap=int(config_dict.get('max_detection_gap', 2)),
             pending_detection_distance=float(config_dict.get('pending_detection_distance', 125.0)),

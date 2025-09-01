@@ -154,9 +154,8 @@ class SwarmSortConfig(BaseConfig):
 
     # Core tracking parameters
     max_distance: float = 80.0  # Maximum distance for association
-    high_score_threshold: float = 0.8  # Threshold for high-confidence detections
-    max_age: int = 20  # Maximum frames to keep a track alive without detections
-    detection_conf_threshold: float = 0  # Minimum confidence for detections
+    detection_conf_threshold: float = 0  # Minimum confidence for detections (general filter)
+    max_track_age: int = 30  # Maximum frames a track can exist without detection before deletion
 
     # Embedding parameters
     use_embeddings: bool = True  # Whether to use embedding features
@@ -172,16 +171,16 @@ class SwarmSortConfig(BaseConfig):
     # Re-identification (ReID) parameters
     reid_enabled: bool = True  # Enable re-identification of lost tracks
     reid_max_distance: float = 150.0  # Maximum distance for ReID
-    reid_embedding_threshold: float = 0.4  # Embedding threshold for ReID
-    reid_max_frames: int = 10  # Maximum frames to keep lost tracks for ReID
+    reid_embedding_threshold: float = 0.3  # Embedding threshold for ReID (lower more permissive)
 
     # Track initialization parameters
-    min_consecutive_detections: int = 3  # Minimum consecutive detections to create track
+    init_conf_threshold: float = 0  # Minimum confidence for track initialization (initialization filter)
+    min_consecutive_detections: int = 5  # Minimum consecutive detections to create track
     max_detection_gap: int = 2  # Maximum gap between detections for same pending track
     pending_detection_distance: float = 125.0  # Distance threshold for pending detection matching
 
     # Duplicate detection removal
-    duplicate_detection_threshold: float = 0  # Distance threshold for duplicate removal
+    duplicate_detection_threshold: float = 15  # Distance threshold for duplicate removal
 
     # Embedding distance scaling
     embedding_scaling_method: str = "min_robustmax"  # Method for scaling embedding distances
@@ -198,11 +197,11 @@ class SwarmSortConfig(BaseConfig):
         if self.max_distance <= 0:
             raise ValueError("max_distance must be positive")
 
-        if not 0 <= self.high_score_threshold <= 1:
-            raise ValueError("high_score_threshold must be between 0 and 1")
+        if not 0 <= self.init_conf_threshold <= 1:
+            raise ValueError("init_conf_threshold must be between 0 and 1")
 
-        if self.max_age < 1:
-            raise ValueError("max_age must be at least 1")
+        if self.max_track_age < 1:
+            raise ValueError("max_track_age must be at least 1")
 
         if not 0 <= self.detection_conf_threshold <= 1:
             raise ValueError("detection_conf_threshold must be between 0 and 1")

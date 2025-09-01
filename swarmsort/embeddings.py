@@ -992,7 +992,9 @@ class CupyTextureColorEmbedding(EmbeddingExtractor):
         """GPU-accelerated feature extraction with color features."""
         if not CUPY_AVAILABLE:
             raise RuntimeError("CuPy not available for GPU computation")
-        
+
+        from cupyx.scipy import ndimage
+
         n_patches = patches.shape[0]
         patches_gpu = cp.asarray(patches, dtype=cp.float32)
         H, W = patches.shape[1:3]
@@ -1057,7 +1059,7 @@ class CupyTextureColorEmbedding(EmbeddingExtractor):
         for scale in range(8):
             kernel_size = 2 + scale
             if kernel_size < min(H, W):
-                from cupyx.scipy import ndimage
+
                 smoothed = ndimage.uniform_filter(gray_gpu, size=kernel_size)
                 features[:, feature_idx + scale] = cp.std(smoothed, axis=(1, 2))
             else:
