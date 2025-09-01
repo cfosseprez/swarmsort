@@ -7,9 +7,10 @@ embeddings for robust real-time object tracking.
 
 Key Features:
 - Real-time multi-object tracking with motion prediction
-- Embedding-based track association for improved accuracy 
+- Embedding-based track association for improved accuracy
 - Re-identification (ReID) capabilities for recovering lost tracks
 - Probabilistic and non-probabilistic cost computation methods
+- Novel 3D assignment across multiple prediction methods
 - Numba-accelerated functions for high performance
 - Configurable parameters for different tracking scenarios
 
@@ -120,7 +121,7 @@ class PendingDetection:
 
 
 # ============================================================================
-# KEEP ALL YOUR ORIGINAL FAST NUMBA FUNCTIONS - UNCHANGED
+# NUMBA FUNCTIONS - INCLUDING NEW 3D ASSIGNMENT
 # ============================================================================
 
 
@@ -172,7 +173,7 @@ def compute_embedding_distances_optimized(det_embeddings, track_embeddings):
 
 @nb.njit(fastmath=True, cache=True)
 def fast_gaussian_fusion(
-    mu_k: np.ndarray, cov_k: np.ndarray, mu_d: np.ndarray, cov_d: np.ndarray
+        mu_k: np.ndarray, cov_k: np.ndarray, mu_d: np.ndarray, cov_d: np.ndarray
 ):
     """Fast 2D Gaussian fusion without scipy dependencies"""
     mu_k = mu_k.astype(np.float32)
@@ -193,25 +194,25 @@ def fast_gaussian_fusion(
         return fallback_mean, fallback_cov
 
     inv_cov_k = (
-        np.array(
-            [[cov_k_reg[1, 1], -cov_k_reg[0, 1]], [-cov_k_reg[1, 0], cov_k_reg[0, 0]]],
-            dtype=np.float32,
-        )
-        / det_k
+            np.array(
+                [[cov_k_reg[1, 1], -cov_k_reg[0, 1]], [-cov_k_reg[1, 0], cov_k_reg[0, 0]]],
+                dtype=np.float32,
+            )
+            / det_k
     )
 
     inv_cov_d = (
-        np.array(
-            [[cov_d_reg[1, 1], -cov_d_reg[0, 1]], [-cov_d_reg[1, 0], cov_d_reg[0, 0]]],
-            dtype=np.float32,
-        )
-        / det_d
+            np.array(
+                [[cov_d_reg[1, 1], -cov_d_reg[0, 1]], [-cov_d_reg[1, 0], cov_d_reg[0, 0]]],
+                dtype=np.float32,
+            )
+            / det_d
     )
 
     inv_cov_fused = inv_cov_k + inv_cov_d
 
     det_fused = (
-        inv_cov_fused[0, 0] * inv_cov_fused[1, 1] - inv_cov_fused[0, 1] * inv_cov_fused[1, 0]
+            inv_cov_fused[0, 0] * inv_cov_fused[1, 1] - inv_cov_fused[0, 1] * inv_cov_fused[1, 0]
     )
     if det_fused <= 0:
         fallback_mean = ((mu_k + mu_d) / 2.0).astype(np.float32)
@@ -219,14 +220,14 @@ def fast_gaussian_fusion(
         return fallback_mean, fallback_cov
 
     cov_fused = (
-        np.array(
-            [
-                [inv_cov_fused[1, 1], -inv_cov_fused[0, 1]],
-                [-inv_cov_fused[1, 0], inv_cov_fused[0, 0]],
-            ],
-            dtype=np.float32,
-        )
-        / det_fused
+            np.array(
+                [
+                    [inv_cov_fused[1, 1], -inv_cov_fused[0, 1]],
+                    [-inv_cov_fused[1, 0], inv_cov_fused[0, 0]],
+                ],
+                dtype=np.float32,
+            )
+            / det_fused
     )
 
     mu_fused = cov_fused @ (inv_cov_k @ mu_k + inv_cov_d @ mu_d)
@@ -287,7 +288,7 @@ def select_best_embeddings_numba(track_embeddings_list, det_embeddings, track_le
 
 @nb.njit(fastmath=True, cache=True, parallel=False)
 def compute_embedding_distances_multi_history(
-    det_embeddings, track_embeddings_list, track_embedding_counts, method="min"
+        det_embeddings, track_embeddings_list, track_embedding_counts, method="min"
 ):
     """
     Compute embedding distances considering multiple embeddings per track
@@ -386,13 +387,13 @@ def compute_embedding_distances_multi_history(
 
 @nb.njit(fastmath=True, parallel=False, cache=True)
 def compute_cost_matrix_with_multi_embeddings(
-    det_positions: np.ndarray,
-    track_last_positions: np.ndarray,
-    track_kalman_positions: np.ndarray,
-    scaled_embedding_matrix: np.ndarray,
-    use_embeddings: bool,
-    max_distance: float,
-    embedding_weight: float,
+        det_positions: np.ndarray,
+        track_last_positions: np.ndarray,
+        track_kalman_positions: np.ndarray,
+        scaled_embedding_matrix: np.ndarray,
+        use_embeddings: bool,
+        max_distance: float,
+        embedding_weight: float,
 ) -> np.ndarray:
     """
     Cost matrix computation with multi-embedding support
@@ -438,15 +439,15 @@ def compute_cost_matrix_with_multi_embeddings(
 
 @nb.njit(fastmath=True, parallel=False, cache=True)
 def compute_probabilistic_cost_matrix_vectorized(
-    det_positions: np.ndarray,
-    track_positions: np.ndarray,
-    track_last_positions: np.ndarray,
-    track_frames_since_detection: np.ndarray,  # NEW
-    scaled_embedding_matrix: np.ndarray,
-    embedding_median: float,
-    use_embeddings: bool,
-    max_distance: float,
-    embedding_weight: float,
+        det_positions: np.ndarray,
+        track_positions: np.ndarray,
+        track_last_positions: np.ndarray,
+        track_frames_since_detection: np.ndarray,  # NEW
+        scaled_embedding_matrix: np.ndarray,
+        embedding_median: float,
+        use_embeddings: bool,
+        max_distance: float,
+        embedding_weight: float,
 ) -> np.ndarray:
     """Probabilistic cost matrix with time-dependent covariances"""
     n_dets = det_positions.shape[0]
@@ -500,8 +501,8 @@ def compute_probabilistic_cost_matrix_vectorized(
                 embedding_cost_scaled = scaled_emb_dist * max_distance
                 # Weighted average of spatial and embedding costs
                 total_cost = (
-                    1.0 - embedding_weight
-                ) * spatial_cost + embedding_weight * embedding_cost_scaled
+                                     1.0 - embedding_weight
+                             ) * spatial_cost + embedding_weight * embedding_cost_scaled
             else:
                 total_cost = spatial_cost
 
@@ -513,14 +514,14 @@ def compute_probabilistic_cost_matrix_vectorized(
 
 @nb.njit(fastmath=True, parallel=False, cache=True)
 def compute_cost_matrix_vectorized(
-    det_positions: np.ndarray,
-    track_last_positions: np.ndarray,
-    track_kalman_positions: np.ndarray,
-    det_embeddings: np.ndarray,
-    track_embeddings: np.ndarray,
-    use_embeddings: bool,
-    max_distance: float,
-    embedding_weight: float,
+        det_positions: np.ndarray,
+        track_last_positions: np.ndarray,
+        track_kalman_positions: np.ndarray,
+        det_embeddings: np.ndarray,
+        track_embeddings: np.ndarray,
+        use_embeddings: bool,
+        max_distance: float,
+        embedding_weight: float,
 ) -> np.ndarray:
     """Vectorized cost matrix computation"""
     n_dets = det_positions.shape[0]
@@ -561,21 +562,21 @@ def numba_greedy_assignment(cost_matrix: np.ndarray, max_distance: float) -> Tup
     Returns matches, unmatched_dets, unmatched_tracks as numpy arrays.
     """
     n_dets, n_tracks = cost_matrix.shape
-    
+
     # Track used detections and tracks
     used_dets = np.zeros(n_dets, dtype=np.bool_)
     used_tracks = np.zeros(n_tracks, dtype=np.bool_)
-    
+
     # Store matches
     matches = np.empty((min(n_dets, n_tracks), 2), dtype=np.int32)
     num_matches = 0
-    
+
     # Greedy assignment - find best valid matches iteratively
     for _ in range(min(n_dets, n_tracks)):
         best_cost = np.inf
         best_det = -1
         best_track = -1
-        
+
         # Find minimum cost among unused pairs
         for d in range(n_dets):
             if used_dets[d]:
@@ -588,7 +589,7 @@ def numba_greedy_assignment(cost_matrix: np.ndarray, max_distance: float) -> Tup
                     best_cost = cost
                     best_det = d
                     best_track = t
-        
+
         if best_det >= 0:
             matches[num_matches, 0] = best_det
             matches[num_matches, 1] = best_track
@@ -597,34 +598,35 @@ def numba_greedy_assignment(cost_matrix: np.ndarray, max_distance: float) -> Tup
             used_tracks[best_track] = True
         else:
             break
-    
+
     # Build unmatched arrays
     unmatched_dets = np.empty(n_dets, dtype=np.int32)
     unmatched_tracks = np.empty(n_tracks, dtype=np.int32)
-    
+
     num_unmatched_dets = 0
     num_unmatched_tracks = 0
-    
+
     for i in range(n_dets):
         if not used_dets[i]:
             unmatched_dets[num_unmatched_dets] = i
             num_unmatched_dets += 1
-    
+
     for i in range(n_tracks):
         if not used_tracks[i]:
             unmatched_tracks[num_unmatched_tracks] = i
             num_unmatched_tracks += 1
-    
-    return (matches[:num_matches], 
-            unmatched_dets[:num_unmatched_dets], 
+
+    return (matches[:num_matches],
+            unmatched_dets[:num_unmatched_dets],
             unmatched_tracks[:num_unmatched_tracks])
+
 
 @nb.njit(fastmath=True, cache=True)
 def compute_assignment_priorities(cost_matrix: np.ndarray, max_distance: float) -> np.ndarray:
     """
     Compute priority scores for greedy assignment (SUPER FAST).
     Lower scores = higher priority (better matches should be assigned first)
-    
+
     Priority considers:
     1. Cost (distance) - lower is better
     2. Number of alternatives - fewer alternatives = higher priority
@@ -632,53 +634,53 @@ def compute_assignment_priorities(cost_matrix: np.ndarray, max_distance: float) 
     """
     n_dets, n_tracks = cost_matrix.shape
     priorities = np.full((n_dets, n_tracks), np.inf, dtype=np.float32)
-    
+
     for i in range(n_dets):
         for j in range(n_tracks):
             cost = cost_matrix[i, j]
             if cost > max_distance:
                 continue
-                
+
             # Base priority is the cost itself
             priority = cost
-            
+
             # Count valid alternatives for this detection
             det_alternatives = 0
             for k in range(n_tracks):
                 if cost_matrix[i, k] <= max_distance:
                     det_alternatives += 1
-            
+
             # Count valid alternatives for this track
             track_alternatives = 0
             for k in range(n_dets):
                 if cost_matrix[k, j] <= max_distance:
                     track_alternatives += 1
-            
+
             # Boost priority (lower score) for matches with fewer alternatives
             if det_alternatives > 1:
                 priority *= (1.0 + 0.1 * (det_alternatives - 1))
             if track_alternatives > 1:
                 priority *= (1.0 + 0.1 * (track_alternatives - 1))
-            
+
             # Find second best option for confidence calculation
             second_best_det = np.inf
             second_best_track = np.inf
-            
+
             for k in range(n_tracks):
                 if k != j and cost_matrix[i, k] < second_best_det:
                     second_best_det = cost_matrix[i, k]
-                    
+
             for k in range(n_dets):
                 if k != i and cost_matrix[k, j] < second_best_track:
                     second_best_track = cost_matrix[k, j]
-            
+
             # Confidence boost: if this match is much better than alternatives
             min_second_best = min(second_best_det, second_best_track)
             if min_second_best < np.inf and min_second_best > cost * 1.5:
                 priority *= 0.7  # Higher confidence = lower priority score
-            
+
             priorities[i, j] = priority
-    
+
     return priorities
 
 
@@ -706,13 +708,166 @@ def simple_kalman_predict(x: np.ndarray) -> np.ndarray:
 
 
 # ============================================================================
-# KEEP YOUR ORIGINAL FAST TRACK CLASS - UNCHANGED
+# NEW 3D ASSIGNMENT FUNCTIONS
+# ============================================================================
+
+
+@nb.njit(fastmath=True, cache=True)
+def compute_3d_cost_tensor(
+        det_positions: np.ndarray,
+        track_last_positions: np.ndarray,
+        track_kalman_positions: np.ndarray,
+        track_observation_positions: np.ndarray,  # NEW: observation-based predictions
+        scaled_embedding_matrix: np.ndarray,
+        use_embeddings: bool,
+        max_distance: float,
+        embedding_weight: float,
+) -> np.ndarray:
+    """
+    Compute 3D cost tensor: [detections, tracks, methods]
+    Methods: 0=Kalman, 1=Observation-based, 2=Fused
+    """
+    n_dets = det_positions.shape[0]
+    n_tracks = track_last_positions.shape[0]
+    n_methods = 3
+
+    cost_tensor = np.full((n_dets, n_tracks, n_methods), np.inf, dtype=np.float32)
+
+    for i in range(n_dets):
+        for j in range(n_tracks):
+            # Method 0: Kalman prediction + embedding
+            spatial_cost_kalman = np.sqrt(
+                (det_positions[i, 0] - track_kalman_positions[j, 0]) ** 2 +
+                (det_positions[i, 1] - track_kalman_positions[j, 1]) ** 2
+            )
+
+            if spatial_cost_kalman <= max_distance:
+                total_cost = spatial_cost_kalman
+                if use_embeddings:
+                    embedding_cost = scaled_embedding_matrix[i, j] * max_distance
+                    total_cost += embedding_weight * embedding_cost
+                cost_tensor[i, j, 0] = total_cost
+
+            # Method 1: Observation-based prediction + embedding
+            spatial_cost_obs = np.sqrt(
+                (det_positions[i, 0] - track_observation_positions[j, 0]) ** 2 +
+                (det_positions[i, 1] - track_observation_positions[j, 1]) ** 2
+            )
+
+            if spatial_cost_obs <= max_distance:
+                total_cost = spatial_cost_obs
+                if use_embeddings:
+                    embedding_cost = scaled_embedding_matrix[i, j] * max_distance
+                    total_cost += embedding_weight * embedding_cost
+                cost_tensor[i, j, 1] = total_cost
+
+            # Method 2: Fused prediction (weighted combination)
+            fused_x = 0.6 * track_observation_positions[j, 0] + 0.4 * track_kalman_positions[j, 0]
+            fused_y = 0.6 * track_observation_positions[j, 1] + 0.4 * track_kalman_positions[j, 1]
+
+            spatial_cost_fused = np.sqrt(
+                (det_positions[i, 0] - fused_x) ** 2 +
+                (det_positions[i, 1] - fused_y) ** 2
+            )
+
+            if spatial_cost_fused <= max_distance:
+                total_cost = spatial_cost_fused
+                if use_embeddings:
+                    embedding_cost = scaled_embedding_matrix[i, j] * max_distance
+                    total_cost += embedding_weight * embedding_cost
+                cost_tensor[i, j, 2] = total_cost
+
+    return cost_tensor
+
+
+@nb.njit(fastmath=True, cache=True)
+def solve_3d_assignment_flattened(cost_tensor: np.ndarray, max_distance: float) -> Tuple[
+    np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Solve 3D assignment by flattening to 2D and using greedy assignment.
+    Returns: matches [(det_idx, track_idx, method_idx)], unmatched_dets, unmatched_tracks
+    """
+    n_dets, n_tracks, n_methods = cost_tensor.shape
+
+    # Flatten tensor: each track gets n_methods virtual copies
+    flattened_costs = np.full((n_dets, n_tracks * n_methods), np.inf, dtype=np.float32)
+
+    for i in range(n_dets):
+        for j in range(n_tracks):
+            for k in range(n_methods):
+                flat_idx = j * n_methods + k
+                flattened_costs[i, flat_idx] = cost_tensor[i, j, k]
+
+    # Use greedy assignment on flattened matrix
+    used_dets = np.zeros(n_dets, dtype=np.bool_)
+    used_tracks = np.zeros(n_tracks, dtype=np.bool_)  # Track original tracks, not virtual copies
+
+    matches = np.empty((min(n_dets, n_tracks), 3), dtype=np.int32)  # [det, track, method]
+    num_matches = 0
+
+    for _ in range(min(n_dets, n_tracks)):
+        best_cost = np.inf
+        best_det = -1
+        best_track = -1
+        best_method = -1
+
+        for d in range(n_dets):
+            if used_dets[d]:
+                continue
+            for flat_t in range(n_tracks * n_methods):
+                orig_track = flat_t // n_methods
+                method = flat_t % n_methods
+
+                if used_tracks[orig_track]:
+                    continue
+
+                cost = flattened_costs[d, flat_t]
+                if cost < best_cost and cost <= max_distance:
+                    best_cost = cost
+                    best_det = d
+                    best_track = orig_track
+                    best_method = method
+
+        if best_det >= 0:
+            matches[num_matches, 0] = best_det
+            matches[num_matches, 1] = best_track
+            matches[num_matches, 2] = best_method
+            num_matches += 1
+            used_dets[best_det] = True
+            used_tracks[best_track] = True
+        else:
+            break
+
+    # Build unmatched arrays
+    unmatched_dets = np.empty(n_dets, dtype=np.int32)
+    unmatched_tracks = np.empty(n_tracks, dtype=np.int32)
+
+    num_unmatched_dets = 0
+    num_unmatched_tracks = 0
+
+    for i in range(n_dets):
+        if not used_dets[i]:
+            unmatched_dets[num_unmatched_dets] = i
+            num_unmatched_dets += 1
+
+    for i in range(n_tracks):
+        if not used_tracks[i]:
+            unmatched_tracks[num_unmatched_tracks] = i
+            num_unmatched_tracks += 1
+
+    return (matches[:num_matches],
+            unmatched_dets[:num_unmatched_dets],
+            unmatched_tracks[:num_unmatched_tracks])
+
+
+# ============================================================================
+# ENHANCED FAST TRACK CLASS WITH OBSERVATION HISTORY
 # ============================================================================
 
 
 @dataclass
 class FastTrackState:
-    """Enhanced track state with N-embedding history and caching"""
+    """Enhanced track state with N-embedding history and observation-based prediction"""
 
     id: int
 
@@ -725,6 +880,10 @@ class FastTrackState:
 
     last_detection_pos: np.ndarray = field(default_factory=lambda: np.zeros(2, dtype=np.float32))
     last_detection_frame: int = 0
+
+    # NEW: Observation history for observation-based prediction
+    observation_history: deque = field(default_factory=lambda: deque(maxlen=5))
+    observation_frames: deque = field(default_factory=lambda: deque(maxlen=5))
 
     # Embedding history with configurable size
     embedding_history: deque = field(default_factory=lambda: deque(maxlen=5))
@@ -756,11 +915,35 @@ class FastTrackState:
         self.last_detection_pos = self.position.copy()
         self.predicted_position = self.position.copy()
 
+    def get_observation_prediction(self, current_frame: int, max_history: int = 5) -> np.ndarray:
+        """Get observation-based prediction using recent detection history"""
+        if len(self.observation_history) < 2:
+            return self.predicted_position
+
+        # Simple linear extrapolation from last two observations
+        pos1 = self.observation_history[-2]
+        pos2 = self.observation_history[-1]
+        frame1 = self.observation_frames[-2]
+        frame2 = self.observation_frames[-1]
+
+        if frame2 == frame1:  # Avoid division by zero
+            return pos2.copy()
+
+        dt = current_frame - frame2
+        velocity = (pos2 - pos1) / (frame2 - frame1)
+        predicted = pos2 + velocity * dt
+
+        return predicted.astype(np.float32)
+
+    def update_observation_history(self, position: np.ndarray, frame: int):
+        """Update observation history for observation-based prediction"""
+        self.observation_history.append(position.copy())
+        self.observation_frames.append(frame)
 
     def set_embedding_params(
-        self,
-        max_embeddings: int = 5,
-        method: Literal["average", "best_match", "weighted_average"] = "average",
+            self,
+            max_embeddings: int = 5,
+            method: Literal["average", "best_match", "weighted_average"] = "average",
     ):
         """Configure embedding storage parameters"""
         self.embedding_history = deque(maxlen=max_embeddings)
@@ -768,29 +951,29 @@ class FastTrackState:
         self._cache_valid = False
 
     def add_embedding(self, embedding: np.ndarray):
-        """Add new embedding to history with smart cache invalidation"""
+        """Add new embedding to history with smart invalidation based on method"""
         if embedding is not None:
             embedding = np.asarray(embedding, dtype=np.float32)
             norm = np.linalg.norm(embedding)
             if norm > 0:
                 normalized_emb = embedding / norm
 
-                # Only invalidate if embedding is significantly different
+                # Method-specific cache invalidation logic
                 should_invalidate = True
-                if (
-                    len(self.embedding_history) > 0
-                    and self._cached_representative_embedding is not None
-                ):
-                    # Check similarity to current representative
-                    similarity = np.dot(normalized_emb, self._cached_representative_embedding)
-                    # Only invalidate if new embedding is quite different (< 0.85 similarity)
-                    # This reduces cache invalidation frequency significantly
-                    should_invalidate = similarity < 0.85
+                if self.embedding_method == "best_match":
+                    # For best_match, only invalidate if similarity check shows significant change
+                    if (len(self.embedding_history) > 0
+                            and self._cached_representative_embedding is not None):
+                        similarity = np.dot(normalized_emb, self._cached_representative_embedding)
+                        should_invalidate = similarity < 0.85  # Only invalidate for significant change
+                elif self.embedding_method in ["weighted_average", "average"]:
+                    # For weighted_average/average, always invalidate since recent embeddings matter most
+                    should_invalidate = True
 
                 self.embedding_history.append(normalized_emb.copy())
                 self.embedding_update_count += 1
 
-                # Smart cache invalidation
+                # Smart cache invalidation based on method
                 if should_invalidate:
                     self._cache_valid = False
                     self._representative_cache_valid = False
@@ -817,7 +1000,7 @@ class FastTrackState:
                 self.avg_embedding = self.embedding_history[-1].copy()
 
     def get_representative_embedding_for_assignment(
-        self, det_embeddings: Optional[np.ndarray] = None
+            self, det_embeddings: Optional[np.ndarray] = None
     ) -> Optional[np.ndarray]:
         """Get the best representative embedding for assignment, with caching"""
         if len(self.embedding_history) == 0:
@@ -888,14 +1071,17 @@ class FastTrackState:
         }
 
     def update_with_detection(
-        self,
-        new_pos: np.ndarray,
-        embedding: Optional[np.ndarray],
-        bbox: Optional[np.ndarray],
-        current_frame: int,
-        detection_confidence: float = 0.0,
+            self,
+            new_pos: np.ndarray,
+            embedding: Optional[np.ndarray],
+            bbox: Optional[np.ndarray],
+            current_frame: int,
+            detection_confidence: float = 0.0,
     ):
-        """Updated detection update with embedding history"""
+        """Updated detection update with embedding history and observation history"""
+        # Update observation history FIRST
+        self.update_observation_history(new_pos, current_frame)
+
         # Same spatial update as before
         self.last_detection_pos = new_pos.astype(np.float32)
         self.last_detection_frame = current_frame
@@ -976,23 +1162,25 @@ class FastTrackState:
 
 
 # ============================================================================
-# SWARM SORT TRACKER - PORT OF SWARMTRACKER IMPLEMENTATION
+# SWARM SORT TRACKER WITH 3D ASSIGNMENT
 # ============================================================================
 
 
 class SwarmSortTracker:
-    """SwarmSort Multi-Object Tracker - Complete implementation with embedding support.
+    """SwarmSort Multi-Object Tracker with 3D assignment capability.
 
     SwarmSortTracker is the main tracking class that implements a complete multi-object
     tracking pipeline combining:
     - Kalman filtering for motion prediction
-    - Hungarian algorithm for optimal assignment
+    - Observation-based motion prediction
+    - Novel 3D assignment across multiple prediction methods
+    - Hungarian/Greedy/Hybrid algorithm assignments
     - Deep learning embeddings for appearance matching
     - Re-identification for recovering lost tracks
     - Probabilistic cost computation for robust associations
 
     The tracker maintains active tracks and pending detections (for track initialization).
-    ReID is performed on active tracks that have missed recent detections. It supports 
+    ReID is performed on active tracks that have missed recent detections. It supports
     both embedding-based and motion-only tracking modes with extensive configuration options.
 
     Attributes:
@@ -1007,8 +1195,9 @@ class SwarmSortTracker:
         >>> from swarmsort import SwarmSortTracker, SwarmSortConfig, Detection
         >>> import numpy as np
 
-        >>> # Create tracker with default configuration
-        >>> tracker = SwarmSortTracker()
+        >>> # Create tracker with 3D assignment
+        >>> config = SwarmSortConfig(assignment_strategy="3d")
+        >>> tracker = SwarmSortTracker(config)
 
         >>> # Create detection
         >>> detection = Detection(
@@ -1022,11 +1211,11 @@ class SwarmSortTracker:
     """
 
     def __init__(
-        self,
-        config: Optional[Union[SwarmSortConfig, dict]] = None,
-        embedding_type: Optional[str] = None,
-        use_gpu: Optional[bool] = None,
-        **kwargs,
+            self,
+            config: Optional[Union[SwarmSortConfig, dict]] = None,
+            embedding_type: Optional[str] = None,
+            use_gpu: Optional[bool] = None,
+            **kwargs,
     ):
         # Handle configuration
         if config is None:
@@ -1042,7 +1231,7 @@ class SwarmSortTracker:
             try:
                 from .embeddings import get_embedding_extractor
                 self.embedding_extractor = get_embedding_extractor(
-                    embedding_type, 
+                    embedding_type,
                     use_gpu=(use_gpu if use_gpu is not None else True)
                 )
             except Exception as e:
@@ -1093,6 +1282,9 @@ class SwarmSortTracker:
         self.next_id = 1
         self.frame_count = 0
 
+        # NEW: Store assignment methods for debugging/analysis
+        self._assignment_methods = {}
+
         # embedding scaler
         self.embedding_scaler = EmbeddingDistanceScaler(
             method="min_robustmax", update_rate=0.05, min_samples=200
@@ -1110,7 +1302,7 @@ class SwarmSortTracker:
         self._frame_det_embeddings_valid = -1  # Track which frame embeddings are valid for
 
         logger.info(
-            f"Initialized SwarmSortTracker with initialization logic and fixed embedding scaling"
+            f"Initialized SwarmSortTracker with {self.assignment_strategy} assignment strategy"
         )
 
     def _create_new_track(self, track_id: int, position: np.ndarray) -> FastTrackState:
@@ -1120,7 +1312,7 @@ class SwarmSortTracker:
         return track
 
     def _precompile_numba(self):
-        """Pre-compile Numba functions"""
+        """Pre-compile Numba functions including 3D assignment functions"""
         try:
             dummy_emb = np.array([0.1, 0.2, 0.3], dtype=np.float32)
             dummy_pos = np.array([[100.0, 100.0]], dtype=np.float32)
@@ -1135,7 +1327,15 @@ class SwarmSortTracker:
             _ = fast_mahalanobis_distance(dummy_diff, dummy_cov)
             _ = fast_gaussian_fusion(dummy_diff, dummy_cov, dummy_diff, dummy_cov)
 
-            logger.info("Numba functions compiled successfully")
+            # NEW: Pre-compile 3D assignment functions
+            dummy_tensor = np.random.rand(2, 2, 3).astype(np.float32)
+            _ = compute_3d_cost_tensor(
+                dummy_pos, dummy_pos, dummy_pos, dummy_pos,
+                np.random.rand(1, 1).astype(np.float32), True, 100.0, 0.3
+            )
+            _ = solve_3d_assignment_flattened(dummy_tensor, 100.0)
+
+            logger.info("Numba functions compiled successfully (including 3D assignment)")
         except Exception as e:
             logger.warning(f"Numba compilation failed: {e}")
 
@@ -1162,9 +1362,6 @@ class SwarmSortTracker:
             if self._get_detection_confidence(det) >= self.detection_conf_threshold
         ]
         stop("filter_conf")
-
-        if not valid_detections:
-            return self._handle_empty_frame()
 
         if not valid_detections:
             return self._handle_empty_frame()
@@ -1197,6 +1394,15 @@ class SwarmSortTracker:
                 valid_detections, timer, start, stop
             )
         elif self.assignment_strategy == "hybrid":
+            matches, unmatched_dets, unmatched_tracks = self._hybrid_assignment(
+                valid_detections, timer, start, stop
+            )
+        elif self.assignment_strategy == "3d":
+            matches, unmatched_dets, unmatched_tracks = self._3d_assignment(
+                valid_detections, timer, start, stop
+            )
+        else:
+            # Fallback to hybrid
             matches, unmatched_dets, unmatched_tracks = self._hybrid_assignment(
                 valid_detections, timer, start, stop
             )
@@ -1242,6 +1448,111 @@ class SwarmSortTracker:
             print(f"[Frame {self.frame_count}] Timings:", formatted_timings)
 
         return result
+
+    def _3d_assignment(self, detections, timer=None, start=None, stop=None):
+        """
+        Novel 3D assignment: detections × tracks × prediction_methods
+        Finds globally optimal assignment across all prediction strategies
+        """
+        n_dets = len(detections)
+        n_tracks = len(self.tracks)
+
+        if n_tracks == 0:
+            return [], list(range(n_dets)), []
+
+        tracks = list(self.tracks.values())
+
+        # Extract positions
+        det_positions = np.array([det.position.flatten()[:2] for det in detections], dtype=np.float32)
+        track_last_positions = np.array([t.last_detection_pos for t in tracks], dtype=np.float32)
+        track_kalman_positions = np.array([t.predicted_position for t in tracks], dtype=np.float32)
+
+        # Get observation-based predictions
+        track_observation_positions = np.array([
+            t.get_observation_prediction(self.frame_count) for t in tracks
+        ],dtype=np.float32)
+
+        # Compute embeddings (same as existing methods)
+        use_embeddings = (
+            self.use_embeddings and
+            all(hasattr(det, "embedding") and det.embedding is not None for det in detections) and
+            all(len(t.embedding_history) > 0 for t in tracks)
+        )
+
+        scaled_embedding_matrix = np.zeros((n_dets, n_tracks), dtype=np.float32)
+        if use_embeddings:
+            if start: start("embedding_computation")
+
+            det_embeddings = np.empty((n_dets, detections[0].embedding.shape[0]), dtype=np.float32)
+            for i, det in enumerate(detections):
+                det_embeddings[i] = det.embedding
+
+            track_embeddings = np.empty((n_tracks, det_embeddings.shape[1]), dtype=np.float32)
+            for i, track in enumerate(tracks):
+                if (track._representative_cache_valid and
+                    track._cached_representative_embedding is not None):
+                    track_embeddings[i] = track._cached_representative_embedding
+                elif len(track.embedding_history) > 0:
+                    track_embeddings[i] = track.embedding_history[-1]
+                else:
+                    track_embeddings[i] = np.zeros(det_embeddings.shape[1], dtype=np.float32)
+
+            cos_similarities = det_embeddings @ track_embeddings.T
+            raw_distances = (1.0 - cos_similarities) / 2.0
+            raw_distances_flat = raw_distances.flatten()
+            scaled_distances_flat = self.embedding_scaler.scale_distances(raw_distances_flat)
+            self.embedding_scaler.update_statistics(raw_distances_flat)
+            scaled_embedding_matrix = scaled_distances_flat.reshape(n_dets, n_tracks)
+
+            if stop: stop("embedding_computation")
+
+        # Compute 3D cost tensor
+        if start: start("3d_cost_tensor")
+        cost_tensor = compute_3d_cost_tensor(
+            det_positions,
+            track_last_positions,
+            track_kalman_positions,
+            track_observation_positions,
+            scaled_embedding_matrix,
+            use_embeddings,
+            self.max_distance,
+            self.embedding_weight
+        )
+        if stop: stop("3d_cost_tensor")
+
+        # Solve 3D assignment
+        if start: start("3d_assignment_solve")
+        matches_3d, unmatched_dets_array, unmatched_tracks_array = solve_3d_assignment_flattened(
+            cost_tensor, self.max_distance
+        )
+        if stop: stop("3d_assignment_solve")
+
+        # Convert results and store method information
+        matches = []
+        self._assignment_methods = {}  # Store which method was used for each track
+
+        for i in range(matches_3d.shape[0]):
+            det_idx = int(matches_3d[i, 0])
+            track_idx = int(matches_3d[i, 1])
+            method_idx = int(matches_3d[i, 2])
+            matches.append((det_idx, track_idx))
+
+            # Store method for debugging/analysis
+            track_id = tracks[track_idx].id
+            method_names = ["kalman", "observation", "fused"]
+            self._assignment_methods[track_id] = method_names[method_idx]
+
+        unmatched_dets = [int(x) for x in unmatched_dets_array]
+        unmatched_tracks = [int(x) for x in unmatched_tracks_array]
+
+        # Debug output for 3D assignment
+        if self.debug_timings and self.frame_count % 20 == 0:
+            method_counts = {"kalman": 0, "observation": 0, "fused": 0}
+            for method in self._assignment_methods.values():
+                method_counts[method] += 1
+            logger.info(f"3D Assignment methods used: {method_counts}")
+
+        return matches, unmatched_dets, unmatched_tracks
 
     def _handle_unmatched_detections(self, unmatched_det_indices, detections):
         """FAST handle unmatched detections with vectorized pending matching"""
@@ -1554,11 +1865,6 @@ class SwarmSortTracker:
             if stop:
                 stop("embedding_computation")
 
-            # Only do debug output if explicitly requested (saves time)
-            # if self.debug_embeddings and self.frame_count % 50 == 0:  # Less frequent
-            #     logger.info(f"OPTIMIZED assignment: method={self.embedding_matching_method}")
-            #     logger.info(f"Using cached representative embeddings")
-
         # Compute cost matrix
         cost_matrix = compute_cost_matrix_with_multi_embeddings(
             det_positions,
@@ -1733,7 +2039,7 @@ class SwarmSortTracker:
 
         # Check embeddings and compute scaled embedding matrix
         use_embeddings = (
-            self.use_embeddings and 
+            self.use_embeddings and
             all(hasattr(det, "embedding") and det.embedding is not None for det in detections) and
             all(len(t.embedding_history) > 0 for t in tracks)
         )
@@ -1741,7 +2047,7 @@ class SwarmSortTracker:
         scaled_embedding_matrix = np.zeros((n_dets, n_tracks), dtype=np.float32)
         if use_embeddings:
             if start: start("embedding_computation")
-            
+
             # Fast embedding computation (reuse existing optimized code)
             det_embeddings = np.empty((n_dets, detections[0].embedding.shape[0]), dtype=np.float32)
             for i, det in enumerate(detections):
@@ -1749,7 +2055,7 @@ class SwarmSortTracker:
 
             track_embeddings = np.empty((n_tracks, det_embeddings.shape[1]), dtype=np.float32)
             for i, track in enumerate(tracks):
-                if (track._representative_cache_valid and 
+                if (track._representative_cache_valid and
                     track._cached_representative_embedding is not None):
                     track_embeddings[i] = track._cached_representative_embedding
                 elif len(track.embedding_history) > 0:
@@ -1763,7 +2069,7 @@ class SwarmSortTracker:
             scaled_distances_flat = self.embedding_scaler.scale_distances(raw_distances_flat)
             self.embedding_scaler.update_statistics(raw_distances_flat)
             scaled_embedding_matrix = scaled_distances_flat.reshape(n_dets, n_tracks)
-            
+
             if stop: stop("embedding_computation")
 
         # Compute cost matrix
@@ -1773,7 +2079,7 @@ class SwarmSortTracker:
                 self.frame_count - track.last_detection_frame for track in tracks
             ], dtype=np.float32)
             embedding_median = np.median(scaled_embedding_matrix) if scaled_embedding_matrix.size > 0 else 0.5
-            
+
             cost_matrix = compute_probabilistic_cost_matrix_vectorized(
                 det_positions, track_kalman_positions, track_last_positions,
                 track_frames_since_detection, scaled_embedding_matrix, embedding_median,
@@ -1788,29 +2094,29 @@ class SwarmSortTracker:
 
         # OPTIMIZED HYBRID ASSIGNMENT LOGIC
         if start: start("hybrid_assignment")
-        
+
         # Phase 1: NUMBA-accelerated greedy assignment for confident matches
         # Use numba-compiled greedy with greedy threshold
         greedy_matches_array, remaining_dets_array, remaining_tracks_array = numba_greedy_assignment(
             cost_matrix, self.greedy_threshold
         )
-        
+
         # Convert to expected format
-        greedy_matches = [(int(greedy_matches_array[i, 0]), int(greedy_matches_array[i, 1])) 
+        greedy_matches = [(int(greedy_matches_array[i, 0]), int(greedy_matches_array[i, 1]))
                          for i in range(greedy_matches_array.shape[0])]
-        
+
         # Phase 2: Hungarian assignment for remaining detections/tracks
         remaining_dets = [int(x) for x in remaining_dets_array]
         remaining_tracks = [int(x) for x in remaining_tracks_array]
-        
+
         hungarian_matches = []
         if remaining_dets and remaining_tracks:
             # Create reduced cost matrix
-            reduced_cost_matrix = np.full((len(remaining_dets), len(remaining_tracks)), 
+            reduced_cost_matrix = np.full((len(remaining_dets), len(remaining_tracks)),
                                         np.inf, dtype=np.float32)
-            
+
             fallback_threshold = self.max_distance * self.hungarian_fallback_threshold
-            
+
             for i, det_idx in enumerate(remaining_dets):
                 for j, track_idx in enumerate(remaining_tracks):
                     original_cost = cost_matrix[det_idx, track_idx]
@@ -1824,32 +2130,32 @@ class SwarmSortTracker:
                 if len(finite_costs) > 0:
                     max_finite_cost = np.max(finite_costs)
                     reduced_cost_matrix[np.isinf(reduced_cost_matrix)] = max_finite_cost * 2
-                
+
                     try:
                         hun_det_indices, hun_track_indices = linear_sum_assignment(reduced_cost_matrix)
-                        
+
                         # Convert back to original indices and filter valid matches
                         for i, j in zip(hun_det_indices, hun_track_indices):
                             original_det_idx = remaining_dets[i]
                             original_track_idx = remaining_tracks[j]
                             original_cost = cost_matrix[original_det_idx, original_track_idx]
-                            
+
                             if original_cost <= fallback_threshold:
                                 hungarian_matches.append((original_det_idx, original_track_idx))
-                                
+
                     except ValueError:
                         pass  # Hungarian failed, continue without these matches
-        
+
         if stop: stop("hybrid_assignment")
-        
+
         # Combine results
         all_matches = greedy_matches + hungarian_matches
         matched_dets = {m[0] for m in all_matches}
         matched_tracks = {m[1] for m in all_matches}
-        
+
         unmatched_dets = [i for i in range(n_dets) if i not in matched_dets]
         unmatched_tracks = [i for i in range(n_tracks) if i not in matched_tracks]
-        
+
         return all_matches, unmatched_dets, unmatched_tracks
 
     def _greedy_assignment(self, detections, timer=None, start=None, stop=None):
@@ -1863,7 +2169,7 @@ class SwarmSortTracker:
             return [], list(range(n_dets)), []
 
         tracks = list(self.tracks.values())
-        
+
         # Same setup as hybrid but with pure greedy logic
         det_positions = np.array([det.position.flatten()[:2] for det in detections], dtype=np.float32)
         track_last_positions = np.array([t.last_detection_pos for t in tracks], dtype=np.float32)
@@ -1871,11 +2177,11 @@ class SwarmSortTracker:
 
         # Fast embedding computation (same as hybrid)
         use_embeddings = (
-            self.use_embeddings and 
+            self.use_embeddings and
             all(hasattr(det, "embedding") and det.embedding is not None for det in detections) and
             all(len(t.embedding_history) > 0 for t in tracks)
         )
-        
+
         scaled_embedding_matrix = np.zeros((n_dets, n_tracks), dtype=np.float32)
         if use_embeddings:
             if start: start("embedding_computation")
@@ -1885,7 +2191,7 @@ class SwarmSortTracker:
 
             track_embeddings = np.empty((n_tracks, det_embeddings.shape[1]), dtype=np.float32)
             for i, track in enumerate(tracks):
-                if (track._representative_cache_valid and 
+                if (track._representative_cache_valid and
                     track._cached_representative_embedding is not None):
                     track_embeddings[i] = track._cached_representative_embedding
                 elif len(track.embedding_history) > 0:
@@ -1900,8 +2206,8 @@ class SwarmSortTracker:
             self.embedding_scaler.update_statistics(raw_distances_flat)
             scaled_embedding_matrix = scaled_distances_flat.reshape(n_dets, n_tracks)
             if stop: stop("embedding_computation")
-        
-        # Compute cost matrix (same as hybrid) 
+
+        # Compute cost matrix (same as hybrid)
         if start: start("cost_matrix")
         if self.use_probabilistic_costs:
             track_frames_since_detection = np.array([
@@ -1909,7 +2215,7 @@ class SwarmSortTracker:
             ], dtype=np.float32)
             cost_matrix = compute_probabilistic_cost_matrix_vectorized(
                 det_positions, track_kalman_positions, track_last_positions,
-                track_frames_since_detection, scaled_embedding_matrix, 
+                track_frames_since_detection, scaled_embedding_matrix,
                 np.median(scaled_embedding_matrix) if scaled_embedding_matrix.size > 0 else 0.5,
                 use_embeddings, self.max_distance, self.embedding_weight
             )
@@ -1922,20 +2228,20 @@ class SwarmSortTracker:
 
         # NUMBA-ACCELERATED greedy assignment - as fast as Hungarian!
         if start: start("greedy_assignment")
-        
+
         # Use numba-compiled greedy assignment
         matches_array, unmatched_dets_array, unmatched_tracks_array = numba_greedy_assignment(
             cost_matrix, self.max_distance
         )
-        
+
         # Convert to expected format
-        matches = [(int(matches_array[i, 0]), int(matches_array[i, 1])) 
+        matches = [(int(matches_array[i, 0]), int(matches_array[i, 1]))
                   for i in range(matches_array.shape[0])]
         unmatched_dets = [int(x) for x in unmatched_dets_array]
         unmatched_tracks = [int(x) for x in unmatched_tracks_array]
-        
+
         if stop: stop("greedy_assignment")
-        
+
         return matches, unmatched_dets, unmatched_tracks
 
     def _get_detection_confidence(self, detection: Detection) -> float:
@@ -2020,27 +2326,27 @@ class SwarmSortTracker:
         logger.info("=== END EMBEDDING DEBUG ===\n")
 
     def _update_matched_tracks(self, matches, detections):
-        """Optimized update with minimal overhead"""
+        """Enhanced update with observation history maintenance"""
         if not matches:
             return
 
         tracks = list(self.tracks.values())
 
-        # Process all updates in a single pass
         for det_idx, track_idx in matches:
             detection = detections[det_idx]
             track = tracks[track_idx]
 
-            # Direct update without intermediate storage
             position = detection.position.flatten()[:2].astype(np.float32)
 
-            # Update spatial state (fast path)
+            # Update observation history BEFORE spatial update
+            track.update_observation_history(position, self.frame_count)
+
+            # Rest of the existing update logic...
             track.last_detection_pos = position
             track.last_detection_frame = self.frame_count
             track.detection_confidence = detection.confidence
             track.confidence_score = detection.confidence
 
-            # Fast Kalman update
             track.kalman_state = simple_kalman_update(track.kalman_state, position)
 
             if track.hits > 0:
@@ -2053,25 +2359,19 @@ class SwarmSortTracker:
             track.velocity = track.kalman_state[2:].copy()
             track.predicted_position = track.position + track.velocity
 
-            # Handle embedding with minimal overhead
+            # Handle embedding and bbox updates...
             if hasattr(detection, "embedding") and detection.embedding is not None:
-                # Assume embeddings are pre-normalized (do this once in detection creation)
                 embedding = detection.embedding
                 if len(track.embedding_history) == track.embedding_history.maxlen:
-                    # Only invalidate cache when deque is full and will pop oldest
                     track._cache_valid = False
                     track._representative_cache_valid = False
                 track.embedding_history.append(embedding)
                 track.embedding_update_count += 1
+                track.avg_embedding = None
 
-                # Lazy update - don't compute avg_embedding unless needed
-                track.avg_embedding = None  # Mark as dirty, compute on demand
-
-            # Update bbox if present
             if hasattr(detection, "bbox") and detection.bbox is not None:
                 track.bbox = np.asarray(detection.bbox, dtype=np.float32)
 
-            # Update counters
             track.hits += 1
             track.age += 1
             track.misses = 0
@@ -2108,7 +2408,7 @@ class SwarmSortTracker:
         valid_reid_tracks = []
         for track_id, track in self.tracks.items():
             if (
-                track.misses > 0 
+                track.misses > 0
                 and track.confirmed
                 and len(track.embedding_history) > 0
                 and track.misses <= self.max_track_age // 2  # Only try ReID in first half of track lifetime
@@ -2279,19 +2579,6 @@ class SwarmSortTracker:
 
         end_assignment = time.perf_counter() if self.debug_timings else None
 
-        # Log detailed ReID timings
-        if self.debug_timings:
-            # The main update loop already times the entire ReID step.
-            # Uncomment the following lines for a detailed breakdown of ReID performance.
-            # self.timings["reid_setup"] = f"{(end_setup - start_setup) * 1000:.2f} ms"
-            # self.timings["reid_repr_emb"] = f"{(end_repr - start_repr) * 1000:.2f} ms"
-            # self.timings["reid_distances"] = f"{(end_distances - start_distances) * 1000:.2f} ms"
-            # self.timings["reid_scaling"] = f"{(end_scaling - start_scaling) * 1000:.2f} ms"
-            # self.timings["reid_cost_matrix"] = f"{(end_cost - start_cost) * 1000:.2f} ms"
-            # self.timings["reid_filter"] = f"{(end_filter - start_filter) * 1000:.2f} ms"
-            # self.timings["reid_assignment"] = f"{(end_assignment - start_assignment) * 1000:.2f} ms"
-            pass
-
         return reid_matches
 
     def _handle_empty_frame(self):
@@ -2338,19 +2625,39 @@ class SwarmSortTracker:
                 results.append(tracked_obj)
         return results
 
+    def get_assignment_method_stats(self) -> Dict[str, int]:
+        """Get statistics about which assignment methods were used in 3D assignment"""
+        if not hasattr(self, '_assignment_methods'):
+            return {}
+
+        method_counts = {"kalman": 0, "observation": 0, "fused": 0}
+        for method in self._assignment_methods.values():
+            if method in method_counts:
+                method_counts[method] += 1
+
+        return method_counts
+
     def reset(self):
         """Reset tracker state."""
         self.tracks.clear()
         self.pending_detections.clear()
+        self._assignment_methods.clear()
         self.next_id = 1
         self.frame_count = 0
 
     def get_statistics(self) -> dict:
         """Get tracker statistics."""
-        return {
+        stats = {
             "frame_count": self.frame_count,
             "active_tracks": len(self.tracks),
             "pending_detections": len(self.pending_detections),
             "next_id": self.next_id,
+            "assignment_strategy": self.assignment_strategy,
             "embedding_scaler_stats": self.embedding_scaler.get_statistics(),
         }
+
+        # Add 3D assignment method statistics if available
+        if hasattr(self, '_assignment_methods') and self._assignment_methods:
+            stats["assignment_method_stats"] = self.get_assignment_method_stats()
+
+        return stats

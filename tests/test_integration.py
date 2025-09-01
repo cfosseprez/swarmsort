@@ -17,6 +17,7 @@ from swarmsort import (
     get_embedding_extractor,
     list_available_embeddings
 )
+from swarmsort.swarmtracker_adapter import RawTrackerSwarmSORT, create_swarmsort_tracker
 
 
 class TestSwarmSortTrackerIntegration:
@@ -284,7 +285,7 @@ class TestEndToEndIntegration:
             use_embeddings=True,
             embedding_weight=1.0,
             min_consecutive_detections=1,  # Allow immediate track creation
-            max_age=5
+            max_track_age=5
         )
         
         tracker = SwarmSortTracker(
@@ -320,7 +321,7 @@ class TestEndToEndIntegration:
             use_embeddings=True,
             reid_enabled=True,
             min_consecutive_detections=2,
-            max_age=10,
+            max_track_age=10,
             reid_max_distance=200.0
         )
         
@@ -371,7 +372,7 @@ class TestEndToEndIntegration:
         """Test that all configuration parameters are properly handled."""
         config_params = {
             'max_distance': 200.0,
-            'max_age': 15,
+            'max_track_age': 15,
             'detection_conf_threshold': 0.5,
             'use_embeddings': True,
             'embedding_weight': 0.8,
@@ -392,7 +393,7 @@ class TestEndToEndIntegration:
         
         # Verify parameters are set correctly
         assert tracker.config.max_distance == 200.0
-        assert tracker.config.max_age == 15
+        assert tracker.config.max_track_age == 15
         assert tracker.config.use_embeddings == True
         assert tracker.config.embedding_weight == 0.8
         assert tracker.config.reid_enabled == True
@@ -438,6 +439,55 @@ class TestAvailableEmbeddings:
             extractor = get_embedding_extractor(emb_type, use_gpu=False)
             assert extractor.embedding_dim == expected_dim, \
                 f"Embedding '{emb_type}' has dim {extractor.embedding_dim}, expected {expected_dim}"
+
+
+class TestSwarmTrackerAdapter:
+    """Test SwarmTracker integration adapter."""
+
+    def test_raw_tracker_creation(self):
+        """Test RawTrackerSwarmSORT creation."""
+        config = {'max_track_age': 25, 'use_embeddings': False}
+        tracker = RawTrackerSwarmSORT(tracker_config=config)
+        
+        assert tracker.config.max_track_age == 25
+        assert tracker.config.use_embeddings == False
+
+    def test_adapter_detection_conversion(self):
+        """Test detection format conversion in adapter."""
+        tracker = RawTrackerSwarmSORT()
+        
+        # Test with various detection formats
+        detections = [
+            # Array format [x1, y1, x2, y2, confidence]
+            np.array([10, 10, 50, 50, 0.8]),
+            # List format
+            [20, 20, 60, 60, 0.9, 0],  # With class_id
+        ]
+        
+        result = tracker.track(detections, np.zeros((100, 100, 3)))
+        assert hasattr(result, 'tracked_objects')
+        assert hasattr(result, 'bounding_boxes')
+
+    def test_create_swarmsort_tracker_fallback(self):
+        """Test create_swarmsort_tracker fallback behavior."""
+        # Test with mock runtime config
+        class MockConfig:
+            def get_modified_params(self):
+                return {'max_track_age': 20, 'use_embeddings': False}
+        
+        # Should create tracker without errors
+        tracker = create_swarmsort_tracker(runtime_config=MockConfig())
+        assert hasattr(tracker, 'config')
+
+    def test_import_error_handling(self):
+        """Test graceful handling of import errors."""
+        # Test that package works even if optional dependencies are missing
+        from swarmsort import SwarmSortTracker, SwarmSortConfig
+        
+        # Should work without errors
+        config = SwarmSortConfig(use_embeddings=False)  # Disable embeddings to avoid GPU deps
+        tracker = SwarmSortTracker(config)
+        assert tracker is not None
 
 
 if __name__ == '__main__':

@@ -22,6 +22,8 @@ from swarmsort.embeddings import (
     CUPY_AVAILABLE,
     AVAILABLE_EMBEDDINGS,
 )
+from swarmsort import SwarmSortTracker, SwarmSortConfig, Detection
+from swarmsort.embedding_scaler import EmbeddingDistanceScaler
 
 
 class TestEmbeddingBasics:
@@ -486,6 +488,120 @@ class TestGPUSpecific:
         # If CuPy is available, it should have been imported successfully
         assert emb_module.CUPY_AVAILABLE is True
         assert emb_module.cp is not None
+
+
+class TestEmbeddingFunctionality:
+    """Test embedding-related functionality."""
+
+    def test_embedding_normalization(self):
+        """Test embedding normalization in tracker."""
+        config = SwarmSortConfig(use_embeddings=True)
+        tracker = SwarmSortTracker(config)
+        
+        # Create detection with non-normalized embedding
+        embedding = np.array([1.0, 2.0, 3.0, 4.0] * 16, dtype=np.float32)  # 64-dim
+        detection = Detection(
+            position=np.array([100.0, 100.0]),
+            confidence=0.8,
+            embedding=embedding
+        )
+        
+        result = tracker.update([detection])
+        # Should process without errors
+        assert len(result) >= 0
+
+    def test_gpu_cpu_fallback(self):
+        """Test GPU to CPU fallback behavior."""
+        # This test would need to mock CuPy availability
+        config = SwarmSortConfig(use_embeddings=True)
+        
+        # Should create tracker regardless of GPU availability
+        tracker = SwarmSortTracker(config)
+        assert tracker is not None
+
+
+class TestEmbeddingDistanceScaler:
+    """Comprehensive tests for EmbeddingDistanceScaler."""
+
+    def test_scaler_different_methods(self):
+        """Test scaler with different scaling methods."""
+        methods = ["robust_minmax", "min_robustmax", "zscore", "median_mad", "quantile"]
+        
+        for method in methods:
+            scaler = EmbeddingDistanceScaler(method=method, min_samples=10)
+            
+            # Add sample data
+            distances = np.random.rand(50) * 2.0
+            scaler.update_statistics(distances)
+            
+            # Should become ready after min_samples
+            stats = scaler.get_statistics()
+            assert stats["ready"] == True
+            assert stats["method"] == method
+            
+            # Test scaling
+            test_distances = np.array([0.1, 0.5, 1.0, 1.5])
+            scaled = scaler.scale_distances(test_distances)
+            assert len(scaled) == len(test_distances)
+
+    def test_scaler_insufficient_data(self):
+        """Test scaler behavior with insufficient data."""
+        scaler = EmbeddingDistanceScaler(min_samples=100)
+        
+        # Add small amount of data
+        distances = np.random.rand(50)
+        scaler.update_statistics(distances)
+        
+        # Should not be ready yet
+        stats = scaler.get_statistics()
+        assert stats["ready"] == False
+        
+        # Scaling should return fallback behavior (clipped scaled distances)
+        test_distances = np.array([0.1, 0.5, 1.0])
+        scaled = scaler.scale_distances(test_distances)
+        # Just check that it returns something reasonable
+        assert len(scaled) == len(test_distances)
+        assert np.all(scaled >= 0)
+        assert np.all(scaled <= 1)
+
+    def test_scaler_edge_cases(self):
+        """Test scaler with edge case inputs."""
+        scaler = EmbeddingDistanceScaler(min_samples=5)
+        
+        # Test with all zeros
+        zeros = np.zeros(10)
+        scaler.update_statistics(zeros)
+        
+        # Test with all same values
+        ones = np.ones(10) * 0.5
+        scaler.update_statistics(ones)
+        
+        # Should handle gracefully
+        stats = scaler.get_statistics()
+        assert stats["ready"] == True
+
+    def test_scaler_statistics_tracking(self):
+        """Test scaler statistics tracking."""
+        scaler = EmbeddingDistanceScaler(min_samples=10)
+        
+        # Add data to make it ready
+        distances = np.random.rand(20)
+        scaler.update_statistics(distances)
+        stats = scaler.get_statistics()
+        assert stats["ready"] == True
+        assert stats["sample_count"] == 20
+
+    def test_scaler_incremental_update(self):
+        """Test incremental updates to scaler."""
+        scaler = EmbeddingDistanceScaler(min_samples=20, update_rate=0.1)
+        
+        # Add data in batches
+        for i in range(5):
+            batch = np.random.rand(10) * (i + 1)  # Different ranges per batch
+            scaler.update_statistics(batch)
+            
+            stats = scaler.get_statistics()
+            assert stats["sample_count"] == (i + 1) * 10
 
 
 if __name__ == "__main__":

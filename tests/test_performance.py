@@ -242,7 +242,7 @@ class TestTrackerPerformance:
         profiler = MemoryProfiler()
         profiler.start()
 
-        config = SwarmSortConfig(use_embeddings=True, max_embeddings_per_track=10, max_age=20)
+        config = SwarmSortConfig(use_embeddings=True, max_embeddings_per_track=10, max_track_age=20)
         tracker = SwarmSort(config)
 
         # Run tracking for many frames
@@ -385,7 +385,7 @@ class TestScalabilityBenchmarks:
             embedding_weight=0.3,
             min_consecutive_detections=3,
             max_embeddings_per_track=10,
-            max_age=15,
+            max_track_age=15,
         )
 
         scenarios = self.generate_scenario(
@@ -414,7 +414,7 @@ class TestMemoryBenchmarks:
         profiler = MemoryProfiler()
         profiler.start()
 
-        config = SwarmSortConfig(use_embeddings=True, max_embeddings_per_track=8, max_age=10)
+        config = SwarmSortConfig(use_embeddings=True, max_embeddings_per_track=8, max_track_age=10)
 
         memory_snapshots = []
 
@@ -502,7 +502,7 @@ class TestMemoryBenchmarks:
         profiler.start()
 
         config = SwarmSortConfig(
-            use_embeddings=True, max_embeddings_per_track=5, max_age=8  # Limited history
+            use_embeddings=True, max_embeddings_per_track=5, max_track_age=8  # Limited history
         )
         tracker = SwarmSort(config)
 

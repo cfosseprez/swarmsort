@@ -812,7 +812,7 @@ class TestEmbeddingIntegrationScenarios:
             reid_enabled=True,
             reid_embedding_threshold=0.3,
             reid_max_distance=100.0,
-            max_age=5,  # Short age for testing ReID
+            max_track_age=5,  # Short age for testing ReID
         )
         tracker = SwarmSort(config)
 

@@ -12,6 +12,7 @@ from swarmsort import (
     create_tracker,
     is_within_swarmtracker,
 )
+from swarmsort.data_classes import PendingDetection
 
 
 def test_detection_creation():
@@ -250,6 +251,92 @@ def test_config_yaml_functionality():
     # Test dict export
     exported = config.to_dict()
     assert exported["max_distance"] == 90.0
+
+
+class TestDataStructures:
+    """Test data structure edge cases."""
+
+    def test_detection_with_minimal_data(self):
+        """Test Detection with minimal required data."""
+        det = Detection(position=np.array([10.0, 20.0]), confidence=0.5)
+        assert det.position[0] == 10.0
+        assert det.position[1] == 20.0
+        assert det.confidence == 0.5
+
+    def test_detection_with_full_data(self):
+        """Test Detection with all optional data."""
+        embedding = np.random.randn(64).astype(np.float32)
+        bbox = np.array([10, 20, 50, 60], dtype=np.float32)
+        
+        det = Detection(
+            position=np.array([30.0, 40.0]),
+            confidence=0.8,
+            embedding=embedding,
+            bbox=bbox
+        )
+        
+        assert det.embedding is not None
+        assert det.bbox is not None
+        assert len(det.embedding) == 64
+        assert len(det.bbox) == 4
+
+    def test_detection_creation(self):
+        """Test Detection data class creation and properties."""
+        pos = np.array([10.0, 20.0])
+        confidence = 0.8
+        embedding = np.random.randn(32).astype(np.float32)
+        bbox = np.array([5, 15, 15, 25])
+        
+        det = Detection(
+            position=pos,
+            confidence=confidence,
+            embedding=embedding,
+            bbox=bbox
+        )
+        
+        assert np.array_equal(det.position, pos)
+        assert det.confidence == confidence
+        assert np.array_equal(det.embedding, embedding)
+        assert np.array_equal(det.bbox, bbox)
+
+    def test_tracked_object_creation(self):
+        """Test TrackedObject creation with all fields."""
+        obj = TrackedObject(
+            id=1,
+            position=np.array([100.0, 200.0]),
+            velocity=np.array([5.0, 3.0]),
+            confidence=0.9,
+            age=5,
+            hits=10,
+            time_since_update=0,
+            state=1,
+            bbox=np.array([90, 190, 110, 210]),
+            predicted_position=np.array([105.0, 205.0])
+        )
+        
+        assert obj.id == 1
+        assert obj.age == 5
+        assert obj.hits == 10
+        assert obj.state == 1
+        assert obj.predicted_position is not None
+
+    def test_pending_detection_creation(self):
+        """Test PendingDetection creation and properties."""
+        pos = np.array([30.0, 40.0])
+        embedding = np.random.randn(16).astype(np.float32)
+        
+        pending = PendingDetection(
+            position=pos,
+            confidence=0.6,
+            first_seen_frame=10,
+            last_seen_frame=12
+        )
+        
+        assert np.array_equal(pending.position, pos)
+        assert np.array_equal(pending.average_position, pos)
+        assert pending.confidence == 0.6
+        assert pending.first_seen_frame == 10
+        assert pending.last_seen_frame == 12
 
 
 if __name__ == "__main__":
