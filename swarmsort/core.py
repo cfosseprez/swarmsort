@@ -555,6 +555,71 @@ def compute_cost_matrix_vectorized(
 
 
 @nb.njit(fastmath=True, cache=True)
+def numba_greedy_assignment(cost_matrix: np.ndarray, max_distance: float) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    ULTRA FAST numba-compiled greedy assignment.
+    Returns matches, unmatched_dets, unmatched_tracks as numpy arrays.
+    """
+    n_dets, n_tracks = cost_matrix.shape
+    
+    # Track used detections and tracks
+    used_dets = np.zeros(n_dets, dtype=np.bool_)
+    used_tracks = np.zeros(n_tracks, dtype=np.bool_)
+    
+    # Store matches
+    matches = np.empty((min(n_dets, n_tracks), 2), dtype=np.int32)
+    num_matches = 0
+    
+    # Greedy assignment - find best valid matches iteratively
+    for _ in range(min(n_dets, n_tracks)):
+        best_cost = np.inf
+        best_det = -1
+        best_track = -1
+        
+        # Find minimum cost among unused pairs
+        for d in range(n_dets):
+            if used_dets[d]:
+                continue
+            for t in range(n_tracks):
+                if used_tracks[t]:
+                    continue
+                cost = cost_matrix[d, t]
+                if cost < best_cost and cost <= max_distance:
+                    best_cost = cost
+                    best_det = d
+                    best_track = t
+        
+        if best_det >= 0:
+            matches[num_matches, 0] = best_det
+            matches[num_matches, 1] = best_track
+            num_matches += 1
+            used_dets[best_det] = True
+            used_tracks[best_track] = True
+        else:
+            break
+    
+    # Build unmatched arrays
+    unmatched_dets = np.empty(n_dets, dtype=np.int32)
+    unmatched_tracks = np.empty(n_tracks, dtype=np.int32)
+    
+    num_unmatched_dets = 0
+    num_unmatched_tracks = 0
+    
+    for i in range(n_dets):
+        if not used_dets[i]:
+            unmatched_dets[num_unmatched_dets] = i
+            num_unmatched_dets += 1
+    
+    for i in range(n_tracks):
+        if not used_tracks[i]:
+            unmatched_tracks[num_unmatched_tracks] = i
+            num_unmatched_tracks += 1
+    
+    return (matches[:num_matches], 
+            unmatched_dets[:num_unmatched_dets], 
+            unmatched_tracks[:num_unmatched_tracks])
+
+@nb.njit(fastmath=True, cache=True)
 def compute_assignment_priorities(cost_matrix: np.ndarray, max_distance: float) -> np.ndarray:
     """
     Compute priority scores for greedy assignment (SUPER FAST).
@@ -1724,32 +1789,19 @@ class SwarmSortTracker:
         # OPTIMIZED HYBRID ASSIGNMENT LOGIC
         if start: start("hybrid_assignment")
         
-        # Phase 1: Greedy assignment for confident matches - OPTIMIZED
-        greedy_matches = []
-        used_detections = set()
-        used_tracks = set()
+        # Phase 1: NUMBA-accelerated greedy assignment for confident matches
+        # Use numba-compiled greedy with greedy threshold
+        greedy_matches_array, remaining_dets_array, remaining_tracks_array = numba_greedy_assignment(
+            cost_matrix, self.greedy_threshold
+        )
         
-        # Get all valid candidates for greedy phase without expensive priorities
-        greedy_candidates = []
-        for i in range(n_dets):
-            for j in range(n_tracks):
-                cost = cost_matrix[i, j]
-                if cost <= self.greedy_threshold:  # Only consider close matches for greedy
-                    greedy_candidates.append((cost, i, j))
+        # Convert to expected format
+        greedy_matches = [(int(greedy_matches_array[i, 0]), int(greedy_matches_array[i, 1])) 
+                         for i in range(greedy_matches_array.shape[0])]
         
-        # Sort by cost (lower = better) - much faster than priority computation
-        greedy_candidates.sort(key=lambda x: x[0])
-        
-        # Greedy assignment in cost order
-        for cost, det_idx, track_idx in greedy_candidates:
-            if det_idx not in used_detections and track_idx not in used_tracks:
-                greedy_matches.append((det_idx, track_idx))
-                used_detections.add(det_idx)
-                used_tracks.add(track_idx)
-
         # Phase 2: Hungarian assignment for remaining detections/tracks
-        remaining_dets = [i for i in range(n_dets) if i not in used_detections]
-        remaining_tracks = [i for i in range(n_tracks) if i not in used_tracks]
+        remaining_dets = [int(x) for x in remaining_dets_array]
+        remaining_tracks = [int(x) for x in remaining_tracks_array]
         
         hungarian_matches = []
         if remaining_dets and remaining_tracks:
@@ -1868,36 +1920,21 @@ class SwarmSortTracker:
             )
         if stop: stop("cost_matrix")
 
-        # OPTIMIZED greedy assignment - avoid expensive priority computation
+        # NUMBA-ACCELERATED greedy assignment - as fast as Hungarian!
         if start: start("greedy_assignment")
         
-        matches = []
-        used_detections = set()
-        used_tracks = set()
+        # Use numba-compiled greedy assignment
+        matches_array, unmatched_dets_array, unmatched_tracks_array = numba_greedy_assignment(
+            cost_matrix, self.max_distance
+        )
         
-        # Get all valid candidates WITHOUT computing expensive priorities
-        candidates = []
-        for i in range(n_dets):
-            for j in range(n_tracks):
-                cost = cost_matrix[i, j]
-                if cost <= self.max_distance:
-                    # Use simple cost as priority instead of expensive compute_assignment_priorities
-                    candidates.append((cost, i, j))
-        
-        # Sort by cost (lower = better) - much faster than priority computation
-        candidates.sort(key=lambda x: x[0])
-        
-        # Greedy assignment in cost order
-        for cost, det_idx, track_idx in candidates:
-            if det_idx not in used_detections and track_idx not in used_tracks:
-                matches.append((det_idx, track_idx))
-                used_detections.add(det_idx)
-                used_tracks.add(track_idx)
+        # Convert to expected format
+        matches = [(int(matches_array[i, 0]), int(matches_array[i, 1])) 
+                  for i in range(matches_array.shape[0])]
+        unmatched_dets = [int(x) for x in unmatched_dets_array]
+        unmatched_tracks = [int(x) for x in unmatched_tracks_array]
         
         if stop: stop("greedy_assignment")
-        
-        unmatched_dets = [i for i in range(n_dets) if i not in used_detections]
-        unmatched_tracks = [i for i in range(n_tracks) if i not in used_tracks]
         
         return matches, unmatched_dets, unmatched_tracks
 

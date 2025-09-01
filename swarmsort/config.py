@@ -153,13 +153,13 @@ class SwarmSortConfig(BaseConfig):
     """
 
     # Core tracking parameters
-    max_distance: float = 80.0  # Maximum distance for association
+    max_distance: float = 40.0  # Maximum distance for association
     detection_conf_threshold: float = 0  # Minimum confidence for detections (general filter)
     max_track_age: int = 30  # Maximum frames a track can exist without detection before deletion
 
     # Embedding parameters
     use_embeddings: bool = True  # Whether to use embedding features
-    embedding_weight: float = 1  # Weight for embedding similarity in cost function
+    embedding_weight: float = 0.25  # Weight for embedding similarity in cost function
     max_embeddings_per_track: int = 15  # Maximum embeddings stored per track
     embedding_matching_method: Literal[
         "average", "weighted_average", "best_match"
@@ -169,21 +169,21 @@ class SwarmSortConfig(BaseConfig):
     use_probabilistic_costs: bool = False  # Use probabilistic fusion vs simple costs
 
     # Assignment strategy parameters
-    assignment_strategy: Literal["hungarian", "greedy", "hybrid"] = "hungarian"
+    assignment_strategy: Literal["hungarian", "greedy", "hybrid"] = "greedy"
     greedy_threshold: float = 30.0  # Distance threshold for greedy assignment
     greedy_confidence_boost: float = 0.8  # Confidence multiplier for greedy matches  
     hungarian_fallback_threshold: float = 1.5  # Multiplier of max_distance for Hungarian fallback
 
     # Re-identification (ReID) parameters
     reid_enabled: bool = True  # Enable re-identification of lost tracks
-    reid_max_distance: float = 150.0  # Maximum distance for ReID
+    reid_max_distance: float = 120.0  # Maximum distance for ReID
     reid_embedding_threshold: float = 0.3  # Embedding threshold for ReID (lower more permissive)
 
     # Track initialization parameters
     init_conf_threshold: float = 0  # Minimum confidence for track initialization (initialization filter)
     min_consecutive_detections: int = 5  # Minimum consecutive detections to create track
     max_detection_gap: int = 2  # Maximum gap between detections for same pending track
-    pending_detection_distance: float = 125.0  # Distance threshold for pending detection matching
+    pending_detection_distance: float = 80.0  # Distance threshold for pending detection matching
 
     # Duplicate detection removal
     duplicate_detection_threshold: float = 15  # Distance threshold for duplicate removal
