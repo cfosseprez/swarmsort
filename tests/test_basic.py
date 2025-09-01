@@ -65,7 +65,7 @@ def test_config_creation_and_validation():
     config.validate()
 
     # Custom config
-    config = SwarmSortConfig(max_distance=100.0, high_score_threshold=0.7, use_embeddings=False)
+    config = SwarmSortConfig(max_distance=100.0, init_conf_threshold=0.7, use_embeddings=False)
     config.validate()
     assert config.max_distance == 100.0
     assert config.use_embeddings == False
@@ -236,14 +236,14 @@ def test_config_yaml_functionality():
     # Test dict conversion
     config_dict = {
         "max_distance": 90.0,
-        "high_score_threshold": 0.75,
+        "init_conf_threshold": 0.75,
         "use_embeddings": True,
         "embedding_weight": 0.4,
     }
 
     config = SwarmSortConfig.from_dict(config_dict)
     assert config.max_distance == 90.0
-    assert config.high_score_threshold == 0.75
+    assert config.init_conf_threshold == 0.75
     assert config.use_embeddings == True
     assert config.embedding_weight == 0.4
 

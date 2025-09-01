@@ -26,7 +26,7 @@ def default_config():
     """Default SwarmSort configuration for testing."""
     return SwarmSortConfig(
         max_distance=50.0,
-        high_score_threshold=0.8,
+        init_conf_threshold=0.8,
         min_consecutive_detections=2,
         use_embeddings=True,
         embedding_weight=0.3,
@@ -58,7 +58,7 @@ def strict_config():
     """Strict configuration for precision tests."""
     return SwarmSortConfig(
         max_distance=30.0,
-        high_score_threshold=0.9,
+        init_conf_threshold=0.9,
         min_consecutive_detections=4,
         detection_conf_threshold=0.8,
         use_embeddings=True,
@@ -71,10 +71,10 @@ def permissive_config():
     """Permissive configuration for stress tests."""
     return SwarmSortConfig(
         max_distance=200.0,
-        high_score_threshold=0.3,
+        init_conf_threshold=0.3,
         min_consecutive_detections=1,
         detection_conf_threshold=0.1,
-        max_age=50,
+        max_track_age=50,
         use_embeddings=False,
     )
 
@@ -269,7 +269,7 @@ def temp_config_file(tmp_path_factory):
 
     config_content = """
 max_distance: 75.0
-high_score_threshold: 0.85
+init_conf_threshold: 0.85
 use_embeddings: true
 embedding_weight: 0.4
 embedding_matching_method: "weighted_average"

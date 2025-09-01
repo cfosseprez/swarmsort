@@ -448,7 +448,7 @@ class TestErrorHandling:
             config.validate()
 
         with pytest.raises(ValueError):
-            config = SwarmSortConfig(high_score_threshold=1.5)
+            config = SwarmSortConfig(init_conf_threshold=1.5)
             config.validate()
 
         with pytest.raises(ValueError):

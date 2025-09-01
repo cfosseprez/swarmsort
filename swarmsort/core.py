@@ -799,15 +799,14 @@ class FastTrackState:
         self.misses = 0
         self.lost_frames = 0
 
-        if self.hits >= 3:
-            self.confirmed = True
+        # Note: confirmation is now handled by the tracker to respect config
 
     def predict_only(self):
-        """Fast Kalman prediction step"""
+        """Fast Kalman prediction step - keeps position at last detection, updates prediction only"""
         self.kalman_state = simple_kalman_predict(self.kalman_state)
-        self.position = self.kalman_state[:2].copy()
+        # Don't update self.position - keep it at last detection position for display
         self.velocity = self.kalman_state[2:].copy()
-        self.predicted_position = self.position + self.velocity
+        self.predicted_position = self.kalman_state[:2].copy()  # Store predicted position separately
         self.age += 1
         self.misses += 1
         self.lost_frames += 1
@@ -1048,19 +1047,17 @@ class SwarmSortTracker:
                 if norm > 0:
                     det.embedding = emb / norm  # Store normalized version
 
-        start("predict_tracks")
-        for track in self.tracks.values():
-            track.predict_only()
-        stop("predict_tracks")
-
         start("assignment")
+        # Check for prediction collisions before assignment
+        collision_groups = self._detect_prediction_collisions()
+        
         if self.use_probabilistic_costs:
             matches, unmatched_dets, unmatched_tracks = self._fast_assignment_probabilistic(
-                valid_detections, timer, start, stop
+                valid_detections, timer, start, stop, collision_groups
             )
         else:
             matches, unmatched_dets, unmatched_tracks = self._fast_assignment(
-                valid_detections, timer, start, stop
+                valid_detections, timer, start, stop, collision_groups
             )
         stop("assignment")
 
@@ -1315,7 +1312,7 @@ class SwarmSortTracker:
             [det.position.flatten()[:2] for det in detections], dtype=np.float32
         )
         track_last_positions = np.array([t.last_detection_pos for t in tracks], dtype=np.float32)
-        track_kalman_positions = np.array([t.position for t in tracks], dtype=np.float32)
+        track_kalman_positions = np.array([t.predicted_position for t in tracks], dtype=np.float32)
 
         # Quick spatial pre-filter
         spatial_distances = np.minimum(
@@ -1472,7 +1469,7 @@ class SwarmSortTracker:
         det_positions = np.array(
             [det.position.flatten()[:2] for det in detections], dtype=np.float32
         )
-        track_positions = np.array([t.position for t in tracks], dtype=np.float32)
+        track_positions = np.array([t.predicted_position for t in tracks], dtype=np.float32)
         track_last_positions = np.array([t.last_detection_pos for t in tracks], dtype=np.float32)
 
         # Check embeddings
@@ -1714,19 +1711,18 @@ class SwarmSortTracker:
             track.misses = 0
             track.lost_frames = 0
 
-            if track.hits >= 3:
+            if track.hits >= self.min_consecutive_detections:
                 track.confirmed = True
 
     def _handle_unmatched_tracks(self, unmatched_track_indices):
-        """Handle unmatched tracks - increment miss counter"""
+        """Handle unmatched tracks - predict position and increment miss counter"""
         tracks = list(self.tracks.values())
 
         for track_idx in unmatched_track_indices:
             if track_idx < len(tracks):
                 track = tracks[track_idx]
-                # Track misses are already incremented in the track's update method
-                # No need to move tracks anywhere - they stay active until max_track_age
-                pass
+                # Predict position using Kalman filter and increment misses
+                track.predict_only()
 
     def _attempt_reid(self, detections, unmatched_det_indices):
         """ReID with proper multi-embedding support"""

@@ -471,10 +471,10 @@ class TestResourceLimitTests:
         # Very permissive config
         permissive_config = SwarmSortConfig(
             max_distance=1000.0,
-            high_score_threshold=0.01,
+            init_conf_threshold=0.01,
             min_consecutive_detections=1,
             detection_conf_threshold=0.001,
-            max_age=1000,
+            max_track_age=1000,
             max_embeddings_per_track=100,
         )
 
@@ -483,10 +483,10 @@ class TestResourceLimitTests:
         # Very strict config
         strict_config = SwarmSortConfig(
             max_distance=1.0,
-            high_score_threshold=0.999,
+            init_conf_threshold=0.999,
             min_consecutive_detections=20,
             detection_conf_threshold=0.999,
-            max_age=1,
+            max_track_age=1,
             max_embeddings_per_track=1,
         )
 
@@ -640,10 +640,10 @@ class TestErrorRecoveryTests:
         # Test various invalid configurations
         invalid_configs = [
             {"max_distance": -10.0},
-            {"high_score_threshold": 2.0},
+            {"init_conf_threshold": 2.0},
             {"embedding_weight": -1.0},
             {"min_consecutive_detections": 0},
-            {"max_age": 0},
+            {"max_track_age": 0},
             {"detection_conf_threshold": 1.5},
         ]
 
@@ -655,7 +655,7 @@ class TestErrorRecoveryTests:
         # Test edge case but valid configurations
         edge_configs = [
             {"max_distance": 1e-6},  # Very small
-            {"high_score_threshold": 0.0},  # Minimum
+            {"init_conf_threshold": 0.0},  # Minimum
             {"embedding_weight": 0.0},  # No embeddings
             {"min_consecutive_detections": 1},  # Immediate
             {"max_age": 1},  # Very short
