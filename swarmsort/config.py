@@ -168,6 +168,12 @@ class SwarmSortConfig(BaseConfig):
     # Cost computation method
     use_probabilistic_costs: bool = False  # Use probabilistic fusion vs simple costs
 
+    # Assignment strategy parameters
+    assignment_strategy: Literal["hungarian", "greedy", "hybrid"] = "hungarian"
+    greedy_threshold: float = 30.0  # Distance threshold for greedy assignment
+    greedy_confidence_boost: float = 0.8  # Confidence multiplier for greedy matches  
+    hungarian_fallback_threshold: float = 1.5  # Multiplier of max_distance for Hungarian fallback
+
     # Re-identification (ReID) parameters
     reid_enabled: bool = True  # Enable re-identification of lost tracks
     reid_max_distance: float = 150.0  # Maximum distance for ReID

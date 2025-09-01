@@ -555,6 +555,69 @@ def compute_cost_matrix_vectorized(
 
 
 @nb.njit(fastmath=True, cache=True)
+def compute_assignment_priorities(cost_matrix: np.ndarray, max_distance: float) -> np.ndarray:
+    """
+    Compute priority scores for greedy assignment (SUPER FAST).
+    Lower scores = higher priority (better matches should be assigned first)
+    
+    Priority considers:
+    1. Cost (distance) - lower is better
+    2. Number of alternatives - fewer alternatives = higher priority
+    3. Confidence of the match relative to alternatives
+    """
+    n_dets, n_tracks = cost_matrix.shape
+    priorities = np.full((n_dets, n_tracks), np.inf, dtype=np.float32)
+    
+    for i in range(n_dets):
+        for j in range(n_tracks):
+            cost = cost_matrix[i, j]
+            if cost > max_distance:
+                continue
+                
+            # Base priority is the cost itself
+            priority = cost
+            
+            # Count valid alternatives for this detection
+            det_alternatives = 0
+            for k in range(n_tracks):
+                if cost_matrix[i, k] <= max_distance:
+                    det_alternatives += 1
+            
+            # Count valid alternatives for this track
+            track_alternatives = 0
+            for k in range(n_dets):
+                if cost_matrix[k, j] <= max_distance:
+                    track_alternatives += 1
+            
+            # Boost priority (lower score) for matches with fewer alternatives
+            if det_alternatives > 1:
+                priority *= (1.0 + 0.1 * (det_alternatives - 1))
+            if track_alternatives > 1:
+                priority *= (1.0 + 0.1 * (track_alternatives - 1))
+            
+            # Find second best option for confidence calculation
+            second_best_det = np.inf
+            second_best_track = np.inf
+            
+            for k in range(n_tracks):
+                if k != j and cost_matrix[i, k] < second_best_det:
+                    second_best_det = cost_matrix[i, k]
+                    
+            for k in range(n_dets):
+                if k != i and cost_matrix[k, j] < second_best_track:
+                    second_best_track = cost_matrix[k, j]
+            
+            # Confidence boost: if this match is much better than alternatives
+            min_second_best = min(second_best_det, second_best_track)
+            if min_second_best < np.inf and min_second_best > cost * 1.5:
+                priority *= 0.7  # Higher confidence = lower priority score
+            
+            priorities[i, j] = priority
+    
+    return priorities
+
+
+@nb.njit(fastmath=True, cache=True)
 def simple_kalman_update(x_pred: np.ndarray, z: np.ndarray) -> np.ndarray:
     """Simplified Kalman update - ORIGINAL"""
     alpha = 0.7
@@ -929,10 +992,17 @@ class SwarmSortTracker:
         self.embedding_weight = self.config.embedding_weight
         self.max_track_age = self.config.max_track_age
         self.detection_conf_threshold = self.config.detection_conf_threshold
+        self.use_embeddings = self.config.use_embeddings
 
         # Embedding history configuration
         self.max_embeddings_per_track = self.config.max_embeddings_per_track
         self.embedding_matching_method = self.config.embedding_matching_method
+
+        # Assignment strategy parameters
+        self.assignment_strategy = getattr(self.config, "assignment_strategy", "hybrid")
+        self.greedy_threshold = getattr(self.config, "greedy_threshold", 30.0)
+        self.greedy_confidence_boost = getattr(self.config, "greedy_confidence_boost", 0.8)
+        self.hungarian_fallback_threshold = getattr(self.config, "hungarian_fallback_threshold", 1.5)
 
         # Anti-duplicate parameters
         self.duplicate_detection_threshold = self.config.duplicate_detection_threshold
@@ -1048,12 +1118,21 @@ class SwarmSortTracker:
                     det.embedding = emb / norm  # Store normalized version
 
         start("assignment")
-        if self.use_probabilistic_costs:
-            matches, unmatched_dets, unmatched_tracks = self._fast_assignment_probabilistic(
+        if self.assignment_strategy == "hungarian":
+            if self.use_probabilistic_costs:
+                matches, unmatched_dets, unmatched_tracks = self._fast_assignment_probabilistic(
+                    valid_detections, timer, start, stop
+                )
+            else:
+                matches, unmatched_dets, unmatched_tracks = self._fast_assignment(
+                    valid_detections, timer, start, stop
+                )
+        elif self.assignment_strategy == "greedy":
+            matches, unmatched_dets, unmatched_tracks = self._greedy_assignment(
                 valid_detections, timer, start, stop
             )
-        else:
-            matches, unmatched_dets, unmatched_tracks = self._fast_assignment(
+        elif self.assignment_strategy == "hybrid":
+            matches, unmatched_dets, unmatched_tracks = self._hybrid_assignment(
                 valid_detections, timer, start, stop
             )
         stop("assignment")
@@ -1569,6 +1648,258 @@ class SwarmSortTracker:
 
         return matches, unmatched_dets, unmatched_tracks
 
+    def _hybrid_assignment(self, detections, timer=None, start=None, stop=None):
+        """
+        OPTIMIZED Hybrid assignment: Greedy for confident matches, Hungarian for the rest.
+        Reduces ID switching by prioritizing high-confidence assignments.
+        """
+        n_dets = len(detections)
+        n_tracks = len(self.tracks)
+
+        if n_tracks == 0:
+            return [], list(range(n_dets)), []
+
+        tracks = list(self.tracks.values())
+
+        # Extract positions (same as existing methods)
+        det_positions = np.array([det.position.flatten()[:2] for det in detections], dtype=np.float32)
+        track_last_positions = np.array([t.last_detection_pos for t in tracks], dtype=np.float32)
+        track_kalman_positions = np.array([t.predicted_position for t in tracks], dtype=np.float32)
+
+        # Check embeddings and compute scaled embedding matrix
+        use_embeddings = (
+            self.use_embeddings and 
+            all(hasattr(det, "embedding") and det.embedding is not None for det in detections) and
+            all(len(t.embedding_history) > 0 for t in tracks)
+        )
+
+        scaled_embedding_matrix = np.zeros((n_dets, n_tracks), dtype=np.float32)
+        if use_embeddings:
+            if start: start("embedding_computation")
+            
+            # Fast embedding computation (reuse existing optimized code)
+            det_embeddings = np.empty((n_dets, detections[0].embedding.shape[0]), dtype=np.float32)
+            for i, det in enumerate(detections):
+                det_embeddings[i] = det.embedding
+
+            track_embeddings = np.empty((n_tracks, det_embeddings.shape[1]), dtype=np.float32)
+            for i, track in enumerate(tracks):
+                if (track._representative_cache_valid and 
+                    track._cached_representative_embedding is not None):
+                    track_embeddings[i] = track._cached_representative_embedding
+                elif len(track.embedding_history) > 0:
+                    track_embeddings[i] = track.embedding_history[-1]
+                else:
+                    track_embeddings[i] = np.zeros(det_embeddings.shape[1], dtype=np.float32)
+
+            cos_similarities = det_embeddings @ track_embeddings.T
+            raw_distances = (1.0 - cos_similarities) / 2.0
+            raw_distances_flat = raw_distances.flatten()
+            scaled_distances_flat = self.embedding_scaler.scale_distances(raw_distances_flat)
+            self.embedding_scaler.update_statistics(raw_distances_flat)
+            scaled_embedding_matrix = scaled_distances_flat.reshape(n_dets, n_tracks)
+            
+            if stop: stop("embedding_computation")
+
+        # Compute cost matrix
+        if start: start("cost_matrix")
+        if self.use_probabilistic_costs:
+            track_frames_since_detection = np.array([
+                self.frame_count - track.last_detection_frame for track in tracks
+            ], dtype=np.float32)
+            embedding_median = np.median(scaled_embedding_matrix) if scaled_embedding_matrix.size > 0 else 0.5
+            
+            cost_matrix = compute_probabilistic_cost_matrix_vectorized(
+                det_positions, track_kalman_positions, track_last_positions,
+                track_frames_since_detection, scaled_embedding_matrix, embedding_median,
+                use_embeddings, self.max_distance, self.embedding_weight
+            )
+        else:
+            cost_matrix = compute_cost_matrix_with_multi_embeddings(
+                det_positions, track_last_positions, track_kalman_positions,
+                scaled_embedding_matrix, use_embeddings, self.max_distance, self.embedding_weight
+            )
+        if stop: stop("cost_matrix")
+
+        # OPTIMIZED HYBRID ASSIGNMENT LOGIC
+        if start: start("hybrid_assignment")
+        
+        # Phase 1: Greedy assignment for confident matches - OPTIMIZED
+        greedy_matches = []
+        used_detections = set()
+        used_tracks = set()
+        
+        # Get all valid candidates for greedy phase without expensive priorities
+        greedy_candidates = []
+        for i in range(n_dets):
+            for j in range(n_tracks):
+                cost = cost_matrix[i, j]
+                if cost <= self.greedy_threshold:  # Only consider close matches for greedy
+                    greedy_candidates.append((cost, i, j))
+        
+        # Sort by cost (lower = better) - much faster than priority computation
+        greedy_candidates.sort(key=lambda x: x[0])
+        
+        # Greedy assignment in cost order
+        for cost, det_idx, track_idx in greedy_candidates:
+            if det_idx not in used_detections and track_idx not in used_tracks:
+                greedy_matches.append((det_idx, track_idx))
+                used_detections.add(det_idx)
+                used_tracks.add(track_idx)
+
+        # Phase 2: Hungarian assignment for remaining detections/tracks
+        remaining_dets = [i for i in range(n_dets) if i not in used_detections]
+        remaining_tracks = [i for i in range(n_tracks) if i not in used_tracks]
+        
+        hungarian_matches = []
+        if remaining_dets and remaining_tracks:
+            # Create reduced cost matrix
+            reduced_cost_matrix = np.full((len(remaining_dets), len(remaining_tracks)), 
+                                        np.inf, dtype=np.float32)
+            
+            fallback_threshold = self.max_distance * self.hungarian_fallback_threshold
+            
+            for i, det_idx in enumerate(remaining_dets):
+                for j, track_idx in enumerate(remaining_tracks):
+                    original_cost = cost_matrix[det_idx, track_idx]
+                    if original_cost <= fallback_threshold:
+                        reduced_cost_matrix[i, j] = original_cost
+
+            # Only run Hungarian if there are valid assignments possible
+            if not np.all(np.isinf(reduced_cost_matrix)):
+                # Cap infinite costs for Hungarian algorithm
+                finite_costs = reduced_cost_matrix[~np.isinf(reduced_cost_matrix)]
+                if len(finite_costs) > 0:
+                    max_finite_cost = np.max(finite_costs)
+                    reduced_cost_matrix[np.isinf(reduced_cost_matrix)] = max_finite_cost * 2
+                
+                    try:
+                        hun_det_indices, hun_track_indices = linear_sum_assignment(reduced_cost_matrix)
+                        
+                        # Convert back to original indices and filter valid matches
+                        for i, j in zip(hun_det_indices, hun_track_indices):
+                            original_det_idx = remaining_dets[i]
+                            original_track_idx = remaining_tracks[j]
+                            original_cost = cost_matrix[original_det_idx, original_track_idx]
+                            
+                            if original_cost <= fallback_threshold:
+                                hungarian_matches.append((original_det_idx, original_track_idx))
+                                
+                    except ValueError:
+                        pass  # Hungarian failed, continue without these matches
+        
+        if stop: stop("hybrid_assignment")
+        
+        # Combine results
+        all_matches = greedy_matches + hungarian_matches
+        matched_dets = {m[0] for m in all_matches}
+        matched_tracks = {m[1] for m in all_matches}
+        
+        unmatched_dets = [i for i in range(n_dets) if i not in matched_dets]
+        unmatched_tracks = [i for i in range(n_tracks) if i not in matched_tracks]
+        
+        return all_matches, unmatched_dets, unmatched_tracks
+
+    def _greedy_assignment(self, detections, timer=None, start=None, stop=None):
+        """
+        OPTIMIZED Pure greedy assignment with full logic but faster implementation.
+        """
+        n_dets = len(detections)
+        n_tracks = len(self.tracks)
+
+        if n_tracks == 0:
+            return [], list(range(n_dets)), []
+
+        tracks = list(self.tracks.values())
+        
+        # Same setup as hybrid but with pure greedy logic
+        det_positions = np.array([det.position.flatten()[:2] for det in detections], dtype=np.float32)
+        track_last_positions = np.array([t.last_detection_pos for t in tracks], dtype=np.float32)
+        track_kalman_positions = np.array([t.predicted_position for t in tracks], dtype=np.float32)
+
+        # Fast embedding computation (same as hybrid)
+        use_embeddings = (
+            self.use_embeddings and 
+            all(hasattr(det, "embedding") and det.embedding is not None for det in detections) and
+            all(len(t.embedding_history) > 0 for t in tracks)
+        )
+        
+        scaled_embedding_matrix = np.zeros((n_dets, n_tracks), dtype=np.float32)
+        if use_embeddings:
+            if start: start("embedding_computation")
+            det_embeddings = np.empty((n_dets, detections[0].embedding.shape[0]), dtype=np.float32)
+            for i, det in enumerate(detections):
+                det_embeddings[i] = det.embedding
+
+            track_embeddings = np.empty((n_tracks, det_embeddings.shape[1]), dtype=np.float32)
+            for i, track in enumerate(tracks):
+                if (track._representative_cache_valid and 
+                    track._cached_representative_embedding is not None):
+                    track_embeddings[i] = track._cached_representative_embedding
+                elif len(track.embedding_history) > 0:
+                    track_embeddings[i] = track.embedding_history[-1]
+                else:
+                    track_embeddings[i] = np.zeros(det_embeddings.shape[1], dtype=np.float32)
+
+            cos_similarities = det_embeddings @ track_embeddings.T
+            raw_distances = (1.0 - cos_similarities) / 2.0
+            raw_distances_flat = raw_distances.flatten()
+            scaled_distances_flat = self.embedding_scaler.scale_distances(raw_distances_flat)
+            self.embedding_scaler.update_statistics(raw_distances_flat)
+            scaled_embedding_matrix = scaled_distances_flat.reshape(n_dets, n_tracks)
+            if stop: stop("embedding_computation")
+        
+        # Compute cost matrix (same as hybrid) 
+        if start: start("cost_matrix")
+        if self.use_probabilistic_costs:
+            track_frames_since_detection = np.array([
+                self.frame_count - track.last_detection_frame for track in tracks
+            ], dtype=np.float32)
+            cost_matrix = compute_probabilistic_cost_matrix_vectorized(
+                det_positions, track_kalman_positions, track_last_positions,
+                track_frames_since_detection, scaled_embedding_matrix, 
+                np.median(scaled_embedding_matrix) if scaled_embedding_matrix.size > 0 else 0.5,
+                use_embeddings, self.max_distance, self.embedding_weight
+            )
+        else:
+            cost_matrix = compute_cost_matrix_with_multi_embeddings(
+                det_positions, track_last_positions, track_kalman_positions,
+                scaled_embedding_matrix, use_embeddings, self.max_distance, self.embedding_weight
+            )
+        if stop: stop("cost_matrix")
+
+        # OPTIMIZED greedy assignment - avoid expensive priority computation
+        if start: start("greedy_assignment")
+        
+        matches = []
+        used_detections = set()
+        used_tracks = set()
+        
+        # Get all valid candidates WITHOUT computing expensive priorities
+        candidates = []
+        for i in range(n_dets):
+            for j in range(n_tracks):
+                cost = cost_matrix[i, j]
+                if cost <= self.max_distance:
+                    # Use simple cost as priority instead of expensive compute_assignment_priorities
+                    candidates.append((cost, i, j))
+        
+        # Sort by cost (lower = better) - much faster than priority computation
+        candidates.sort(key=lambda x: x[0])
+        
+        # Greedy assignment in cost order
+        for cost, det_idx, track_idx in candidates:
+            if det_idx not in used_detections and track_idx not in used_tracks:
+                matches.append((det_idx, track_idx))
+                used_detections.add(det_idx)
+                used_tracks.add(track_idx)
+        
+        if stop: stop("greedy_assignment")
+        
+        unmatched_dets = [i for i in range(n_dets) if i not in used_detections]
+        unmatched_tracks = [i for i in range(n_tracks) if i not in used_tracks]
+        
+        return matches, unmatched_dets, unmatched_tracks
 
     def _get_detection_confidence(self, detection: Detection) -> float:
         """Extract confidence from detection object"""
