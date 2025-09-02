@@ -181,7 +181,7 @@ class SwarmSortConfig(BaseConfig):
     use_probabilistic_costs: bool = False  # Use probabilistic fusion vs simple costs
 
     # Assignment strategy parameters
-    assignment_strategy: Literal["hungarian", "greedy", "hybrid", "3d"] = "hybrid"
+    assignment_strategy: Literal["hungarian", "greedy", "hybrid"] = "hybrid"
     greedy_threshold: float = max_distance/2  # Distance threshold for greedy assignment
     greedy_confidence_boost: float = 1  # Confidence multiplier for greedy matches
     hungarian_fallback_threshold: float = 1  # Multiplier of max_distance for Hungarian fallback

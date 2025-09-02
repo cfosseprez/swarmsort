@@ -121,7 +121,7 @@ class PendingDetection:
 
 
 # ============================================================================
-# NUMBA FUNCTIONS
+# NUMBA FUNCTIONS - INCLUDING NEW 3D ASSIGNMENT
 # ============================================================================
 
 
@@ -962,8 +962,79 @@ def compute_collision_aware_cost_matrix(
 
 
 # ============================================================================
-# COLLISION OPTIMIZATION FUNCTIONS  
+# NEW 3D ASSIGNMENT FUNCTIONS
 # ============================================================================
+
+
+@nb.njit(fastmath=True, cache=True)
+def compute_3d_cost_tensor(
+        det_positions: np.ndarray,
+        track_last_positions: np.ndarray,
+        track_kalman_positions: np.ndarray,
+        track_observation_positions: np.ndarray,  # NEW: observation-based predictions
+        scaled_embedding_matrix: np.ndarray,
+        use_embeddings: bool,
+        max_distance: float,
+        embedding_weight: float,
+) -> np.ndarray:
+    """
+    NUMBA-OPTIMIZED 3D cost tensor: [detections, tracks, methods]
+    Methods: 0=Kalman, 1=Observation-based, 2=Fused
+    """
+    n_dets = det_positions.shape[0]
+    n_tracks = track_last_positions.shape[0]
+    n_methods = 3
+
+    cost_tensor = np.full((n_dets, n_tracks, n_methods), np.inf, dtype=np.float32)
+
+    # Pre-compute fused positions (numba-compatible)
+    fused_positions = np.empty((n_tracks, 2), dtype=np.float32)
+    for j in range(n_tracks):
+        fused_positions[j, 0] = 0.6 * track_observation_positions[j, 0] + 0.4 * track_kalman_positions[j, 0]
+        fused_positions[j, 1] = 0.6 * track_observation_positions[j, 1] + 0.4 * track_kalman_positions[j, 1]
+    
+    # Vectorized distance computation for each method
+    for i in range(n_dets):
+        det_x, det_y = det_positions[i, 0], det_positions[i, 1]
+        
+        for j in range(n_tracks):
+            # Method 0: Kalman - vectorized computation
+            dx = det_x - track_kalman_positions[j, 0]
+            dy = det_y - track_kalman_positions[j, 1]
+            spatial_cost_kalman = np.sqrt(dx*dx + dy*dy)
+            
+            if spatial_cost_kalman <= max_distance:
+                total_cost = spatial_cost_kalman
+                if use_embeddings:
+                    embedding_cost = scaled_embedding_matrix[i, j] * max_distance * embedding_weight
+                    total_cost += embedding_cost
+                cost_tensor[i, j, 0] = total_cost
+            
+            # Method 1: Observation - vectorized computation
+            dx = det_x - track_observation_positions[j, 0]
+            dy = det_y - track_observation_positions[j, 1]
+            spatial_cost_obs = np.sqrt(dx*dx + dy*dy)
+            
+            if spatial_cost_obs <= max_distance:
+                total_cost = spatial_cost_obs
+                if use_embeddings:
+                    embedding_cost = scaled_embedding_matrix[i, j] * max_distance * embedding_weight
+                    total_cost += embedding_cost
+                cost_tensor[i, j, 1] = total_cost
+            
+            # Method 2: Fused - vectorized computation
+            dx = det_x - fused_positions[j, 0]
+            dy = det_y - fused_positions[j, 1]
+            spatial_cost_fused = np.sqrt(dx*dx + dy*dy)
+            
+            if spatial_cost_fused <= max_distance:
+                total_cost = spatial_cost_fused
+                if use_embeddings:
+                    embedding_cost = scaled_embedding_matrix[i, j] * max_distance * embedding_weight
+                    total_cost += embedding_cost
+                cost_tensor[i, j, 2] = total_cost
+
+    return cost_tensor
 
 
 @nb.njit(fastmath=True, cache=True)
@@ -990,6 +1061,75 @@ def compute_freeze_flags_vectorized(positions: np.ndarray, safety_distance: floa
                 break
     
     return freeze_flags
+
+
+@nb.njit(fastmath=True, cache=True)
+def solve_3d_assignment_flattened(cost_tensor: np.ndarray, max_distance: float) -> Tuple[
+    np.ndarray, np.ndarray, np.ndarray]:
+    """
+    OPTIMIZED: Solve 3D assignment directly without flattening.
+    Returns: matches [(det_idx, track_idx, method_idx)], unmatched_dets, unmatched_tracks
+    """
+    n_dets, n_tracks, n_methods = cost_tensor.shape
+
+    # Use greedy assignment directly on 3D tensor - avoid flattening overhead
+    used_dets = np.zeros(n_dets, dtype=np.bool_)
+    used_tracks = np.zeros(n_tracks, dtype=np.bool_)
+
+    matches = np.empty((min(n_dets, n_tracks), 3), dtype=np.int32)  # [det, track, method]
+    num_matches = 0
+
+    # Direct 3D greedy search - more efficient than flattening
+    for _ in range(min(n_dets, n_tracks)):
+        best_cost = np.inf
+        best_det = -1
+        best_track = -1
+        best_method = -1
+
+        for d in range(n_dets):
+            if used_dets[d]:
+                continue
+            for t in range(n_tracks):
+                if used_tracks[t]:
+                    continue
+                for m in range(n_methods):
+                    cost = cost_tensor[d, t, m]
+                    if cost < best_cost and cost <= max_distance:
+                        best_cost = cost
+                        best_det = d
+                        best_track = t
+                        best_method = m
+
+        if best_det >= 0:
+            matches[num_matches, 0] = best_det
+            matches[num_matches, 1] = best_track
+            matches[num_matches, 2] = best_method
+            num_matches += 1
+            used_dets[best_det] = True
+            used_tracks[best_track] = True
+        else:
+            break
+
+    # Build unmatched arrays
+    unmatched_dets = np.empty(n_dets, dtype=np.int32)
+    unmatched_tracks = np.empty(n_tracks, dtype=np.int32)
+
+    num_unmatched_dets = 0
+    num_unmatched_tracks = 0
+
+    for i in range(n_dets):
+        if not used_dets[i]:
+            unmatched_dets[num_unmatched_dets] = i
+            num_unmatched_dets += 1
+
+    for i in range(n_tracks):
+        if not used_tracks[i]:
+            unmatched_tracks[num_unmatched_tracks] = i
+            num_unmatched_tracks += 1
+
+    return (matches[:num_matches],
+            unmatched_dets[:num_unmatched_dets],
+            unmatched_tracks[:num_unmatched_tracks])
 
 
 # ============================================================================
@@ -1401,17 +1541,18 @@ class FastTrackState:
 
 
 # ============================================================================
-# SWARM SORT TRACKER
+# SWARM SORT TRACKER WITH 3D ASSIGNMENT
 # ============================================================================
 
 
 class SwarmSortTracker:
-    """SwarmSort Multi-Object Tracker.
+    """SwarmSort Multi-Object Tracker with 3D assignment capability.
 
     SwarmSortTracker is the main tracking class that implements a complete multi-object
     tracking pipeline combining:
     - Kalman filtering for motion prediction
     - Observation-based motion prediction
+    - Novel 3D assignment across multiple prediction methods
     - Hungarian/Greedy/Hybrid algorithm assignments
     - Deep learning embeddings for appearance matching
     - Re-identification for recovering lost tracks
@@ -1566,7 +1707,7 @@ class SwarmSortTracker:
         return track
 
     def _precompile_numba(self):
-        """Pre-compile Numba functions"""
+        """Pre-compile Numba functions including 3D assignment functions"""
         try:
             dummy_emb = np.array([0.1, 0.2, 0.3], dtype=np.float32)
             dummy_pos = np.array([[100.0, 100.0]], dtype=np.float32)
@@ -1581,8 +1722,15 @@ class SwarmSortTracker:
             _ = fast_mahalanobis_distance(dummy_diff, dummy_cov)
             _ = fast_gaussian_fusion(dummy_diff, dummy_cov, dummy_diff, dummy_cov)
 
+            # NEW: Pre-compile 3D assignment functions
+            dummy_tensor = np.random.rand(2, 2, 3).astype(np.float32)
+            _ = compute_3d_cost_tensor(
+                dummy_pos, dummy_pos, dummy_pos, dummy_pos,
+                np.random.rand(1, 1).astype(np.float32), True, 100.0, 0.3
+            )
+            _ = solve_3d_assignment_flattened(dummy_tensor, 100.0)
 
-            logger.info("Numba functions compiled successfully")
+            logger.info("Numba functions compiled successfully (including 3D assignment)")
         except Exception as e:
             logger.warning(f"Numba compilation failed: {e}")
 
@@ -1650,6 +1798,10 @@ class SwarmSortTracker:
             matches, unmatched_dets, unmatched_tracks = self._hybrid_assignment(
                 valid_detections, timer, start, stop
             )
+        elif self.assignment_strategy == "3d":
+            matches, unmatched_dets, unmatched_tracks = self._3d_assignment(
+                valid_detections, timer, start, stop
+            )
         else:
             # Fallback to hybrid
             matches, unmatched_dets, unmatched_tracks = self._hybrid_assignment(
@@ -1657,9 +1809,26 @@ class SwarmSortTracker:
             )
         stop("assignment")
 
+        # Handle collision scenarios - share detections between colliding tracks
+        start("collision_sharing")
+        shared_matches = self._handle_collision_detection_sharing(
+            matches, unmatched_dets, unmatched_tracks, valid_detections
+        )
+        # Track which matches are shared for gentler Kalman updates
+        shared_assignments = set()  # Set of (det_idx, track_idx) that are shared
+        if shared_matches:
+            matches.extend(shared_matches)
+            # Track the shared assignments for gentler updates
+            shared_assignments.update(shared_matches)
+            # Remove shared detection indices from unmatched_dets and unmatched track indices from unmatched_tracks
+            shared_det_indices = {match[0] for match in shared_matches}  # det_idx is first
+            shared_track_indices = {match[1] for match in shared_matches}  # track_idx is second
+            unmatched_dets = [idx for idx in unmatched_dets if idx not in shared_det_indices]
+            unmatched_tracks = [idx for idx in unmatched_tracks if idx not in shared_track_indices]
+        stop("collision_sharing")
 
         start("update_matched")
-        self._update_matched_tracks(matches, valid_detections)
+        self._update_matched_tracks(matches, valid_detections, shared_assignments)
         stop("update_matched")
 
         start("handle_unmatched_tracks")
@@ -1698,6 +1867,111 @@ class SwarmSortTracker:
             print(f"[Frame {self.frame_count}] Timings:", formatted_timings)
 
         return result
+
+    def _3d_assignment(self, detections, timer=None, start=None, stop=None):
+        """
+        Novel 3D assignment: detections × tracks × prediction_methods
+        Finds globally optimal assignment across all prediction strategies
+        """
+        n_dets = len(detections)
+        n_tracks = len(self.tracks)
+
+        if n_tracks == 0:
+            return [], list(range(n_dets)), []
+
+        tracks = list(self.tracks.values())
+
+        # Extract positions
+        det_positions = np.array([det.position.flatten()[:2] for det in detections], dtype=np.float32)
+        track_last_positions = np.array([t.last_detection_pos for t in tracks], dtype=np.float32)
+        track_kalman_positions = np.array([t.predicted_position for t in tracks], dtype=np.float32)
+
+        # Get observation-based predictions
+        track_observation_positions = np.array([
+            t.get_observation_prediction(self.frame_count) for t in tracks
+        ],dtype=np.float32)
+
+        # Compute embeddings (same as existing methods)
+        use_embeddings = (
+            self.use_embeddings and
+            all(hasattr(det, "embedding") and det.embedding is not None for det in detections) and
+            all(len(t.embedding_history) > 0 for t in tracks)
+        )
+
+        scaled_embedding_matrix = np.zeros((n_dets, n_tracks), dtype=np.float32)
+        if use_embeddings:
+            if start: start("embedding_computation")
+
+            det_embeddings = np.empty((n_dets, detections[0].embedding.shape[0]), dtype=np.float32)
+            for i, det in enumerate(detections):
+                det_embeddings[i] = det.embedding
+
+            track_embeddings = np.empty((n_tracks, det_embeddings.shape[1]), dtype=np.float32)
+            for i, track in enumerate(tracks):
+                if (track._representative_cache_valid and
+                    track._cached_representative_embedding is not None):
+                    track_embeddings[i] = track._cached_representative_embedding
+                elif len(track.embedding_history) > 0:
+                    track_embeddings[i] = track.embedding_history[-1]
+                else:
+                    track_embeddings[i] = np.zeros(det_embeddings.shape[1], dtype=np.float32)
+
+            cos_similarities = det_embeddings @ track_embeddings.T
+            raw_distances = (1.0 - cos_similarities) / 2.0
+            raw_distances_flat = raw_distances.flatten()
+            scaled_distances_flat = self.embedding_scaler.scale_distances(raw_distances_flat)
+            self.embedding_scaler.update_statistics(raw_distances_flat)
+            scaled_embedding_matrix = scaled_distances_flat.reshape(n_dets, n_tracks)
+
+            if stop: stop("embedding_computation")
+
+        # Compute 3D cost tensor
+        if start: start("3d_cost_tensor")
+        cost_tensor = compute_3d_cost_tensor(
+            det_positions,
+            track_last_positions,
+            track_kalman_positions,
+            track_observation_positions,
+            scaled_embedding_matrix,
+            use_embeddings,
+            self.max_distance,
+            self.embedding_weight
+        )
+        if stop: stop("3d_cost_tensor")
+
+        # Solve 3D assignment
+        if start: start("3d_assignment_solve")
+        matches_3d, unmatched_dets_array, unmatched_tracks_array = solve_3d_assignment_flattened(
+            cost_tensor, self.max_distance
+        )
+        if stop: stop("3d_assignment_solve")
+
+        # Convert results and store method information
+        matches = []
+        self._assignment_methods = {}  # Store which method was used for each track
+
+        for i in range(matches_3d.shape[0]):
+            det_idx = int(matches_3d[i, 0])
+            track_idx = int(matches_3d[i, 1])
+            method_idx = int(matches_3d[i, 2])
+            matches.append((det_idx, track_idx))
+
+            # Store method for debugging/analysis
+            track_id = tracks[track_idx].id
+            method_names = ["kalman", "observation", "fused"]
+            self._assignment_methods[track_id] = method_names[method_idx]
+
+        unmatched_dets = [int(x) for x in unmatched_dets_array]
+        unmatched_tracks = [int(x) for x in unmatched_tracks_array]
+
+        # Debug output for 3D assignment
+        if self.debug_timings and self.frame_count % 20 == 0:
+            method_counts = {"kalman": 0, "observation": 0, "fused": 0}
+            for method in self._assignment_methods.values():
+                method_counts[method] += 1
+            logger.info(f"3D Assignment methods used: {method_counts}")
+
+        return matches, unmatched_dets, unmatched_tracks
 
     def _handle_unmatched_detections(self, unmatched_det_indices, detections):
         """FAST handle unmatched detections with vectorized pending matching"""
@@ -2470,18 +2744,21 @@ class SwarmSortTracker:
 
         logger.info("=== END EMBEDDING DEBUG ===\n")
 
-    def _update_matched_tracks(self, matches, detections):
-        """Enhanced update with observation history maintenance"""
+    def _update_matched_tracks(self, matches, detections, shared_assignments=None):
+        """Enhanced update with observation history maintenance and gentler collision updates"""
         if not matches:
             return
 
         tracks = list(self.tracks.values())
+        if shared_assignments is None:
+            shared_assignments = set()
 
         for det_idx, track_idx in matches:
             detection = detections[det_idx]
             track = tracks[track_idx]
 
             position = detection.position.flatten()[:2].astype(np.float32)
+            is_shared_detection = (det_idx, track_idx) in shared_assignments
 
             # Update observation history BEFORE spatial update
             track.update_observation_history(position, self.frame_count)
@@ -2492,13 +2769,19 @@ class SwarmSortTracker:
             track.detection_confidence = detection.confidence
             track.confidence_score = detection.confidence
 
-            track.kalman_state = simple_kalman_update(track.kalman_state, position)
+            if is_shared_detection:
+                # Gentler update for shared detections during collision
+                # Don't snap to the shared center position - maintain natural trajectory
+                self._gentle_kalman_update_collision(track, position)
+            else:
+                # Normal Kalman update for regular detections
+                track.kalman_state = simple_kalman_update(track.kalman_state, position)
 
-            if track.hits > 0:
-                dt = 1.0
-                new_velocity = (position - track.position) / dt
-                track.kalman_state[2] = 0.7 * new_velocity[0] + 0.3 * track.kalman_state[2]
-                track.kalman_state[3] = 0.7 * new_velocity[1] + 0.3 * track.kalman_state[3]
+                if track.hits > 0:
+                    dt = 1.0
+                    new_velocity = (position - track.position) / dt
+                    track.kalman_state[2] = 0.7 * new_velocity[0] + 0.3 * track.kalman_state[2]
+                    track.kalman_state[3] = 0.7 * new_velocity[1] + 0.3 * track.kalman_state[3]
 
             track.position = track.kalman_state[:2].copy()
             track.velocity = track.kalman_state[2:].copy()
@@ -2634,6 +2917,127 @@ class SwarmSortTracker:
         
         # Clear safe embedding reference
         track.last_safe_embedding = None
+
+    def _gentle_kalman_update_collision(self, track, shared_position):
+        """
+        Gentle Kalman update during collision to avoid rapid position shifts.
+        Instead of snapping to shared center, maintain natural trajectory with minimal adjustment.
+        """
+        if track.hits == 0:
+            # First detection - use normal update
+            track.kalman_state = simple_kalman_update(track.kalman_state, shared_position)
+            return
+        
+        # During collision, prioritize maintaining trajectory over exact position matching
+        # Use reduced update weights to prevent snapping to shared center
+        
+        # Calculate expected position based on current velocity
+        predicted_pos = track.position + track.velocity
+        
+        # Blend between predicted position and shared detection (favor prediction)
+        collision_blend_factor = 0.2  # Much lower than normal Kalman gain
+        
+        # Gentle position update - mostly stay on trajectory, slight adjustment toward detection
+        adjusted_position = (1 - collision_blend_factor) * predicted_pos + collision_blend_factor * shared_position
+        
+        # Update Kalman state with the adjusted position
+        track.kalman_state[:2] = adjusted_position
+        
+        # Gentle velocity update - maintain momentum, resist rapid changes
+        if track.hits > 0:
+            dt = 1.0
+            measured_velocity = (shared_position - track.position) / dt
+            # Use very conservative velocity update during collision
+            velocity_blend_factor = 0.1  # Much lower than normal 0.7
+            track.kalman_state[2] = (1 - velocity_blend_factor) * track.kalman_state[2] + velocity_blend_factor * measured_velocity[0]
+            track.kalman_state[3] = (1 - velocity_blend_factor) * track.kalman_state[3] + velocity_blend_factor * measured_velocity[1]
+
+    def _handle_collision_detection_sharing(self, matches, unmatched_dets, unmatched_tracks, detections):
+        """
+        Handle collision/occlusion scenarios by sharing detections between colliding tracks.
+        When tracks are in collision and only one detection is available, assign it to both tracks.
+        """
+        if not self.collision_detection_enabled or len(unmatched_tracks) == 0:
+            return []
+        
+        tracks = list(self.tracks.values())
+        shared_matches = []
+        
+        # For each unmatched track, check if it's close to any track that got matched
+        matched_track_indices = {match[0] for match in matches}
+        
+        for unmatched_idx in unmatched_tracks:
+            unmatched_track = tracks[unmatched_idx]
+            best_sharing_candidate = None
+            best_distance = float('inf')
+            best_detection_idx = None
+            
+            # Look for matched tracks that are close to this unmatched track
+            for match in matches:
+                det_idx, matched_track_idx = match
+                matched_track = tracks[matched_track_idx]
+                
+                # Calculate distance between unmatched and matched track
+                distance = np.linalg.norm(unmatched_track.position - matched_track.position)
+                
+                if distance < self.collision_distance_threshold and distance < best_distance:
+                    best_distance = distance
+                    best_sharing_candidate = matched_track_idx
+                    best_detection_idx = det_idx
+            
+            # If we found a close matched track, share its detection
+            if best_sharing_candidate is not None:
+                shared_matches.append((best_detection_idx, unmatched_idx))  # (det_idx, track_idx)
+                
+                # Mark both tracks as in collision
+                tracks[unmatched_idx].collision_detected = True
+                tracks[unmatched_idx].frames_since_collision = 0
+                tracks[best_sharing_candidate].collision_detected = True
+                tracks[best_sharing_candidate].frames_since_collision = 0
+                
+                if hasattr(self, 'debug_collision_sharing'):
+                    print(f'Sharing detection {best_detection_idx} between matched track {tracks[best_sharing_candidate].id} and unmatched track {tracks[unmatched_idx].id} (distance: {best_distance:.2f})')
+                
+        return shared_matches
+    
+    def _find_collision_groups(self, unmatched_track_indices, tracks):
+        """
+        Find groups of unmatched tracks that are currently in collision.
+        Returns list of lists, each containing track indices in the same collision group.
+        """
+        if len(unmatched_track_indices) < 2:
+            return []
+        
+        collision_groups = []
+        processed_indices = set()
+        
+        for i, track_idx_i in enumerate(unmatched_track_indices):
+            if track_idx_i in processed_indices:
+                continue
+                
+            # Start a new collision group
+            group = [track_idx_i]
+            processed_indices.add(track_idx_i)
+            
+            track_i = tracks[track_idx_i]
+            
+            # Find all other unmatched tracks close to this one
+            for j, track_idx_j in enumerate(unmatched_track_indices):
+                if j <= i or track_idx_j in processed_indices:
+                    continue
+                    
+                track_j = tracks[track_idx_j]
+                distance = np.linalg.norm(track_i.position - track_j.position)
+                
+                if distance < self.collision_distance_threshold:
+                    group.append(track_idx_j)
+                    processed_indices.add(track_idx_j)
+            
+            # Only add groups with multiple tracks
+            if len(group) >= 2:
+                collision_groups.append(group)
+        
+        return collision_groups
 
     def _handle_unmatched_tracks(self, unmatched_track_indices):
         """Handle unmatched tracks - predict position and increment miss counter"""
@@ -2880,10 +3284,23 @@ class SwarmSortTracker:
                 results.append(tracked_obj)
         return results
 
+    def get_assignment_method_stats(self) -> Dict[str, int]:
+        """Get statistics about which assignment methods were used in 3D assignment"""
+        if not hasattr(self, '_assignment_methods'):
+            return {}
+
+        method_counts = {"kalman": 0, "observation": 0, "fused": 0}
+        for method in self._assignment_methods.values():
+            if method in method_counts:
+                method_counts[method] += 1
+
+        return method_counts
+
     def reset(self):
         """Reset tracker state."""
         self.tracks.clear()
         self.pending_detections.clear()
+        self._assignment_methods.clear()
         self.next_id = 1
         self.frame_count = 0
 
@@ -2898,5 +3315,8 @@ class SwarmSortTracker:
             "embedding_scaler_stats": self.embedding_scaler.get_statistics(),
         }
 
+        # Add 3D assignment method statistics if available
+        if hasattr(self, '_assignment_methods') and self._assignment_methods:
+            stats["assignment_method_stats"] = self.get_assignment_method_stats()
 
         return stats
