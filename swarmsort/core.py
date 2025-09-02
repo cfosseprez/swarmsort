@@ -708,6 +708,145 @@ def simple_kalman_predict(x: np.ndarray) -> np.ndarray:
 
 
 # ============================================================================
+# OC-SORT STYLE FUNCTIONS
+# ============================================================================
+
+@nb.njit(fastmath=True, cache=True)
+def oc_sort_predict(observation_history: np.ndarray, 
+                     observation_frames: np.ndarray,
+                     current_frame: int) -> np.ndarray:
+    """
+    OC-SORT style prediction using observation history.
+    Returns [x, y, vx, vy] prediction.
+    """
+    n_obs = len(observation_frames)
+    
+    if n_obs == 0:
+        # No observations, return zeros
+        return np.zeros(4, dtype=np.float32)
+    
+    if n_obs == 1:
+        # Single observation, no velocity
+        pred = np.zeros(4, dtype=np.float32)
+        pred[0] = observation_history[0, 0]
+        pred[1] = observation_history[0, 1]
+        return pred
+    
+    # Use last two observations for velocity estimation
+    if n_obs >= 2:
+        # Time delta between last two observations
+        dt = observation_frames[-1] - observation_frames[-2]
+        if dt == 0:
+            dt = 1
+        
+        # Velocity from last two observations
+        vx = (observation_history[-1, 0] - observation_history[-2, 0]) / dt
+        vy = (observation_history[-1, 1] - observation_history[-2, 1]) / dt
+        
+        # Time since last observation
+        delta_t = current_frame - observation_frames[-1]
+        
+        # Predict position
+        pred = np.zeros(4, dtype=np.float32)
+        pred[0] = observation_history[-1, 0] + vx * delta_t
+        pred[1] = observation_history[-1, 1] + vy * delta_t
+        pred[2] = vx
+        pred[3] = vy
+        
+        return pred
+    
+    return np.zeros(4, dtype=np.float32)
+
+
+@nb.njit(fastmath=True, cache=True)
+def oc_sort_update(observation_history: np.ndarray,
+                    observation_frames: np.ndarray, 
+                    new_observation: np.ndarray,
+                    current_frame: int,
+                    max_history: int = 30) -> tuple:
+    """
+    OC-SORT style update - just store observations, no filtering.
+    Returns updated history and frames arrays.
+    """
+    # Add new observation
+    n_obs = len(observation_frames)
+    
+    if n_obs < max_history:
+        # Append to history
+        new_history = np.zeros((n_obs + 1, 2), dtype=np.float32)
+        new_frames = np.zeros(n_obs + 1, dtype=np.int32)
+        
+        if n_obs > 0:
+            new_history[:n_obs] = observation_history
+            new_frames[:n_obs] = observation_frames
+        
+        new_history[n_obs] = new_observation
+        new_frames[n_obs] = current_frame
+    else:
+        # Shift history (remove oldest)
+        new_history = np.zeros((max_history, 2), dtype=np.float32)
+        new_frames = np.zeros(max_history, dtype=np.int32)
+        
+        new_history[:-1] = observation_history[1:]
+        new_frames[:-1] = observation_frames[1:]
+        
+        new_history[-1] = new_observation
+        new_frames[-1] = current_frame
+    
+    return new_history, new_frames
+
+
+@nb.njit(fastmath=True, cache=True)
+def compute_oc_sort_cost_matrix(
+    det_positions: np.ndarray,
+    track_last_observed_positions: np.ndarray,  # Not predicted!
+    track_velocities: np.ndarray,
+    track_misses: np.ndarray,
+    max_distance: float,
+    velocity_weight: float = 0.2
+) -> np.ndarray:
+    """OC-SORT style cost computation"""
+    n_dets = det_positions.shape[0]
+    n_tracks = track_last_observed_positions.shape[0]
+    cost_matrix = np.full((n_dets, n_tracks), np.inf, dtype=np.float32)
+    
+    for i in range(n_dets):
+        for j in range(n_tracks):
+            # Base distance from LAST OBSERVED position
+            dist = np.sqrt(
+                (det_positions[i, 0] - track_last_observed_positions[j, 0])**2 +
+                (det_positions[i, 1] - track_last_observed_positions[j, 1])**2
+            )
+            
+            # Adaptive threshold based on misses
+            adaptive_threshold = max_distance * (1.0 + 0.2 * track_misses[j])
+            
+            if dist > adaptive_threshold:
+                continue
+            
+            # Velocity consistency (optional, can be disabled for collisions)
+            if track_misses[j] == 0:  # Only for recently seen tracks
+                # Expected position based on velocity
+                expected_x = track_last_observed_positions[j, 0] + track_velocities[j, 0]
+                expected_y = track_last_observed_positions[j, 1] + track_velocities[j, 1]
+                
+                velocity_error = np.sqrt(
+                    (det_positions[i, 0] - expected_x)**2 +
+                    (det_positions[i, 1] - expected_y)**2
+                )
+                
+                # Add velocity consistency cost
+                cost = dist + velocity_weight * velocity_error
+            else:
+                # For lost tracks, only use position
+                cost = dist
+            
+            cost_matrix[i, j] = cost
+    
+    return cost_matrix
+
+
+# ============================================================================
 # NEW 3D ASSIGNMENT FUNCTIONS
 # ============================================================================
 
@@ -859,7 +998,7 @@ def solve_3d_assignment_flattened(cost_tensor: np.ndarray, max_distance: float) 
 
 @dataclass
 class FastTrackState:
-    """Enhanced track state with N-embedding history and observation-based prediction"""
+    """Enhanced track state with N-embedding history and kalman_type support"""
 
     id: int
 
@@ -868,14 +1007,26 @@ class FastTrackState:
     predicted_position: np.ndarray = field(default_factory=lambda: np.zeros(2, dtype=np.float32))
     bbox: np.ndarray = field(default_factory=lambda: np.zeros(4, dtype=np.float32))
 
+    # Kalman state (for "simple" type)
     kalman_state: np.ndarray = field(default_factory=lambda: np.zeros(4, dtype=np.float32))
 
     last_detection_pos: np.ndarray = field(default_factory=lambda: np.zeros(2, dtype=np.float32))
     last_detection_frame: int = 0
 
-    # NEW: Observation history for observation-based prediction
+    # Observation history for both types
     observation_history: deque = field(default_factory=lambda: deque(maxlen=5))
     observation_frames: deque = field(default_factory=lambda: deque(maxlen=5))
+    
+    # OC-SORT specific arrays (for "oc" type)
+    observation_history_array: np.ndarray = field(
+        default_factory=lambda: np.zeros((0, 2), dtype=np.float32)
+    )
+    observation_frames_array: np.ndarray = field(
+        default_factory=lambda: np.zeros(0, dtype=np.int32)
+    )
+    
+    # Track type
+    kalman_type: str = "simple"
 
     # Embedding history with configurable size
     embedding_history: deque = field(default_factory=lambda: deque(maxlen=5))
@@ -1081,17 +1232,42 @@ class FastTrackState:
         self.confidence_score = detection_confidence
 
         new_pos_f32 = new_pos.astype(np.float32)
-        self.kalman_state = simple_kalman_update(self.kalman_state, new_pos_f32)
 
-        if self.hits > 0:
-            dt = 1.0
-            new_velocity = (new_pos_f32 - self.position) / dt
-            self.kalman_state[2] = 0.7 * new_velocity[0] + 0.3 * self.kalman_state[2]
-            self.kalman_state[3] = 0.7 * new_velocity[1] + 0.3 * self.kalman_state[3]
+        if self.kalman_type == "simple":
+            # Simple Kalman filter update
+            self.kalman_state = simple_kalman_update(self.kalman_state, new_pos_f32)
 
-        self.position = self.kalman_state[:2].copy()
-        self.velocity = self.kalman_state[2:].copy()
-        self.predicted_position = self.position + self.velocity
+            if self.hits > 0:
+                dt = 1.0
+                new_velocity = (new_pos_f32 - self.position) / dt
+                self.kalman_state[2] = 0.7 * new_velocity[0] + 0.3 * self.kalman_state[2]
+                self.kalman_state[3] = 0.7 * new_velocity[1] + 0.3 * self.kalman_state[3]
+
+            self.position = self.kalman_state[:2].copy()
+            self.velocity = self.kalman_state[2:].copy()
+            self.predicted_position = self.position + self.velocity
+            
+        elif self.kalman_type == "oc":
+            # OC-SORT style update
+            self.observation_history_array, self.observation_frames_array = oc_sort_update(
+                self.observation_history_array,
+                self.observation_frames_array,
+                new_pos_f32,
+                current_frame,
+                max_history=30
+            )
+            
+            # Update current state
+            self.position = new_pos_f32.copy()
+            
+            # Compute velocity from observations
+            if len(self.observation_frames_array) >= 2:
+                dt = self.observation_frames_array[-1] - self.observation_frames_array[-2]
+                if dt > 0:
+                    self.velocity[0] = (self.observation_history_array[-1, 0] - 
+                                       self.observation_history_array[-2, 0]) / dt
+                    self.velocity[1] = (self.observation_history_array[-1, 1] - 
+                                       self.observation_history_array[-2, 1]) / dt
 
         # NEW: Add embedding to history
         if embedding is not None:
@@ -1108,14 +1284,36 @@ class FastTrackState:
         # Note: confirmation is now handled by the tracker to respect config
 
     def predict_only(self):
-        """Fast Kalman prediction step - keeps position at last detection, updates prediction only"""
-        self.kalman_state = simple_kalman_predict(self.kalman_state)
-        # Don't update self.position - keep it at last detection position for display
-        self.velocity = self.kalman_state[2:].copy()
-        self.predicted_position = self.kalman_state[:2].copy()  # Store predicted position separately
+        """Prediction step - behavior depends on kalman_type"""
+        if self.kalman_type == "simple":
+            # Simple Kalman prediction step - keeps position at last detection
+            self.kalman_state = simple_kalman_predict(self.kalman_state)
+            # Don't update self.position - keep it at last detection position for display
+            self.velocity = self.kalman_state[2:].copy()
+            self.predicted_position = self.kalman_state[:2].copy()  # Store predicted position separately
+        elif self.kalman_type == "oc":
+            # OC-SORT style - no prediction update, just increment counters
+            # Position stays at last detection for display
+            pass
+        
         self.age += 1
         self.misses += 1
         self.lost_frames += 1
+
+    def get_predicted_position(self, current_frame: int) -> np.ndarray:
+        """Get predicted position based on kalman_type"""
+        if self.kalman_type == "simple":
+            return self.predicted_position
+        elif self.kalman_type == "oc":
+            # Use OC-SORT prediction
+            pred_state = oc_sort_predict(
+                self.observation_history_array,
+                self.observation_frames_array,
+                current_frame
+            )
+            return pred_state[:2]  # Return just x, y position
+        else:
+            return self.predicted_position
 
     def add_embedding_fast(self, embedding: np.ndarray, pre_normalized: bool = True):
         """Fast embedding addition without expensive checks"""
@@ -1249,6 +1447,9 @@ class SwarmSortTracker:
         self.greedy_threshold = getattr(self.config, "greedy_threshold", 30.0)
         self.greedy_confidence_boost = getattr(self.config, "greedy_confidence_boost", 0.8)
         self.hungarian_fallback_threshold = getattr(self.config, "hungarian_fallback_threshold", 1.5)
+        
+        # Kalman type
+        self.kalman_type = getattr(self.config, "kalman_type", "simple")
 
         # Anti-duplicate parameters
         self.duplicate_detection_threshold = self.config.duplicate_detection_threshold
@@ -1299,7 +1500,7 @@ class SwarmSortTracker:
 
     def _create_new_track(self, track_id: int, position: np.ndarray) -> FastTrackState:
         """Create new track with embedding configuration"""
-        track = FastTrackState(id=track_id, position=position)
+        track = FastTrackState(id=track_id, position=position, kalman_type=self.kalman_type)
         track.set_embedding_params(self.max_embeddings_per_track, self.embedding_matching_method)
         return track
 
@@ -1709,7 +1910,7 @@ class SwarmSortTracker:
 
     def _create_track_from_pending(self, pending: PendingDetection):
         """Create track from pending detection with proper embedding setup"""
-        new_track = FastTrackState(id=self.next_id, position=pending.average_position.copy())
+        new_track = FastTrackState(id=self.next_id, position=pending.average_position.copy(), kalman_type=self.kalman_type)
 
         # IMPORTANT: Set embedding parameters
         new_track.set_embedding_params(

@@ -156,6 +156,9 @@ class SwarmSortConfig(BaseConfig):
     max_distance: float = 80.0  # Maximum distance for association
     detection_conf_threshold: float = 0  # Minimum confidence for detections (general filter)
     max_track_age: int = 30  # Maximum frames a track can exist without detection before deletion
+    
+    # Kalman filter type
+    kalman_type: Literal["simple", "oc"] = "oc"  # Kalman filter type: simple or OC-SORT style
 
     # Embedding parameters
     use_embeddings: bool = True  # Whether to use embedding features
