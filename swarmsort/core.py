@@ -391,7 +391,7 @@ def compute_cost_matrix_with_multi_embeddings(
         track_last_positions: np.ndarray,
         track_kalman_positions: np.ndarray,
         scaled_embedding_matrix: np.ndarray,
-        use_embeddings: bool,
+        do_embeddings: bool,
         max_distance: float,
         embedding_weight: float,
 ) -> np.ndarray:
@@ -421,7 +421,7 @@ def compute_cost_matrix_with_multi_embeddings(
             if spatial_cost > max_distance:
                 continue
 
-            if use_embeddings:
+            if do_embeddings:
                 # The scaled_embedding_matrix already contains the best/avg distance
                 scaled_emb_dist = scaled_embedding_matrix[i, j]
                 # Scale embedding distance to the same range as spatial distance
@@ -445,7 +445,7 @@ def compute_probabilistic_cost_matrix_vectorized(
         track_frames_since_detection: np.ndarray,  # NEW
         scaled_embedding_matrix: np.ndarray,
         embedding_median: float,
-        use_embeddings: bool,
+        do_embeddings: bool,
         max_distance: float,
         embedding_weight: float,
 ) -> np.ndarray:
@@ -495,7 +495,7 @@ def compute_probabilistic_cost_matrix_vectorized(
             spatial_cost = np.sqrt(diff_x * diff_x + diff_y * diff_y)
 
             # Combine with embedding cost using a weighted average
-            if use_embeddings:
+            if do_embeddings:
                 scaled_emb_dist = scaled_embedding_matrix[i, j]
                 # Scale embedding distance to the same range as spatial distance
                 embedding_cost_scaled = scaled_emb_dist * max_distance
@@ -519,7 +519,7 @@ def compute_cost_matrix_vectorized(
         track_kalman_positions: np.ndarray,
         det_embeddings: np.ndarray,
         track_embeddings: np.ndarray,
-        use_embeddings: bool,
+        do_embeddings: bool,
         max_distance: float,
         embedding_weight: float,
 ) -> np.ndarray:
@@ -546,7 +546,7 @@ def compute_cost_matrix_vectorized(
                 continue
 
             embedding_cost = 0.0
-            if use_embeddings:
+            if do_embeddings:
                 emb_dist = cosine_similarity_normalized(det_embeddings[i], track_embeddings[j])
                 embedding_cost = emb_dist * embedding_weight * max_distance
 
@@ -555,70 +555,58 @@ def compute_cost_matrix_vectorized(
     return cost_matrix
 
 
-@nb.njit(fastmath=True, cache=True)
 def numba_greedy_assignment(cost_matrix: np.ndarray, max_distance: float) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
-    ULTRA FAST numba-compiled greedy assignment.
-    Returns matches, unmatched_dets, unmatched_tracks as numpy arrays.
+    OPTIMIZED greedy assignment using vectorized operations.
+    Complexity reduced from O(n³) to O(n²) by using numpy's optimized argmin.
     """
     n_dets, n_tracks = cost_matrix.shape
 
+    # Create a working copy of the cost matrix
+    working_matrix = cost_matrix.copy()
+    working_matrix[working_matrix > max_distance] = np.inf
+
     # Track used detections and tracks
-    used_dets = np.zeros(n_dets, dtype=np.bool_)
-    used_tracks = np.zeros(n_tracks, dtype=np.bool_)
+    used_dets = np.zeros(n_dets, dtype=bool)
+    used_tracks = np.zeros(n_tracks, dtype=bool)
 
     # Store matches
-    matches = np.empty((min(n_dets, n_tracks), 2), dtype=np.int32)
-    num_matches = 0
+    matches = []
 
-    # Greedy assignment - find best valid matches iteratively
+    # Greedy assignment using vectorized operations
     for _ in range(min(n_dets, n_tracks)):
-        best_cost = np.inf
-        best_det = -1
-        best_track = -1
-
-        # Find minimum cost among unused pairs
-        for d in range(n_dets):
-            if used_dets[d]:
-                continue
-            for t in range(n_tracks):
-                if used_tracks[t]:
-                    continue
-                cost = cost_matrix[d, t]
-                if cost < best_cost and cost <= max_distance:
-                    best_cost = cost
-                    best_det = d
-                    best_track = t
-
-        if best_det >= 0:
-            matches[num_matches, 0] = best_det
-            matches[num_matches, 1] = best_track
-            num_matches += 1
-            used_dets[best_det] = True
-            used_tracks[best_track] = True
-        else:
+        # Find global minimum in the working matrix
+        min_flat_idx = np.argmin(working_matrix)
+        min_cost = working_matrix.flat[min_flat_idx]
+        
+        if min_cost == np.inf:
             break
+            
+        # Convert flat index to 2D coordinates
+        best_det = min_flat_idx // n_tracks
+        best_track = min_flat_idx % n_tracks
+        
+        # Record the match
+        matches.append((best_det, best_track))
+        
+        # Mark as used by setting entire row and column to infinity
+        working_matrix[best_det, :] = np.inf
+        working_matrix[:, best_track] = np.inf
+        
+        used_dets[best_det] = True
+        used_tracks[best_track] = True
+
+    # Convert matches to numpy array
+    if matches:
+        matches_array = np.array(matches, dtype=np.int32)
+    else:
+        matches_array = np.empty((0, 2), dtype=np.int32)
 
     # Build unmatched arrays
-    unmatched_dets = np.empty(n_dets, dtype=np.int32)
-    unmatched_tracks = np.empty(n_tracks, dtype=np.int32)
+    unmatched_dets = np.where(~used_dets)[0].astype(np.int32)
+    unmatched_tracks = np.where(~used_tracks)[0].astype(np.int32)
 
-    num_unmatched_dets = 0
-    num_unmatched_tracks = 0
-
-    for i in range(n_dets):
-        if not used_dets[i]:
-            unmatched_dets[num_unmatched_dets] = i
-            num_unmatched_dets += 1
-
-    for i in range(n_tracks):
-        if not used_tracks[i]:
-            unmatched_tracks[num_unmatched_tracks] = i
-            num_unmatched_tracks += 1
-
-    return (matches[:num_matches],
-            unmatched_dets[:num_unmatched_dets],
-            unmatched_tracks[:num_unmatched_tracks])
+    return matches_array, unmatched_dets, unmatched_tracks
 
 
 @nb.njit(fastmath=True, cache=True)
@@ -846,117 +834,86 @@ def compute_oc_sort_cost_matrix(
     return cost_matrix
 
 
+
+
+
+
 @nb.njit(fastmath=True, cache=True)
-def detect_collision_risk(
+def compute_track_uncertainties_numba(
     track_positions: np.ndarray,
-    track_velocities: np.ndarray,
-    collision_distance_threshold: float,
-    collision_velocity_threshold: float
+    track_misses: np.ndarray,
+    track_ages: np.ndarray,
+    local_density_radius: float
 ) -> np.ndarray:
     """
-    Detect tracks likely to collide based on proximity and closing velocity.
-    Returns array of collision pairs as [track_i, track_j] indices.
+    ULTRA-FAST: Numba-compiled uncertainty computation.
     """
-    n_tracks = len(track_positions)
-    max_pairs = n_tracks * (n_tracks - 1) // 2  # Maximum possible pairs
-    collision_pairs = np.empty((max_pairs, 2), dtype=np.int32)
-    num_pairs = 0
+    n_tracks = track_positions.shape[0]
+    uncertainties = np.zeros(n_tracks, dtype=np.float32)
     
     for i in range(n_tracks):
-        for j in range(i + 1, n_tracks):
-            # Distance between tracks
-            distance = np.sqrt(
-                (track_positions[i, 0] - track_positions[j, 0])**2 +
-                (track_positions[i, 1] - track_positions[j, 1])**2
-            )
-            
-            if distance < collision_distance_threshold:
-                # Check if tracks are converging (closing velocity)
-                pos_diff = track_positions[i] - track_positions[j]
-                vel_diff = track_velocities[i] - track_velocities[j]
-                
-                # Dot product: negative means converging
-                closing_speed = np.dot(vel_diff, pos_diff)
-                
-                if closing_speed < collision_velocity_threshold:
-                    collision_pairs[num_pairs, 0] = i
-                    collision_pairs[num_pairs, 1] = j
-                    num_pairs += 1
+        uncertainty = 0.0
+        
+        # Time component: 0.1 per missed frame, capped at 0.5
+        uncertainty += min(track_misses[i] * 0.1, 0.5)
+        
+        # Local density component: 0.2 per nearby track, capped at 0.6
+        nearby_count = 0
+        for j in range(n_tracks):
+            if i != j:
+                dx = track_positions[i, 0] - track_positions[j, 0]
+                dy = track_positions[i, 1] - track_positions[j, 1]
+                distance = np.sqrt(dx * dx + dy * dy)
+                if distance < local_density_radius:
+                    nearby_count += 1
+        uncertainty += min(nearby_count * 0.2, 0.6)
+        
+        # Reliability component: miss rate over track lifetime, capped at 0.3
+        if track_ages[i] > 0:
+            miss_rate = track_misses[i] / track_ages[i]
+            uncertainty += min(miss_rate * 0.3, 0.3)
+        
+        # Cap total uncertainty at 1.0
+        uncertainties[i] = min(uncertainty, 1.0)
     
-    # Return only the used portion
-    return collision_pairs[:num_pairs]
+    return uncertainties
 
 
 @nb.njit(fastmath=True, cache=True)
-def compute_collision_aware_cost_matrix(
+def compute_cost_matrix_with_uncertainty(
     det_positions: np.ndarray,
-    track_last_positions: np.ndarray,
-    track_velocities: np.ndarray,
-    track_misses: np.ndarray,
-    collision_risk_tracks: np.ndarray,  # Track indices at collision risk
-    frames_since_collision: np.ndarray,  # Frames since collision detected for each track
+    track_positions: np.ndarray,
+    scaled_embedding_matrix: np.ndarray,
+    track_uncertainties: np.ndarray,  # Already scaled by uncertainty_weight * max_distance
+    do_embeddings: bool,
     max_distance: float,
-    collision_hypothesis_frames: int = 5
+    embedding_weight: float,
 ) -> np.ndarray:
     """
-    Enhanced OC-SORT cost matrix with collision-aware multi-hypothesis tracking.
-    For tracks in collision, considers multiple movement hypotheses.
+    Compute cost matrix with uncertainty penalties.
+    Uncertainty is added directly to spatial costs: total_cost = spatial_cost + uncertainty
     """
-    n_dets = det_positions.shape[0]
-    n_tracks = track_last_positions.shape[0]
+    n_dets, n_tracks = det_positions.shape[0], track_positions.shape[0]
     cost_matrix = np.full((n_dets, n_tracks), np.inf, dtype=np.float32)
-    
-    # Convert to numba-compatible structure - can't use set() in numba
-    collision_risk_map = np.zeros(n_tracks, dtype=np.bool_)
-    for idx in collision_risk_tracks:
-        if idx < n_tracks:
-            collision_risk_map[idx] = True
     
     for i in range(n_dets):
         for j in range(n_tracks):
-            min_cost = np.inf
+            # Compute spatial distance
+            dx = det_positions[i, 0] - track_positions[j, 0]
+            dy = det_positions[i, 1] - track_positions[j, 1]
+            spatial_cost = np.sqrt(dx*dx + dy*dy)
             
-            if collision_risk_map[j] and frames_since_collision[j] <= collision_hypothesis_frames:
-                # Multi-hypothesis tracking for collision-risk tracks
-                
-                # Hypothesis 1: Continued in same direction (standard OC-SORT)
-                h1_pos = track_last_positions[j] + track_velocities[j] * track_misses[j]
-                h1_cost = np.sqrt(
-                    (det_positions[i, 0] - h1_pos[0])**2 +
-                    (det_positions[i, 1] - h1_pos[1])**2
-                )
-                min_cost = min(min_cost, h1_cost)
-                
-                # Hypothesis 2: Reversed direction (collision effect)
-                h2_pos = track_last_positions[j] - track_velocities[j] * track_misses[j]
-                h2_cost = np.sqrt(
-                    (det_positions[i, 0] - h2_pos[0])**2 +
-                    (det_positions[i, 1] - h2_pos[1])**2
-                )
-                min_cost = min(min_cost, h2_cost)
-                
-                # Hypothesis 3: Stayed near collision point (stuck/slow)
-                h3_cost = np.sqrt(
-                    (det_positions[i, 0] - track_last_positions[j, 0])**2 +
-                    (det_positions[i, 1] - track_last_positions[j, 1])**2
-                )
-                min_cost = min(min_cost, h3_cost)
-                
-                # Use best hypothesis
-                cost = min_cost
-                
-            else:
-                # Standard OC-SORT cost computation
-                cost = np.sqrt(
-                    (det_positions[i, 0] - track_last_positions[j, 0])**2 +
-                    (det_positions[i, 1] - track_last_positions[j, 1])**2
-                )
+            # Add uncertainty penalty to spatial cost
+            total_cost = spatial_cost + track_uncertainties[j]
             
-            # Adaptive threshold based on misses
-            adaptive_threshold = max_distance * (1.0 + 0.2 * track_misses[j])
-            
-            if cost <= adaptive_threshold:
-                cost_matrix[i, j] = cost
+            # Only proceed if within max distance (after uncertainty adjustment)
+            if total_cost <= max_distance:
+                # Add embedding cost if enabled
+                if do_embeddings:
+                    embedding_cost = scaled_embedding_matrix[i, j] * max_distance * embedding_weight
+                    total_cost += embedding_cost
+                
+                cost_matrix[i, j] = total_cost
     
     return cost_matrix
 
@@ -1029,12 +986,9 @@ class FastTrackState:
     # Track type
     kalman_type: str = "simple"
     
-    # Collision tracking
-    collision_detected: bool = False
-    frames_since_collision: int = 0
-    collision_partners: set = field(default_factory=set)  # IDs of tracks this collided with
-    embedding_frozen: bool = False  # Whether embeddings are frozen due to collision/occlusion
-    last_safe_embedding: Optional[np.ndarray] = None  # Last embedding before collision
+    # Embedding freeze tracking  
+    embedding_frozen: bool = False  # Whether embeddings are frozen due to high density
+    last_safe_embedding: Optional[np.ndarray] = None  # Last embedding before freeze
 
     # Embedding history with configurable size
     embedding_history: deque = field(default_factory=lambda: deque(maxlen=5))
@@ -1115,7 +1069,7 @@ class FastTrackState:
 
                 # Store embedding as last safe embedding before potential collision
                 # Only store if we don't already have one to avoid redundant copies
-                if not self.collision_detected and self.last_safe_embedding is None:
+                if self.last_safe_embedding is None:
                     self.last_safe_embedding = normalized_emb.copy()
 
                 # Method-specific cache invalidation logic
@@ -1348,7 +1302,7 @@ class FastTrackState:
 
         # Store embedding as last safe embedding before potential collision
         # Only store if we don't already have one to avoid redundant copies
-        if not self.collision_detected and self.last_safe_embedding is None:
+        if self.last_safe_embedding is None:
             self.last_safe_embedding = embedding.copy()
 
         # Only invalidate if deque is full
@@ -1484,7 +1438,7 @@ class SwarmSortTracker:
         self.embedding_weight = self.config.embedding_weight
         self.max_track_age = self.config.max_track_age
         self.detection_conf_threshold = self.config.detection_conf_threshold
-        self.use_embeddings = self.config.use_embeddings
+        self.do_embeddings = self.config.do_embeddings
 
         # Embedding history configuration
         self.max_embeddings_per_track = self.config.max_embeddings_per_track
@@ -1499,21 +1453,18 @@ class SwarmSortTracker:
         # Kalman type
         self.kalman_type = getattr(self.config, "kalman_type", "simple")
         
-        # Collision detection parameters
-        self.collision_detection_enabled = getattr(self.config, "collision_detection_enabled", True)
-        self.collision_distance_threshold = getattr(self.config, "collision_distance_threshold", 30.0)
-        self.collision_velocity_threshold = getattr(self.config, "collision_velocity_threshold", -5.0)
-        self.collision_hypothesis_frames = getattr(self.config, "collision_hypothesis_frames", 5)
-        self.collision_appearance_weight = getattr(self.config, "collision_appearance_weight", 2.0)
+        # Uncertainty-based cost system parameters
+        self.uncertainty_weight = getattr(self.config, "uncertainty_weight", 0.0)
+        self.local_density_radius = getattr(self.config, "local_density_radius", 30.0)
+        
+        # Simplified embedding freeze parameters
         self.collision_freeze_embeddings = getattr(self.config, "collision_freeze_embeddings", True)
-        self.collision_embedding_safety_distance = getattr(self.config, "collision_embedding_safety_distance", 50.0)
+        self.embedding_freeze_density = getattr(self.config, "embedding_freeze_density", 2)
         
         # Embedding freeze optimization - only check every N frames
         self._freeze_check_interval = 3  # Check every 3 frames for better performance
         self._freeze_frame_count = 0
 
-        # Anti-duplicate parameters
-        self.duplicate_detection_threshold = self.config.duplicate_detection_threshold
 
         # ReID parameters
         self.reid_enabled = self.config.reid_enabled
@@ -1580,6 +1531,11 @@ class SwarmSortTracker:
             )
             _ = fast_mahalanobis_distance(dummy_diff, dummy_cov)
             _ = fast_gaussian_fusion(dummy_diff, dummy_cov, dummy_diff, dummy_cov)
+            
+            # Pre-compile uncertainty computation
+            dummy_misses = np.array([0, 1], dtype=np.float32)
+            dummy_ages = np.array([1, 2], dtype=np.float32)
+            _ = compute_track_uncertainties_numba(dummy_pos, dummy_misses, dummy_ages, 50.0)
 
 
             logger.info("Numba functions compiled successfully")
@@ -1626,11 +1582,10 @@ class SwarmSortTracker:
                 if norm > 0:
                     det.embedding = emb / norm  # Store normalized version
 
-        # Detect and manage collisions (for OC-SORT)
-        start("collision_detection")
-        self._detect_and_manage_collisions()
+        # Update embedding freeze status based on local density
+        start("embedding_freeze_update")
         self._update_embedding_freeze_status()
-        stop("collision_detection")
+        stop("embedding_freeze_update")
 
         start("assignment")
         if self.assignment_strategy == "hungarian":
@@ -1919,7 +1874,7 @@ class SwarmSortTracker:
         spatial_mask = spatial_distances <= (self.max_distance**2)
 
         # Check if we need embeddings
-        use_embeddings = (
+        do_embeddings = (
             any(spatial_mask.flatten())
             and all(  # Only if there are possible matches
                 hasattr(det, "embedding") and det.embedding is not None for det in detections
@@ -1929,7 +1884,7 @@ class SwarmSortTracker:
 
         scaled_embedding_matrix = np.zeros((n_dets, n_tracks), dtype=np.float32)
 
-        if use_embeddings:
+        if do_embeddings:
             if start:
                 start("embedding_computation")
 
@@ -2010,13 +1965,21 @@ class SwarmSortTracker:
             if stop:
                 stop("embedding_computation")
 
-        # Compute cost matrix
-        cost_matrix = compute_cost_matrix_with_multi_embeddings(
+        # Compute track uncertainties and scale them
+        if self.uncertainty_weight > 0.0:
+            track_uncertainties = self._compute_track_uncertainties_batch(tracks)
+            # Scale by uncertainty_weight and max_distance
+            uncertainty_penalties = track_uncertainties * self.uncertainty_weight * self.max_distance
+        else:
+            uncertainty_penalties = np.zeros(n_tracks, dtype=np.float32)
+
+        # Compute cost matrix with uncertainty
+        cost_matrix = compute_cost_matrix_with_uncertainty(
             det_positions,
-            track_last_positions,
-            track_kalman_positions,
+            track_kalman_positions,  # Use predicted positions
             scaled_embedding_matrix,
-            use_embeddings,
+            uncertainty_penalties,
+            do_embeddings,
             self.max_distance,
             self.embedding_weight,
         )
@@ -2065,13 +2028,13 @@ class SwarmSortTracker:
         track_last_positions = np.array([t.last_detection_pos for t in tracks], dtype=np.float32)
 
         # Check embeddings
-        use_embeddings = all(
+        do_embeddings = all(
             hasattr(det, "embedding") and det.embedding is not None for det in detections
         ) and all(len(t.embedding_history) > 0 for t in tracks)
 
         scaled_embedding_matrix = np.zeros((n_dets, n_tracks), dtype=np.float32)
 
-        if use_embeddings:
+        if do_embeddings:
             # Same as regular assignment - use cached representatives
             det_embeddings = np.array(
                 [
@@ -2133,7 +2096,7 @@ class SwarmSortTracker:
             track_frames_since_detection,
             scaled_embedding_matrix,
             embedding_median,
-            use_embeddings,
+            do_embeddings,
             self.max_distance,
             self.embedding_weight,
         )
@@ -2183,14 +2146,14 @@ class SwarmSortTracker:
         track_kalman_positions = np.array([t.predicted_position for t in tracks], dtype=np.float32)
 
         # Check embeddings and compute scaled embedding matrix
-        use_embeddings = (
-            self.use_embeddings and
+        do_embeddings = (
+            self.do_embeddings and
             all(hasattr(det, "embedding") and det.embedding is not None for det in detections) and
             all(len(t.embedding_history) > 0 for t in tracks)
         )
 
         scaled_embedding_matrix = np.zeros((n_dets, n_tracks), dtype=np.float32)
-        if use_embeddings:
+        if do_embeddings:
             if start: start("embedding_computation")
 
             # Fast embedding computation (reuse existing optimized code)
@@ -2217,23 +2180,24 @@ class SwarmSortTracker:
 
             if stop: stop("embedding_computation")
 
-        # Compute cost matrix
-        if start: start("cost_matrix")
-        if self.use_probabilistic_costs:
-            track_frames_since_detection = np.array([
-                self.frame_count - track.last_detection_frame for track in tracks
-            ], dtype=np.float32)
-            embedding_median = np.median(scaled_embedding_matrix) if scaled_embedding_matrix.size > 0 else 0.5
-
-            cost_matrix = compute_probabilistic_cost_matrix_vectorized(
-                det_positions, track_kalman_positions, track_last_positions,
-                track_frames_since_detection, scaled_embedding_matrix, embedding_median,
-                use_embeddings, self.max_distance, self.embedding_weight
-            )
+        # Compute track uncertainties and scale them
+        if self.uncertainty_weight > 0.0:
+            track_uncertainties = self._compute_track_uncertainties_batch(tracks)
+            # Scale by uncertainty_weight and max_distance
+            uncertainty_penalties = track_uncertainties * self.uncertainty_weight * self.max_distance
         else:
-            cost_matrix = compute_cost_matrix_with_multi_embeddings(
-                det_positions, track_last_positions, track_kalman_positions,
-                scaled_embedding_matrix, use_embeddings, self.max_distance, self.embedding_weight
+            uncertainty_penalties = np.zeros(n_tracks, dtype=np.float32)
+
+        # Compute cost matrix with uncertainty
+        if start: start("cost_matrix")
+        cost_matrix = compute_cost_matrix_with_uncertainty(
+            det_positions,
+            track_kalman_positions,  # Use predicted positions
+            scaled_embedding_matrix,
+            uncertainty_penalties,
+            do_embeddings,
+            self.max_distance,
+            self.embedding_weight,
             )
         if stop: stop("cost_matrix")
 
@@ -2321,14 +2285,14 @@ class SwarmSortTracker:
         track_kalman_positions = np.array([t.predicted_position for t in tracks], dtype=np.float32)
 
         # Fast embedding computation (same as hybrid)
-        use_embeddings = (
-            self.use_embeddings and
+        do_embeddings = (
+            self.do_embeddings and
             all(hasattr(det, "embedding") and det.embedding is not None for det in detections) and
             all(len(t.embedding_history) > 0 for t in tracks)
         )
 
         scaled_embedding_matrix = np.zeros((n_dets, n_tracks), dtype=np.float32)
-        if use_embeddings:
+        if do_embeddings:
             if start: start("embedding_computation")
             det_embeddings = np.empty((n_dets, detections[0].embedding.shape[0]), dtype=np.float32)
             for i, det in enumerate(detections):
@@ -2352,23 +2316,25 @@ class SwarmSortTracker:
             scaled_embedding_matrix = scaled_distances_flat.reshape(n_dets, n_tracks)
             if stop: stop("embedding_computation")
 
-        # Compute cost matrix (same as hybrid)
-        if start: start("cost_matrix")
-        if self.use_probabilistic_costs:
-            track_frames_since_detection = np.array([
-                self.frame_count - track.last_detection_frame for track in tracks
-            ], dtype=np.float32)
-            cost_matrix = compute_probabilistic_cost_matrix_vectorized(
-                det_positions, track_kalman_positions, track_last_positions,
-                track_frames_since_detection, scaled_embedding_matrix,
-                np.median(scaled_embedding_matrix) if scaled_embedding_matrix.size > 0 else 0.5,
-                use_embeddings, self.max_distance, self.embedding_weight
-            )
+        # Compute track uncertainties and scale them
+        if self.uncertainty_weight > 0.0:
+            track_uncertainties = self._compute_track_uncertainties_batch(tracks)
+            # Scale by uncertainty_weight and max_distance
+            uncertainty_penalties = track_uncertainties * self.uncertainty_weight * self.max_distance
         else:
-            cost_matrix = compute_cost_matrix_with_multi_embeddings(
-                det_positions, track_last_positions, track_kalman_positions,
-                scaled_embedding_matrix, use_embeddings, self.max_distance, self.embedding_weight
-            )
+            uncertainty_penalties = np.zeros(n_tracks, dtype=np.float32)
+
+        # Compute cost matrix with uncertainty
+        if start: start("cost_matrix")
+        cost_matrix = compute_cost_matrix_with_uncertainty(
+            det_positions,
+            track_kalman_positions,  # Use predicted positions
+            scaled_embedding_matrix,
+            uncertainty_penalties,
+            do_embeddings,
+            self.max_distance,
+            self.embedding_weight,
+        )
         if stop: stop("cost_matrix")
 
         # NUMBA-ACCELERATED greedy assignment - as fast as Hungarian!
@@ -2520,99 +2486,39 @@ class SwarmSortTracker:
             if track.hits >= self.min_consecutive_detections:
                 track.confirmed = True
 
-    def _detect_and_manage_collisions(self):
-        """Detect collision risks and update collision state for tracks"""
-        if not self.collision_detection_enabled or self.kalman_type != "oc":
-            return
-            
-        if len(self.tracks) < 2:
-            return
-            
-        tracks = list(self.tracks.values())
-        
-        # Extract current positions and velocities
-        track_positions = np.array([t.position for t in tracks], dtype=np.float32)
-        track_velocities = np.array([t.velocity for t in tracks], dtype=np.float32)
-        
-        # Detect collision pairs
-        collision_pairs = detect_collision_risk(
-            track_positions,
-            track_velocities, 
-            self.collision_distance_threshold,
-            self.collision_velocity_threshold
-        )
-        
-        # Update collision state for all tracks
-        currently_colliding = set()
-        
-        for i, j in collision_pairs:
-            track_i = tracks[i]
-            track_j = tracks[j]
-            
-            # Mark both tracks as in collision
-            track_i.collision_detected = True
-            track_j.collision_detected = True
-            track_i.frames_since_collision = 0
-            track_j.frames_since_collision = 0
-            
-            # Track collision partners
-            track_i.collision_partners.add(track_j.id)
-            track_j.collision_partners.add(track_i.id)
-            
-            currently_colliding.add(track_i.id)
-            currently_colliding.add(track_j.id)
-        
-        # Update collision counters for all tracks
-        for track in tracks:
-            if track.id not in currently_colliding:
-                if track.collision_detected:
-                    # Still in collision recovery period
-                    track.frames_since_collision += 1
-                    
-                    # End collision tracking after threshold
-                    if track.frames_since_collision > self.collision_hypothesis_frames:
-                        track.collision_detected = False
-                        track.frames_since_collision = 0
-                        track.collision_partners.clear()
 
     def _update_embedding_freeze_status(self):
-        """Update embedding freeze status based on track proximity - optimized with frame interval"""
+        """Simplified density-based embedding freeze status"""
         if not self.collision_freeze_embeddings or len(self.tracks) < 2:
             return
-            
+        
         # Only check freeze status every N frames for performance
         self._freeze_frame_count += 1
         if self._freeze_frame_count % self._freeze_check_interval != 0:
             return
-            
+        
         tracks = list(self.tracks.values())
-        n_tracks = len(tracks)
         
-        # Early exit for few tracks
-        if n_tracks < 2:
-            return
+        for track in tracks:
+            # Count nearby tracks within local density radius
+            nearby_count = 0
+            for other_track in tracks:
+                if other_track.id != track.id:
+                    distance = np.linalg.norm(track.position - other_track.position)
+                    if distance < self.local_density_radius:
+                        nearby_count += 1
             
-        # Vectorized distance computation
-        positions = np.array([track.position for track in tracks], dtype=np.float32)
-        freeze_flags = compute_freeze_flags_vectorized(
-            positions, self.collision_embedding_safety_distance
-        )
-        
-        # Update freeze status efficiently
-        for i, track in enumerate(tracks):
-            should_freeze = freeze_flags[i]
+            should_freeze = nearby_count >= self.embedding_freeze_density
             
             if should_freeze and not track.embedding_frozen:
-                # Starting to freeze - save current embedding (avoid copy if possible)
+                # Start freezing - save current embedding
                 track.embedding_frozen = True
-                if len(track.embedding_history) > 0:
-                    # Only copy if we actually need to store it
-                    if track.last_safe_embedding is None:
-                        track.last_safe_embedding = track.embedding_history[-1].copy()
+                if len(track.embedding_history) > 0 and track.last_safe_embedding is None:
+                    track.last_safe_embedding = track.embedding_history[-1].copy()
                     
             elif not should_freeze and track.embedding_frozen:
-                # Safe to unfreeze - use optimized restoration
-                self._unfreeze_track_embedding(track)
+                # Safe to unfreeze - restore embeddings
+                track.unfreeze_embeddings(restore_last_safe=True)
 
     def _unfreeze_track_embedding(self, track):
         """Optimized embedding unfreezing with minimal overhead"""
@@ -2634,6 +2540,38 @@ class SwarmSortTracker:
         
         # Clear safe embedding reference
         track.last_safe_embedding = None
+
+    def _compute_track_uncertainties_batch(self, tracks):
+        """
+        ULTRA-FAST: Numba-compiled uncertainty computation for maximum performance.
+        Uses compiled functions for critical path optimization.
+        
+        Components:
+        - Time: Tracks with recent misses are more uncertain
+        - Density: Tracks in crowded areas are harder to assign correctly  
+        - Reliability: Tracks with poor hit/miss history are less reliable
+        """
+        n_tracks = len(tracks)
+        if n_tracks == 0:
+            return np.array([], dtype=np.float32)
+        
+        # Extract track data for Numba computation
+        track_positions = np.array([t.position for t in tracks], dtype=np.float32)
+        track_misses = np.array([t.misses for t in tracks], dtype=np.float32)
+        track_ages = np.array([t.age for t in tracks], dtype=np.float32)
+        
+        # Use Numba-compiled function for maximum speed
+        return compute_track_uncertainties_numba(
+            track_positions, track_misses, track_ages, self.local_density_radius
+        )
+    
+    def _compute_track_uncertainty(self, track, all_tracks):
+        """
+        DEPRECATED: Use _compute_track_uncertainties_batch for better performance.
+        Kept for backward compatibility.
+        """
+        # Fall back to batch computation with single track
+        return self._compute_track_uncertainties_batch([track])[0]
 
     def _handle_unmatched_tracks(self, unmatched_track_indices):
         """Handle unmatched tracks - predict position and increment miss counter"""

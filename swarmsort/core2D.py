@@ -390,7 +390,7 @@ def compute_cost_matrix_with_multi_embeddings(
     track_last_positions: np.ndarray,
     track_kalman_positions: np.ndarray,
     scaled_embedding_matrix: np.ndarray,
-    use_embeddings: bool,
+    do_embeddings: bool,
     max_distance: float,
     embedding_weight: float,
 ) -> np.ndarray:
@@ -420,7 +420,7 @@ def compute_cost_matrix_with_multi_embeddings(
             if spatial_cost > max_distance:
                 continue
 
-            if use_embeddings:
+            if do_embeddings:
                 # The scaled_embedding_matrix already contains the best/avg distance
                 scaled_emb_dist = scaled_embedding_matrix[i, j]
                 # Scale embedding distance to the same range as spatial distance
@@ -444,7 +444,7 @@ def compute_probabilistic_cost_matrix_vectorized(
     track_frames_since_detection: np.ndarray,  # NEW
     scaled_embedding_matrix: np.ndarray,
     embedding_median: float,
-    use_embeddings: bool,
+    do_embeddings: bool,
     max_distance: float,
     embedding_weight: float,
 ) -> np.ndarray:
@@ -494,7 +494,7 @@ def compute_probabilistic_cost_matrix_vectorized(
             spatial_cost = np.sqrt(diff_x * diff_x + diff_y * diff_y)
 
             # Combine with embedding cost using a weighted average
-            if use_embeddings:
+            if do_embeddings:
                 scaled_emb_dist = scaled_embedding_matrix[i, j]
                 # Scale embedding distance to the same range as spatial distance
                 embedding_cost_scaled = scaled_emb_dist * max_distance
@@ -518,7 +518,7 @@ def compute_cost_matrix_vectorized(
     track_kalman_positions: np.ndarray,
     det_embeddings: np.ndarray,
     track_embeddings: np.ndarray,
-    use_embeddings: bool,
+    do_embeddings: bool,
     max_distance: float,
     embedding_weight: float,
 ) -> np.ndarray:
@@ -545,7 +545,7 @@ def compute_cost_matrix_vectorized(
                 continue
 
             embedding_cost = 0.0
-            if use_embeddings:
+            if do_embeddings:
                 emb_dist = cosine_similarity_normalized(det_embeddings[i], track_embeddings[j])
                 embedding_cost = emb_dist * embedding_weight * max_distance
 
@@ -1057,7 +1057,7 @@ class SwarmSortTracker:
         self.embedding_weight = self.config.embedding_weight
         self.max_track_age = self.config.max_track_age
         self.detection_conf_threshold = self.config.detection_conf_threshold
-        self.use_embeddings = self.config.use_embeddings
+        self.do_embeddings = self.config.do_embeddings
 
         # Embedding history configuration
         self.max_embeddings_per_track = self.config.max_embeddings_per_track
@@ -1068,9 +1068,6 @@ class SwarmSortTracker:
         self.greedy_threshold = getattr(self.config, "greedy_threshold", 30.0)
         self.greedy_confidence_boost = getattr(self.config, "greedy_confidence_boost", 0.8)
         self.hungarian_fallback_threshold = getattr(self.config, "hungarian_fallback_threshold", 1.5)
-
-        # Anti-duplicate parameters
-        self.duplicate_detection_threshold = self.config.duplicate_detection_threshold
 
         # ReID parameters
         self.reid_enabled = self.config.reid_enabled
@@ -1463,7 +1460,7 @@ class SwarmSortTracker:
         spatial_mask = spatial_distances <= (self.max_distance**2)
 
         # Check if we need embeddings
-        use_embeddings = (
+        do_embeddings = (
             any(spatial_mask.flatten())
             and all(  # Only if there are possible matches
                 hasattr(det, "embedding") and det.embedding is not None for det in detections
@@ -1473,7 +1470,7 @@ class SwarmSortTracker:
 
         scaled_embedding_matrix = np.zeros((n_dets, n_tracks), dtype=np.float32)
 
-        if use_embeddings:
+        if do_embeddings:
             if start:
                 start("embedding_computation")
 
@@ -1565,7 +1562,7 @@ class SwarmSortTracker:
             track_last_positions,
             track_kalman_positions,
             scaled_embedding_matrix,
-            use_embeddings,
+            do_embeddings,
             self.max_distance,
             self.embedding_weight,
         )
@@ -1614,13 +1611,13 @@ class SwarmSortTracker:
         track_last_positions = np.array([t.last_detection_pos for t in tracks], dtype=np.float32)
 
         # Check embeddings
-        use_embeddings = all(
+        do_embeddings = all(
             hasattr(det, "embedding") and det.embedding is not None for det in detections
         ) and all(len(t.embedding_history) > 0 for t in tracks)
 
         scaled_embedding_matrix = np.zeros((n_dets, n_tracks), dtype=np.float32)
 
-        if use_embeddings:
+        if do_embeddings:
             # Same as regular assignment - use cached representatives
             det_embeddings = np.array(
                 [
@@ -1682,7 +1679,7 @@ class SwarmSortTracker:
             track_frames_since_detection,
             scaled_embedding_matrix,
             embedding_median,
-            use_embeddings,
+            do_embeddings,
             self.max_distance,
             self.embedding_weight,
         )
@@ -1732,14 +1729,14 @@ class SwarmSortTracker:
         track_kalman_positions = np.array([t.predicted_position for t in tracks], dtype=np.float32)
 
         # Check embeddings and compute scaled embedding matrix
-        use_embeddings = (
-            self.use_embeddings and 
+        do_embeddings = (
+            self.do_embeddings and
             all(hasattr(det, "embedding") and det.embedding is not None for det in detections) and
             all(len(t.embedding_history) > 0 for t in tracks)
         )
 
         scaled_embedding_matrix = np.zeros((n_dets, n_tracks), dtype=np.float32)
-        if use_embeddings:
+        if do_embeddings:
             if start: start("embedding_computation")
             
             # Fast embedding computation (reuse existing optimized code)
@@ -1777,12 +1774,12 @@ class SwarmSortTracker:
             cost_matrix = compute_probabilistic_cost_matrix_vectorized(
                 det_positions, track_kalman_positions, track_last_positions,
                 track_frames_since_detection, scaled_embedding_matrix, embedding_median,
-                use_embeddings, self.max_distance, self.embedding_weight
+                do_embeddings, self.max_distance, self.embedding_weight
             )
         else:
             cost_matrix = compute_cost_matrix_with_multi_embeddings(
                 det_positions, track_last_positions, track_kalman_positions,
-                scaled_embedding_matrix, use_embeddings, self.max_distance, self.embedding_weight
+                scaled_embedding_matrix, do_embeddings, self.max_distance, self.embedding_weight
             )
         if stop: stop("cost_matrix")
 
@@ -1870,14 +1867,14 @@ class SwarmSortTracker:
         track_kalman_positions = np.array([t.predicted_position for t in tracks], dtype=np.float32)
 
         # Fast embedding computation (same as hybrid)
-        use_embeddings = (
-            self.use_embeddings and 
+        do_embeddings = (
+            self.do_embeddings and
             all(hasattr(det, "embedding") and det.embedding is not None for det in detections) and
             all(len(t.embedding_history) > 0 for t in tracks)
         )
         
         scaled_embedding_matrix = np.zeros((n_dets, n_tracks), dtype=np.float32)
-        if use_embeddings:
+        if do_embeddings:
             if start: start("embedding_computation")
             det_embeddings = np.empty((n_dets, detections[0].embedding.shape[0]), dtype=np.float32)
             for i, det in enumerate(detections):
@@ -1911,12 +1908,12 @@ class SwarmSortTracker:
                 det_positions, track_kalman_positions, track_last_positions,
                 track_frames_since_detection, scaled_embedding_matrix, 
                 np.median(scaled_embedding_matrix) if scaled_embedding_matrix.size > 0 else 0.5,
-                use_embeddings, self.max_distance, self.embedding_weight
+                do_embeddings, self.max_distance, self.embedding_weight
             )
         else:
             cost_matrix = compute_cost_matrix_with_multi_embeddings(
                 det_positions, track_last_positions, track_kalman_positions,
-                scaled_embedding_matrix, use_embeddings, self.max_distance, self.embedding_weight
+                scaled_embedding_matrix, do_embeddings, self.max_distance, self.embedding_weight
             )
         if stop: stop("cost_matrix")
 

@@ -66,10 +66,10 @@ def test_config_creation_and_validation():
     config.validate()
 
     # Custom config
-    config = SwarmSortConfig(max_distance=100.0, init_conf_threshold=0.7, use_embeddings=False)
+    config = SwarmSortConfig(max_distance=100.0, init_conf_threshold=0.7, do_embeddings=False)
     config.validate()
     assert config.max_distance == 100.0
-    assert config.use_embeddings == False
+    assert config.do_embeddings == False
 
     # Invalid config
     with pytest.raises(ValueError):
@@ -86,10 +86,10 @@ def test_tracker_initialization():
     assert len(tracker.tracks) == 0
 
     # Custom config
-    config = SwarmSortConfig(max_distance=50.0, use_embeddings=False)
+    config = SwarmSortConfig(max_distance=50.0, do_embeddings=False)
     tracker = SwarmSortTracker(config)
     assert tracker.config.max_distance == 50.0
-    assert not tracker.config.use_embeddings
+    assert not tracker.config.do_embeddings
 
     # Dict config
     tracker = SwarmSortTracker({"max_distance": 75.0})
@@ -133,7 +133,7 @@ def test_basic_tracking():
 def test_embedding_tracking():
     """Test tracking with embeddings."""
     config = SwarmSortConfig(
-        use_embeddings=True,
+        do_embeddings=True,
         embedding_weight=0.5,
         min_consecutive_detections=2,  # Lower threshold for testing
     )
@@ -162,7 +162,7 @@ def test_embedding_tracking():
 
 def test_duplicate_detection_removal():
     """Test removal of duplicate detections."""
-    tracker = SwarmSortTracker(SwarmSortConfig(duplicate_detection_threshold=5.0))
+    tracker = SwarmSortTracker(SwarmSortConfig())
 
     # Create very close detections
     detections = [
@@ -238,14 +238,14 @@ def test_config_yaml_functionality():
     config_dict = {
         "max_distance": 90.0,
         "init_conf_threshold": 0.75,
-        "use_embeddings": True,
+        "do_embeddings": True,
         "embedding_weight": 0.4,
     }
 
     config = SwarmSortConfig.from_dict(config_dict)
     assert config.max_distance == 90.0
     assert config.init_conf_threshold == 0.75
-    assert config.use_embeddings == True
+    assert config.do_embeddings == True
     assert config.embedding_weight == 0.4
 
     # Test dict export

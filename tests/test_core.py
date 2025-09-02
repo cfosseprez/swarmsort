@@ -237,14 +237,14 @@ class TestSwarmSortTrackerCore:
         """Test tracker initialization with dict configuration."""
         config_dict = {
             "max_distance": 75.0,
-            "use_embeddings": False,
+            "do_embeddings": False,
             "min_consecutive_detections": 3,
         }
 
         tracker = SwarmSortTracker(config_dict)
 
         assert tracker.config.max_distance == 75.0
-        assert not tracker.config.use_embeddings
+        assert not tracker.config.do_embeddings
         assert tracker.config.min_consecutive_detections == 3
 
     def test_motion_model_setup(self, default_config):
@@ -364,7 +364,7 @@ class TestSwarmSortTrackerCore:
         "config_key,config_value",
         [
             ("max_distance", 100.0),
-            ("use_embeddings", False),
+            ("do_embeddings", False),
             ("embedding_weight", 0.7),
             ("min_consecutive_detections", 5),
             ("reid_enabled", False),
@@ -639,7 +639,7 @@ class TestTrackLifecycle:
         """Test re-identification of tracks."""
         config = SwarmSortConfig(
             reid_enabled=True,
-            use_embeddings=True,
+            do_embeddings=True,
             max_track_age=10,
             min_consecutive_detections=1,
             init_conf_threshold=0.0

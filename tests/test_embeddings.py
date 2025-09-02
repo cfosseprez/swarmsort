@@ -496,7 +496,7 @@ class TestEmbeddingFunctionality:
 
     def test_embedding_normalization(self):
         """Test embedding normalization in tracker."""
-        config = SwarmSortConfig(use_embeddings=True)
+        config = SwarmSortConfig(do_embeddings=True)
         tracker = SwarmSortTracker(config)
         
         # Create detection with non-normalized embedding
@@ -514,7 +514,7 @@ class TestEmbeddingFunctionality:
     def test_gpu_cpu_fallback(self):
         """Test GPU to CPU fallback behavior."""
         # This test would need to mock CuPy availability
-        config = SwarmSortConfig(use_embeddings=True)
+        config = SwarmSortConfig(do_embeddings=True)
         
         # Should create tracker regardless of GPU availability
         tracker = SwarmSortTracker(config)

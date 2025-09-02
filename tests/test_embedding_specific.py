@@ -178,7 +178,7 @@ class TestEmbeddingBasedTracking:
     def test_embedding_association_accuracy(self, consistent_embeddings):
         """Test that embeddings improve association accuracy."""
         config = SwarmSortConfig(
-            use_embeddings=True,
+            do_embeddings=True,
             embedding_weight=0.8,  # High weight for testing
             min_consecutive_detections=2,
             max_distance=100.0,  # Large to allow position errors
@@ -230,7 +230,7 @@ class TestEmbeddingBasedTracking:
 
         for method in methods:
             config = SwarmSortConfig(
-                use_embeddings=True,
+                do_embeddings=True,
                 embedding_matching_method=method,
                 embedding_weight=0.5,
                 min_consecutive_detections=2,
@@ -293,7 +293,7 @@ class TestEmbeddingBasedTracking:
     def test_embedding_scaling_integration(self):
         """Test integration of embedding scaling with tracking."""
         config = SwarmSortConfig(
-            use_embeddings=True, embedding_weight=0.6, min_consecutive_detections=2
+            do_embeddings=True, embedding_weight=0.6, min_consecutive_detections=2
         )
         tracker = SwarmSort(config)
 
@@ -340,7 +340,7 @@ class TestEmbeddingBasedTracking:
     def test_embedding_history_management(self):
         """Test embedding history management in tracks."""
         config = SwarmSortConfig(
-            use_embeddings=True,
+            do_embeddings=True,
             max_embeddings_per_track=3,  # Small limit for testing
             embedding_weight=0.4,
             min_consecutive_detections=2,
@@ -370,7 +370,7 @@ class TestEmbeddingBasedTracking:
     def test_embedding_similarity_thresholds(self):
         """Test embedding similarity thresholds for association."""
         config = SwarmSortConfig(
-            use_embeddings=True,
+            do_embeddings=True,
             embedding_weight=0.9,  # Very high weight
             max_distance=200.0,  # Large position tolerance
             min_consecutive_detections=1,  # Immediate tracking
@@ -402,7 +402,7 @@ class TestEmbeddingBasedTracking:
 
     def test_embedding_normalization(self):
         """Test embedding normalization and preprocessing."""
-        config = SwarmSortConfig(use_embeddings=True)
+        config = SwarmSortConfig(do_embeddings=True)
         tracker = SwarmSort(config)
 
         # Test different embedding magnitudes
@@ -433,7 +433,7 @@ class TestEmbeddingEdgeCases:
 
     def test_very_high_dimensional_embeddings(self):
         """Test handling of very high dimensional embeddings."""
-        config = SwarmSortConfig(use_embeddings=True, min_consecutive_detections=1)
+        config = SwarmSortConfig(do_embeddings=True, min_consecutive_detections=1)
         tracker = SwarmSort(config)
 
         # Test progressively larger dimensions
@@ -453,7 +453,7 @@ class TestEmbeddingEdgeCases:
 
     def test_embedding_with_special_values(self):
         """Test embeddings containing special float values."""
-        config = SwarmSortConfig(use_embeddings=True)
+        config = SwarmSortConfig(do_embeddings=True)
         tracker = SwarmSort(config)
 
         # Test embeddings with special values
@@ -481,7 +481,7 @@ class TestEmbeddingEdgeCases:
     def test_embedding_consistency_across_updates(self):
         """Test embedding consistency in tracking."""
         config = SwarmSortConfig(
-            use_embeddings=True,
+            do_embeddings=True,
             embedding_weight=0.7,
             min_consecutive_detections=2,
             max_embeddings_per_track=5,
@@ -556,7 +556,7 @@ class TestEmbeddingEdgeCases:
     def test_embedding_memory_efficiency(self):
         """Test memory efficiency of embedding storage."""
         config = SwarmSortConfig(
-            use_embeddings=True, max_embeddings_per_track=10, min_consecutive_detections=1
+            do_embeddings=True, max_embeddings_per_track=10, min_consecutive_detections=1
         )
         tracker = SwarmSort(config)
 
@@ -733,7 +733,7 @@ class TestEmbeddingIntegrationScenarios:
     def test_multi_class_embedding_tracking(self):
         """Test tracking multiple object classes with different embedding characteristics."""
         config = SwarmSortConfig(
-            use_embeddings=True, embedding_weight=0.5, min_consecutive_detections=2
+            do_embeddings=True, embedding_weight=0.5, min_consecutive_detections=2
         )
         tracker = SwarmSort(config)
 
@@ -807,7 +807,7 @@ class TestEmbeddingIntegrationScenarios:
     def test_embedding_based_reidentification(self):
         """Test re-identification using embeddings."""
         config = SwarmSortConfig(
-            use_embeddings=True,
+            do_embeddings=True,
             embedding_weight=0.6,
             reid_enabled=True,
             reid_embedding_threshold=0.3,
@@ -861,7 +861,7 @@ class TestEmbeddingIntegrationScenarios:
     def test_embedding_scaling_with_diverse_data(self):
         """Test embedding scaling with diverse real-world-like data."""
         config = SwarmSortConfig(
-            use_embeddings=True,
+            do_embeddings=True,
             embedding_weight=0.7,
             embedding_scaling_min_samples=50,  # Lower min samples to ensure scaler becomes ready
             init_conf_threshold=0.0,  # Allow all detections to create tracks
@@ -956,7 +956,7 @@ if __name__ == "__main__":
     )
 
     # Test tracker with embeddings
-    tracker = SwarmSort(SwarmSortConfig(use_embeddings=True, min_consecutive_detections=2))
+    tracker = SwarmSort(SwarmSortConfig(do_embeddings=True, min_consecutive_detections=2))
 
     np.random.seed(42)
     base_emb = np.random.randn(64).astype(np.float32)

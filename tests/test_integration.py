@@ -25,11 +25,11 @@ class TestSwarmSortTrackerIntegration:
     
     def test_constructor_with_config_only(self):
         """Test tracker creation with config only."""
-        config = SwarmSortConfig(max_distance=100.0, use_embeddings=False)
+        config = SwarmSortConfig(max_distance=100.0, do_embeddings=False)
         tracker = SwarmSortTracker(config=config)
         
         assert tracker.config.max_distance == 100.0
-        assert tracker.config.use_embeddings == False
+        assert tracker.config.do_embeddings == False
         assert tracker.embedding_extractor is None
 
     def test_constructor_with_dict_config(self):
@@ -42,12 +42,12 @@ class TestSwarmSortTrackerIntegration:
         tracker = SwarmSortTracker(config=config_dict)
         
         assert tracker.config.max_distance == 150.0
-        assert tracker.config.use_embeddings == True
+        assert tracker.config.do_embeddings == True
         assert tracker.config.embedding_weight == 0.8
 
     def test_constructor_with_embedding_type(self):
         """Test tracker creation with embedding type."""
-        config = SwarmSortConfig(use_embeddings=True)
+        config = SwarmSortConfig(do_embeddings=True)
         tracker = SwarmSortTracker(
             config=config,
             embedding_type='cupytexture',
@@ -282,7 +282,7 @@ class TestEndToEndIntegration:
         """Test complete tracking pipeline with color embedding."""
         # Setup tracker with color embedding
         config = SwarmSortConfig(
-            use_embeddings=True,
+            do_embeddings=True,
             embedding_weight=1.0,
             min_consecutive_detections=1,  # Allow immediate track creation
             max_track_age=5
@@ -318,7 +318,7 @@ class TestEndToEndIntegration:
     def test_multi_object_tracking_with_reid(self):
         """Test multi-object tracking with re-identification."""
         config = SwarmSortConfig(
-            use_embeddings=True,
+            do_embeddings=True,
             reid_enabled=True,
             min_consecutive_detections=2,
             max_track_age=10,
@@ -381,8 +381,7 @@ class TestEndToEndIntegration:
             'reid_embedding_threshold': 0.7,
             'reid_max_frames': 20,
             'min_consecutive_detections': 5,
-            'use_probabilistic_costs': True,
-            'duplicate_detection_threshold': 15.0
+            'use_probabilistic_costs': True
         }
         
         tracker = SwarmSortTracker(
@@ -394,7 +393,7 @@ class TestEndToEndIntegration:
         # Verify parameters are set correctly
         assert tracker.config.max_distance == 200.0
         assert tracker.config.max_track_age == 15
-        assert tracker.config.use_embeddings == True
+        assert tracker.config.do_embeddings == True
         assert tracker.config.embedding_weight == 0.8
         assert tracker.config.reid_enabled == True
 
@@ -446,11 +445,11 @@ class TestSwarmTrackerAdapter:
 
     def test_raw_tracker_creation(self):
         """Test RawTrackerSwarmSORT creation."""
-        config = {'max_track_age': 25, 'use_embeddings': False}
+        config = {'max_track_age': 25, 'do_embeddings': False}
         tracker = RawTrackerSwarmSORT(tracker_config=config)
         
         assert tracker.config.max_track_age == 25
-        assert tracker.config.use_embeddings == False
+        assert tracker.config.do_embeddings == False
 
     def test_adapter_detection_conversion(self):
         """Test detection format conversion in adapter."""
@@ -485,7 +484,7 @@ class TestSwarmTrackerAdapter:
         from swarmsort import SwarmSortTracker, SwarmSortConfig
         
         # Should work without errors
-        config = SwarmSortConfig(use_embeddings=False)  # Disable embeddings to avoid GPU deps
+        config = SwarmSortConfig(do_embeddings=False)  # Disable embeddings to avoid GPU deps
         tracker = SwarmSortTracker(config)
         assert tracker is not None
 

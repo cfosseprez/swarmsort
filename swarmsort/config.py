@@ -153,26 +153,26 @@ class SwarmSortConfig(BaseConfig):
     """
 
     # Core tracking parameters
-    max_distance: float = 80.0  # Maximum distance for association
+    max_distance: float = 150.0  # Maximum distance for association
     detection_conf_threshold: float = 0  # Minimum confidence for detections (general filter)
     max_track_age: int = 30  # Maximum frames a track can exist without detection before deletion
     
     # Kalman filter type
-    kalman_type: Literal["simple", "oc"] = "oc"  # Kalman filter type: simple or OC-SORT style
+    kalman_type: Literal["simple", "oc"] = "simple"  # Kalman filter type: simple or OC-SORT style
     
-    # OC-SORT collision handling parameters
-    collision_detection_enabled: bool = True  # Enable collision/occlusion detection
-    collision_distance_threshold: float = 30.0  # Distance threshold for collision detection
-    collision_velocity_threshold: float = -5.0  # Closing velocity threshold (negative = approaching)
-    collision_hypothesis_frames: int = 5  # Max frames to use multi-hypothesis tracking after collision
-    collision_appearance_weight: float = 2.0  # Weight boost for appearance features during collision recovery
-    collision_freeze_embeddings: bool = True  # Freeze embedding updates during collision/occlusion
-    collision_embedding_safety_distance: float = 50.0  # Distance below which to freeze embeddings
+    # Uncertainty-based cost system for smart collision handling
+    uncertainty_weight: float = 0.33  # Weight for uncertainty penalties (0 = disabled, typical 0.2-0.5)
+    local_density_radius: float = max_distance  # Radius for computing local track density
+    
+    # Embedding freeze (simplified density-based)
+    collision_freeze_embeddings: bool = True  # Freeze embedding updates in dense areas
+    embedding_freeze_density: int = 2  # Freeze embeddings when ≥N tracks within radius
 
     # Embedding parameters
-    use_embeddings: bool = True  # Whether to use embedding features
-    embedding_weight: float = 0.25  # Weight for embedding similarity in cost function
+    do_embeddings: bool = True  # Whether to compute and use embedding features
+    embedding_weight: float = 1  # Weight for embedding similarity in cost function
     max_embeddings_per_track: int = 15  # Maximum embeddings stored per track
+    embedding_function: str = "cupytexture"
     embedding_matching_method: Literal[
         "average", "weighted_average", "best_match"
     ] = "weighted_average"
@@ -182,33 +182,30 @@ class SwarmSortConfig(BaseConfig):
 
     # Assignment strategy parameters
     assignment_strategy: Literal["hungarian", "greedy", "hybrid"] = "hybrid"
-    greedy_threshold: float = max_distance/2  # Distance threshold for greedy assignment
+    greedy_threshold: float = max_distance/5  # Distance threshold for greedy assignment
     greedy_confidence_boost: float = 1  # Confidence multiplier for greedy matches
     hungarian_fallback_threshold: float = 1  # Multiplier of max_distance for Hungarian fallback
 
     # Re-identification (ReID) parameters
     reid_enabled: bool = True  # Enable re-identification of lost tracks
-    reid_max_distance: float = 120.0  # Maximum distance for ReID
+    reid_max_distance: float = 150.0  # Maximum distance for ReID
     reid_embedding_threshold: float = 0.3  # Embedding threshold for ReID (lower more permissive)
 
     # Track initialization parameters
     init_conf_threshold: float = 0  # Minimum confidence for track initialization (initialization filter)
-    min_consecutive_detections: int = 5  # Minimum consecutive detections to create track
+    min_consecutive_detections: int = 6  # Minimum consecutive detections to create track
     max_detection_gap: int = 2  # Maximum gap between detections for same pending track
     pending_detection_distance: float = 80.0  # Distance threshold for pending detection matching
 
-    # Duplicate detection removal
-    duplicate_detection_threshold: float = 15  # Distance threshold for duplicate removal
-
     # Embedding distance scaling
-    embedding_scaling_method: str = "min_robustmax"  # Method for scaling embedding distances
+    embedding_scaling_method: str = "min_robustmax"  # "robust_minmax" "min_robustmax" Method for scaling embedding distances
     embedding_scaling_update_rate: float = 0.05  # Update rate for online scaling statistics
     embedding_scaling_min_samples: int = 200  # Minimum samples before scaling is active
 
     # Debug options
     debug_embeddings: bool = False  # Enable embedding debugging output
     plot_embeddings: bool = False  # Generate embedding visualization plots
-    debug_timings: bool = False  # Enable timing debug output
+    debug_timings: bool = True  # Enable timing debug output
 
     def validate(self) -> None:
         """Validate configuration parameters."""
@@ -224,7 +221,7 @@ class SwarmSortConfig(BaseConfig):
         if not 0 <= self.detection_conf_threshold <= 1:
             raise ValueError("detection_conf_threshold must be between 0 and 1")
 
-        if self.use_embeddings and self.embedding_weight < 0:
+        if self.do_embeddings and self.embedding_weight < 0:
             raise ValueError("embedding_weight must be non-negative")
 
         if self.max_embeddings_per_track < 1:

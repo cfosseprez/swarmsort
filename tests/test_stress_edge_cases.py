@@ -132,7 +132,7 @@ class TestEdgeCaseInputs:
 
     def test_mismatched_embedding_dimensions(self):
         """Test handling of mismatched embedding dimensions."""
-        config = SwarmSortConfig(use_embeddings=True)
+        config = SwarmSortConfig(do_embeddings=True)
         tracker = SwarmSort(config)
 
         detections_mixed_dims = [
@@ -268,7 +268,6 @@ class TestHighLoadScenarios:
     def test_dense_object_clusters(self):
         """Test tracking objects in very dense clusters."""
         config = SwarmSortConfig(
-            duplicate_detection_threshold=5.0,  # Small threshold for dense clusters
             max_distance=15.0,
             min_consecutive_detections=2,
         )
@@ -369,7 +368,7 @@ class TestHighLoadScenarios:
                     "velocity": np.array([np.random.rand() * 2 - 1, np.random.rand() * 2 - 1])
                     * 0.5,
                     "embedding": np.random.randn(64).astype(np.float32)
-                    if config.use_embeddings
+                    if config.do_embeddings
                     else None,
                 }
             )
@@ -435,7 +434,7 @@ class TestResourceLimitTests:
         config = SwarmSortConfig(
             max_embeddings_per_track=3,  # Very limited
             max_track_age=5,  # Short age to force cleanup
-            use_embeddings=True,
+            do_embeddings=True,
         )
         tracker = SwarmSort(config)
 
@@ -552,7 +551,7 @@ class TestErrorRecoveryTests:
 
     def test_recovery_from_numerical_issues(self):
         """Test recovery from numerical instability."""
-        tracker = SwarmSort(SwarmSortConfig(use_embeddings=True))
+        tracker = SwarmSort(SwarmSortConfig(do_embeddings=True))
 
         # Normal operation first
         normal_detections = [
@@ -681,7 +680,7 @@ class TestIntegrationStressTests:
     def test_comprehensive_stress_scenario(self):
         """Comprehensive stress test combining multiple challenging conditions."""
         config = SwarmSortConfig(
-            use_embeddings=True,
+            do_embeddings=True,
             max_distance=60.0,
             embedding_weight=0.4,
             max_embeddings_per_track=5,

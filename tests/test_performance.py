@@ -164,7 +164,7 @@ class TestTrackerPerformance:
     def test_single_frame_update_performance(self, benchmark):
         """Benchmark single frame update performance."""
         config = SwarmSortConfig(
-            use_embeddings=True,
+            do_embeddings=True,
             embedding_weight=0.3,
             min_consecutive_detections=1,  # Immediate tracking for performance test
         )
@@ -196,7 +196,7 @@ class TestTrackerPerformance:
     @pytest.mark.parametrize("num_detections", [5, 10, 20, 50])
     def test_scaling_with_detection_count(self, benchmark, num_detections):
         """Test performance scaling with number of detections."""
-        config = SwarmSortConfig(use_embeddings=True, min_consecutive_detections=1)
+        config = SwarmSortConfig(do_embeddings=True, min_consecutive_detections=1)
         tracker = SwarmSort(config)
 
         # Create detections
@@ -220,7 +220,7 @@ class TestTrackerPerformance:
     def test_long_sequence_performance(self, benchmark, benchmark_data):
         """Test performance over a long sequence."""
         config = SwarmSortConfig(
-            use_embeddings=True, embedding_weight=0.3, min_consecutive_detections=2
+            do_embeddings=True, embedding_weight=0.3, min_consecutive_detections=2
         )
         tracker = SwarmSort(config)
 
@@ -242,7 +242,7 @@ class TestTrackerPerformance:
         profiler = MemoryProfiler()
         profiler.start()
 
-        config = SwarmSortConfig(use_embeddings=True, max_embeddings_per_track=10, max_track_age=20)
+        config = SwarmSortConfig(do_embeddings=True, max_embeddings_per_track=10, max_track_age=20)
         tracker = SwarmSort(config)
 
         # Run tracking for many frames
@@ -336,7 +336,7 @@ class TestScalabilityBenchmarks:
     def test_object_count_scalability(self, benchmark, num_objects):
         """Test performance scaling with number of objects."""
         config = SwarmSortConfig(
-            use_embeddings=True,
+            do_embeddings=True,
             embedding_weight=0.4,
             min_consecutive_detections=2,
             max_embeddings_per_track=8,
@@ -360,7 +360,7 @@ class TestScalabilityBenchmarks:
     def test_embedding_dimension_scalability(self, benchmark, embedding_dim):
         """Test performance scaling with embedding dimension."""
         config = SwarmSortConfig(
-            use_embeddings=True, embedding_weight=0.5, min_consecutive_detections=2
+            do_embeddings=True, embedding_weight=0.5, min_consecutive_detections=2
         )
 
         scenarios = self.generate_scenario(
@@ -381,7 +381,7 @@ class TestScalabilityBenchmarks:
     def test_long_sequence_scalability(self, benchmark):
         """Test performance with very long sequences."""
         config = SwarmSortConfig(
-            use_embeddings=True,
+            do_embeddings=True,
             embedding_weight=0.3,
             min_consecutive_detections=3,
             max_embeddings_per_track=10,
@@ -414,7 +414,7 @@ class TestMemoryBenchmarks:
         profiler = MemoryProfiler()
         profiler.start()
 
-        config = SwarmSortConfig(use_embeddings=True, max_embeddings_per_track=8, max_track_age=10)
+        config = SwarmSortConfig(do_embeddings=True, max_embeddings_per_track=8, max_track_age=10)
 
         memory_snapshots = []
 
@@ -461,7 +461,7 @@ class TestMemoryBenchmarks:
         profiler.start()
 
         config = SwarmSortConfig(
-            use_embeddings=True, max_embeddings_per_track=15, embedding_weight=0.4
+            do_embeddings=True, max_embeddings_per_track=15, embedding_weight=0.4
         )
         tracker = SwarmSort(config)
 
@@ -502,7 +502,7 @@ class TestMemoryBenchmarks:
         profiler.start()
 
         config = SwarmSortConfig(
-            use_embeddings=True, max_embeddings_per_track=5, max_track_age=8  # Limited history
+            do_embeddings=True, max_embeddings_per_track=5, max_track_age=8  # Limited history
         )
         tracker = SwarmSort(config)
 
@@ -564,12 +564,12 @@ class TestConfigurationPerformance:
         return scenarios
 
     @pytest.mark.benchmark
-    @pytest.mark.parametrize("use_embeddings", [True, False])
-    def test_embedding_vs_no_embedding_performance(self, benchmark, use_embeddings):
+    @pytest.mark.parametrize("do_embeddings", [True, False])
+    def test_embedding_vs_no_embedding_performance(self, benchmark, do_embeddings):
         """Compare performance with and without embeddings."""
         config = SwarmSortConfig(
-            use_embeddings=use_embeddings,
-            embedding_weight=0.4 if use_embeddings else 0.0,
+            do_embeddings=do_embeddings,
+            embedding_weight=0.4 if do_embeddings else 0.0,
             min_consecutive_detections=2,
         )
 
@@ -589,7 +589,7 @@ class TestConfigurationPerformance:
     def test_embedding_method_performance(self, benchmark, embedding_method):
         """Compare performance of different embedding methods."""
         config = SwarmSortConfig(
-            use_embeddings=True,
+            do_embeddings=True,
             embedding_matching_method=embedding_method,
             embedding_weight=0.4,
             min_consecutive_detections=2,
@@ -611,7 +611,7 @@ class TestConfigurationPerformance:
     def test_embedding_history_performance(self, benchmark, max_embeddings):
         """Test performance impact of embedding history length."""
         config = SwarmSortConfig(
-            use_embeddings=True,
+            do_embeddings=True,
             max_embeddings_per_track=max_embeddings,
             embedding_weight=0.4,
             min_consecutive_detections=2,
@@ -636,17 +636,17 @@ def run_performance_comparison():
 
     results = []
     configurations = [
-        ("Basic", SwarmSortConfig(use_embeddings=False, min_consecutive_detections=1)),
-        ("With Embeddings", SwarmSortConfig(use_embeddings=True, embedding_weight=0.3)),
+        ("Basic", SwarmSortConfig(do_embeddings=False, min_consecutive_detections=1)),
+        ("With Embeddings", SwarmSortConfig(do_embeddings=True, embedding_weight=0.3)),
         (
             "High Precision",
             SwarmSortConfig(
-                use_embeddings=True, embedding_weight=0.6, min_consecutive_detections=4
+                do_embeddings=True, embedding_weight=0.6, min_consecutive_detections=4
             ),
         ),
         (
             "Fast",
-            SwarmSortConfig(use_embeddings=False, max_distance=100, min_consecutive_detections=1),
+            SwarmSortConfig(do_embeddings=False, max_distance=100, min_consecutive_detections=1),
         ),
     ]
 
@@ -706,7 +706,7 @@ class TestIntegrationPerformance:
         
         tracker = benchmark(create_tracker)
         assert tracker.embedding_extractor is not None
-        assert tracker.config.use_embeddings == True
+        assert tracker.config.do_embeddings == True
 
     @pytest.mark.benchmark
     def test_color_embedding_performance(self, benchmark):
@@ -757,7 +757,7 @@ class TestIntegrationPerformance:
     @pytest.mark.benchmark
     def test_frame_parameter_performance(self, benchmark):
         """Test performance impact of passing frame to update method."""
-        config = SwarmSortConfig(use_embeddings=False)
+        config = SwarmSortConfig(do_embeddings=False)
         tracker = SwarmSortTracker(config=config)
         
         detection = Detection(

@@ -28,7 +28,7 @@ def default_config():
         max_distance=50.0,
         init_conf_threshold=0.8,
         min_consecutive_detections=2,
-        use_embeddings=True,
+        do_embeddings=True,
         embedding_weight=0.3,
     )
 
@@ -36,7 +36,7 @@ def default_config():
 @pytest.fixture
 def basic_config():
     """Basic configuration without embeddings for simple tests."""
-    return SwarmSortConfig(max_distance=50.0, use_embeddings=False, min_consecutive_detections=2)
+    return SwarmSortConfig(max_distance=50.0, do_embeddings=False, min_consecutive_detections=2)
 
 
 @pytest.fixture
@@ -44,7 +44,7 @@ def embedding_config():
     """Configuration optimized for embedding tests."""
     return SwarmSortConfig(
         max_distance=60.0,
-        use_embeddings=True,
+        do_embeddings=True,
         embedding_weight=0.5,
         embedding_matching_method="best_match",
         max_embeddings_per_track=10,
@@ -61,7 +61,7 @@ def strict_config():
         init_conf_threshold=0.9,
         min_consecutive_detections=4,
         detection_conf_threshold=0.8,
-        use_embeddings=True,
+        do_embeddings=True,
         embedding_weight=0.6,
     )
 
@@ -75,7 +75,7 @@ def permissive_config():
         min_consecutive_detections=1,
         detection_conf_threshold=0.1,
         max_track_age=50,
-        use_embeddings=False,
+        do_embeddings=False,
     )
 
 
@@ -270,7 +270,7 @@ def temp_config_file(tmp_path_factory):
     config_content = """
 max_distance: 75.0
 init_conf_threshold: 0.85
-use_embeddings: true
+do_embeddings: true
 embedding_weight: 0.4
 embedding_matching_method: "weighted_average"
 min_consecutive_detections: 3

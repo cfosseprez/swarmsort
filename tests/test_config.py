@@ -28,7 +28,7 @@ class TestConfigurationSystem:
             config.validate()
             
         with pytest.raises(ValueError, match="embedding_weight must be non-negative"):
-            config = SwarmSortConfig(use_embeddings=True, embedding_weight=-1.0)
+            config = SwarmSortConfig(do_embeddings=True, embedding_weight=-1.0)
             config.validate()
             
         with pytest.raises(ValueError, match="min_consecutive_detections must be at least 1"):
@@ -41,7 +41,7 @@ class TestConfigurationSystem:
         config_data = {
             'max_track_age': 25,
             'init_conf_threshold': 0.1,
-            'use_embeddings': False,
+            'do_embeddings': False,
             'reid_enabled': False,
         }
         
@@ -63,7 +63,7 @@ class TestConfigurationSystem:
         """Test configuration merging with priority."""
         runtime_config = {
             'max_track_age': 15,
-            'use_embeddings': False,
+            'do_embeddings': False,
         }
         
         # Test merging
@@ -74,14 +74,14 @@ class TestConfigurationSystem:
         )
         
         assert merged_config.max_track_age == 15
-        assert merged_config.use_embeddings == False
+        assert merged_config.do_embeddings == False
         assert merged_config.max_distance == 80.0  # Should keep default
 
     def test_config_serialization(self):
         """Test configuration serialization/deserialization."""
         config = SwarmSortConfig(
             max_track_age=25,
-            use_embeddings=True,
+            do_embeddings=True,
             reid_enabled=False,
             init_conf_threshold=0.1
         )
@@ -90,12 +90,12 @@ class TestConfigurationSystem:
         if hasattr(config, 'to_dict'):
             config_dict = config.to_dict()
             assert config_dict['max_track_age'] == 25
-            assert config_dict['use_embeddings'] == True
+            assert config_dict['do_embeddings'] == True
             assert config_dict['reid_enabled'] == False
         
         # Test basic attribute access
         assert config.max_track_age == 25
-        assert config.use_embeddings == True
+        assert config.do_embeddings == True
         assert config.reid_enabled == False
         assert config.init_conf_threshold == 0.1
 
