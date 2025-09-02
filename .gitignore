@@ -13,6 +13,7 @@ poetry.lock
 # Distribution
 dist/
 build/
+_build/
 *.egg-info/
 
 # Testing

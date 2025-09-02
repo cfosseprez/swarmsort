@@ -7,7 +7,7 @@ import os
 import sys
 
 # Add the package root to the Python path
-sys.path.insert(0, os.path.abspath('../../src'))  # adjust if your package lives elsewhere
+sys.path.insert(0, os.path.abspath('../src'))  # adjust if your package lives elsewhere
 
 # -- Project information -----------------------------------------------------
 project = 'SwarmSort'
