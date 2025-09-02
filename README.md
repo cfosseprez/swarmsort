@@ -7,7 +7,6 @@
 ![logo](https://raw.githubusercontent.com/cfosseprez/swarmsort/main/docs/_static/readme_assets/logo-swarmsort-horizontal.jpg)
 
 
-
 # SwarmSort
 
 **Multi-object tracking made simple, fast, and accurate.
