@@ -2,36 +2,24 @@
 [![PyPI Version](https://img.shields.io/pypi/v/swarmsort.svg)](https://pypi.org/project/swarmsort/)
 [![Python Version](https://img.shields.io/pypi/pyversions/swarmsort.svg)](https://pypi.org/project/swarmsort/)
 [![CI Tests](https://github.com/cfosseprez/swarmsort/actions/workflows/ci.yml/badge.svg)](https://github.com/cfosseprez/swarmsort/actions/workflows/ci.yml)
-[![GPL-2.0 License](https://img.shields.io/badge/License-GPL%202.0-blue.svg)](https://github.com/cfosseprez/swarmsort/blob/main/LICENSE)
-
+[![GPL-3.0 License](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://github.com/cfosseprez/swarmsort/blob/main/LICENSE)
 
 ![logo](https://raw.githubusercontent.com/cfosseprez/swarmsort/releases/download/0.0.0/logo-swarmsort-horizontal.jpg)
 
 # SwarmSort
 
-**Multi-object tracking made simple, fast, and accurate.** 🎯
+**Multi-object tracking made simple, fast, and accurate.
+Optimised for microscopy (top view) and hundreds of objects** 🎯
 
-SwarmSort is a modern Python library that keeps track of multiple moving objects in video streams. Whether you're counting people in a store, tracking players on a sports field, or monitoring vehicles on a highway, SwarmSort makes it easy.
+## Core Capabilities
 
-## 🎬 What Does It Do?
+SwarmSort solves the data association problem in multi-object tracking by:
+- **Maintaining temporal consistency** of object identities across frames using Kalman filtering and motion prediction
+- **Handling occlusions and reappearances** through re-identification with visual embeddings
+- **Preventing ID switches** in dense scenarios using uncertainty-aware cost computation and collision detection
+- **Adapting to scene dynamics** with hybrid assignment strategies that balance speed and accuracy
 
-Imagine you're watching a security camera feed with multiple people walking around. SwarmSort:
-1. **Assigns a unique ID** to each person (ID #1, ID #2, etc.)
-2. **Maintains those IDs** as people move around
-3. **Keeps the same ID** even if someone temporarily disappears (behind a pillar)
-4. **Never mixes up IDs** when people cross paths
-
-All of this happens in real-time, at 30+ FPS!
-
-## 🤔 Why SwarmSort?
-
-- **🚀 Fast**: Optimized with Numba JIT compilation and vectorized operations
-- **🎯 Accurate**: State-of-the-art tracking with uncertainty awareness
-- **🔧 Flexible**: Works with any object detector (YOLO, Detectron2, etc.)
-- **💪 Robust**: Handles occlusions, crowded scenes, and camera motion
-- **📊 Production-Ready**: Used in real applications, thoroughly tested
-- **🎨 Customizable**: Tune for your specific use case
-- **🖥️ Multi-Platform**: Works on Linux, Windows, macOS, and edge devices
+The library achieves real-time performance (30-120 FPS) through Numba JIT compilation, vectorized operations, and optional GPU acceleration.
 
 ## 📖 Documentation
 
@@ -469,72 +457,13 @@ for obj in recently_lost:
 
 SwarmSort is optimized for real-world performance:
 
-```python
-# Performance tips for different scenarios:
-
-# 1. Maximum Speed (>100 FPS possible)
-fast_config = SwarmSortConfig(
-    assignment_strategy='greedy',      # Fastest assignment
-    do_embeddings=False,               # Skip visual features
-    kalman_type='simple',              # Simple motion model
-    min_consecutive_detections=2,      # Quick initialization
-)
-
-# 2. Balanced Performance (30-60 FPS)
-balanced_config = SwarmSortConfig(
-    assignment_strategy='hybrid',      # Smart assignment
-    do_embeddings=True,                # Use visual features
-    embedding_weight=0.5,              # Balance motion/appearance
-)
-
-# 3. Maximum Accuracy (for offline processing)
-accurate_config = SwarmSortConfig(
-    assignment_strategy='hungarian',   # Optimal assignment
-    do_embeddings=True,                # Full visual features
-    min_consecutive_detections=10,     # Very careful initialization
-    uncertainty_weight=0.5,            # Conservative tracking
-)
-```
-
-### 🎯 Performance Tricks
-
-```python
-# Trick 1: Process every N frames for speed
-frame_skip = 2  # Process every other frame
-for i, frame in enumerate(video):
-    if i % frame_skip == 0:
-        detections = detect(frame)
-        tracks = tracker.update(detections)
-    else:
-        # Predict positions without new detections
-        tracks = tracker.update([])
-
-# Trick 2: Limit tracking area
-def filter_detections(detections, roi):
-    """Only track objects in region of interest"""
-    filtered = []
-    x1, y1, x2, y2 = roi
-    for det in detections:
-        if x1 <= det.position[0] <= x2 and y1 <= det.position[1] <= y2:
-            filtered.append(det)
-    return filtered
-
-# Trick 3: Confidence filtering
-config = SwarmSortConfig(
-    detection_conf_threshold=0.5,  # Ignore weak detections
-    init_conf_threshold=0.7,       # Only start tracks for confident detections
-)
-```
-
-### 💪 Under the Hood: Technical Optimizations
-
 - **Numba JIT Compilation**: Math operations run at C speed
 - **Vectorized NumPy**: Batch operations instead of loops
 - **Smart Caching**: Reuses computed embeddings and distances
 - **Memory Pooling**: Reduces allocation overhead
 - **Early Exit Logic**: Skips unnecessary computations
 
-## 🖥️ GPU Acceleration (Optional)
+### 🖥️ GPU Acceleration (Optional)
 
 SwarmSort can use your GPU for even faster performance:
 
@@ -563,7 +492,6 @@ tracker = SwarmSortTracker(embedding_type='cupytexture', use_gpu=False)
 Typical performance on a mid-range system:
 - **CPU Only (i7-9700K)**: 45-60 FPS with 50 objects
 - **With GPU (RTX 2070)**: 80-120 FPS with 50 objects
-- **Raspberry Pi 4**: 15-20 FPS with 20 objects
 
 Memory usage:
 - ~50MB base memory
@@ -813,7 +741,7 @@ dance_config = SwarmSortConfig(
 )
 
 # What happens:
-# 1. Two dancers approach each other
+# 1. Two Paramecium approach each other
 # 2. SwarmSort detects they're getting close
 # 3. Visual features are "frozen" - relies on motion only
 # 4. Prevents mixing up their identities
@@ -834,11 +762,8 @@ config = SwarmSortConfig(
 # 2. Ambiguous cases: Falls back to optimal Hungarian algorithm
 # 3. Best of both: Fast AND accurate
 
-# For maximum speed (real-time systems):
-config.assignment_strategy = 'greedy'  # Faster, slightly less accurate
 
-# For maximum accuracy (offline processing):
-config.assignment_strategy = 'hungarian'  # Slower, optimal matching
+config.assignment_strategy = 'hybrid'  # optimal matching
 ```
 
 ### 🔍 Re-Identification: Bringing Lost Objects Back
@@ -905,21 +830,14 @@ config = SwarmSortConfig(
 ```python
 # Solution: Keep tracks alive longer
 config = SwarmSortConfig(
-    max_track_age=60,  # Keep for 2 seconds at 30 FPS (was 30)
+    max_track_age=30,  # Keep for 2 seconds at 30 FPS (was 30)
     reid_enabled=True,  # Try to re-identify lost tracks
 )
 ```
 
 **Q: Performance is too slow**
-```python
-# Solution: Optimize for speed
-config = SwarmSortConfig(
-    assignment_strategy='greedy',      # Faster than 'hybrid'
-    do_embeddings=False,               # Skip visual features
-    detection_conf_threshold=0.5,      # Process fewer detections
-)
-# Also consider processing every other frame
-```
+Consider processing every other frame
+
 
 ### 💡 Pro Tips
 
@@ -931,13 +849,7 @@ config = SwarmSortConfig(
 
 ## Examples
 
-See the `examples/` directory for comprehensive usage examples:
-
-- `basic_usage.py`: Complete examples with visualization
-- `multi_camera_tracking.py`: Track across multiple cameras
-- `crowd_tracking.py`: Dense crowd scenarios
-- `vehicle_tracking.py`: Highway and parking lot examples
-- `sports_tracking.py`: Fast-moving objects in sports
+See the `examples/` directory for comprehensive usage examples.
 
 ## Testing
 

@@ -30,7 +30,6 @@ Key Features
 - **GPU-accelerated embeddings** with CuPy support.
 - **Flexible assignment strategies**: hybrid, greedy, Hungarian fallback.
 - **Collision-free tracking** with optional embedding freeze.
-- **2D & 3D tracking support**.
 - **Extensive configuration** through `SwarmSortConfig`.
 
 API Reference
