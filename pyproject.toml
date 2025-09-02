@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "swarmsort"
-version = "0.1.2"
+version = "0.1.3"
 description = "Standalone SwarmSort multi-object tracker with deep learning embeddings"
 authors = ["Charles Fosseprez <charles.fosseprez.pro@gmail.com>"]
 license = "GPL-3.0-or-later"
@@ -80,3 +80,10 @@ isort = "^5.12.0"
 bandit = "^1.7.5"
 safety = "^2.3.5"
 psutil = "^5.9.5"
+
+[tool.poetry.group.docs.dependencies]
+sphinx = "^7.0"
+sphinx-rtd-theme = "^1.3"
+myst-parser = "^2.0"
+sphinx-copybutton = "^0.5.2"
+sphinx-autodoc-typehints = "^2.0.0"
