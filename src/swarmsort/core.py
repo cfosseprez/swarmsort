@@ -1482,10 +1482,10 @@ class SwarmSortTracker:
         self.debug_timings = getattr(self.config, "debug_timings", False)
 
         # Storage
-        self.tracks = {}
-        self.pending_detections = []  # INITIALIZATION LOGIC!
-        self.next_id = 1
-        self.frame_count = 0
+        self._tracks = {}
+        self._pending_detections = []  # INITIALIZATION LOGIC!
+        self._next_id = 1
+        self._frame_count = 0
 
         # NEW: Store assignment methods for debugging/analysis
         self._assignment_methods = {}
@@ -1507,8 +1507,9 @@ class SwarmSortTracker:
         self._frame_det_embeddings_valid = -1  # Track which frame embeddings are valid for
 
         logger.info(
-            "Initialized SwarmSortTracker with parameters: %s",
-            ", ".join(f"{k}={v}" for k, v in vars(self).items())
+            f"\033[0;38;5;45mInitialized SwarmSortTracker with parameters:\n"
+            + "\n".join(f"{k}={v}" for k, v in vars(self).items() if not k.startswith("_") and k != "config")
+            + "\033[0m"
         )
 
     def _create_new_track(self, track_id: int, position: np.ndarray) -> FastTrackState:
@@ -1545,7 +1546,7 @@ class SwarmSortTracker:
 
     def update(self, detections: List[Detection], frame: Optional[np.ndarray] = None) -> List[TrackedObject]:
         """Main update with optional timing per call"""
-        self.frame_count += 1
+        self._frame_count += 1
 
         self.timings = {}
         timer = Timer()
@@ -1570,7 +1571,7 @@ class SwarmSortTracker:
         if not valid_detections:
             return self._handle_empty_frame()
 
-        if self.debug_embeddings and self.frame_count % 10 == 0:
+        if self.debug_embeddings and self._frame_count % 10 == 0:
             start("debug_embeddings")
             self._debug_embeddings(valid_detections)
             stop("debug_embeddings")
@@ -1622,7 +1623,7 @@ class SwarmSortTracker:
         self._handle_unmatched_tracks(unmatched_tracks)
         stop("handle_unmatched_tracks")
 
-        if self.reid_enabled and any(track.misses > 0 for track in self.tracks.values()):
+        if self.reid_enabled and any(track.misses > 0 for track in self._tracks.values()):
             start("reid")
             reid_matches = self._attempt_reid(valid_detections, unmatched_dets)
             unmatched_dets = [idx for idx in unmatched_dets if idx not in reid_matches]
@@ -1651,7 +1652,7 @@ class SwarmSortTracker:
                     formatted_timings[k] = v  # Already formatted
                 else:
                     formatted_timings[k] = f"{v * 1000:.2f} ms"
-            print(f"[Frame {self.frame_count}] Timings:", formatted_timings)
+            print(f"[Frame {self._frame_count}] Timings:", formatted_timings)
 
         return result
 
@@ -1678,9 +1679,9 @@ class SwarmSortTracker:
         )
 
         # Extract pending positions for vectorized comparison
-        if self.pending_detections:
+        if self._pending_detections:
             pending_positions = np.array(
-                [pending.average_position for pending in self.pending_detections], dtype=np.float32
+                [pending.average_position for pending in self._pending_detections], dtype=np.float32
             )
 
             # Vectorized distance computation: (n_dets, n_pending)
@@ -1709,7 +1710,7 @@ class SwarmSortTracker:
                         bbox = getattr(detection, "bbox", None)
 
                         self._update_pending_detection(
-                            self.pending_detections[pending_idx], position, embedding, bbox
+                            self._pending_detections[pending_idx], position, embedding, bbox
                         )
                     # else: skip this detection (another detection already matched this pending)
                 else:
@@ -1726,11 +1727,11 @@ class SwarmSortTracker:
                         if bbox is not None
                         else np.zeros(4, dtype=np.float32),
                         confidence=det_conf,
-                        first_seen_frame=self.frame_count,
-                        last_seen_frame=self.frame_count,
+                        first_seen_frame=self._frame_count,
+                        last_seen_frame=self._frame_count,
                         average_position=position.copy(),
                     )
-                    self.pending_detections.append(new_pending)
+                    self._pending_detections.append(new_pending)
         else:
             # No existing pending detections - create new ones for all initialization-eligible detections
             for det_idx, detection in init_eligible_detections:
@@ -1746,11 +1747,11 @@ class SwarmSortTracker:
                     if bbox is not None
                     else np.zeros(4, dtype=np.float32),
                     confidence=det_conf,
-                    first_seen_frame=self.frame_count,
-                    last_seen_frame=self.frame_count,
+                    first_seen_frame=self._frame_count,
+                    last_seen_frame=self._frame_count,
                     average_position=position.copy(),
                 )
-                self.pending_detections.append(new_pending)
+                self._pending_detections.append(new_pending)
 
     def _update_pending_detection(
         self,
@@ -1782,8 +1783,8 @@ class SwarmSortTracker:
                 pending.embedding = embedding.copy()
 
         # Update frame tracking
-        frame_gap = self.frame_count - pending.last_seen_frame
-        pending.last_seen_frame = self.frame_count
+        frame_gap = self._frame_count - pending.last_seen_frame
+        pending.last_seen_frame = self._frame_count
         pending.total_detections += 1
 
         if frame_gap == 1:  # Consecutive frame
@@ -1795,8 +1796,8 @@ class SwarmSortTracker:
         """Update pending detections and promote to tracks"""
         detections_to_remove = []
 
-        for i, pending in enumerate(self.pending_detections):
-            frame_gap = self.frame_count - pending.last_seen_frame
+        for i, pending in enumerate(self._pending_detections):
+            frame_gap = self._frame_count - pending.last_seen_frame
 
             # Check if pending detection should become a track
             if (
@@ -1814,11 +1815,11 @@ class SwarmSortTracker:
 
         # Remove in reverse order
         for i in reversed(detections_to_remove):
-            del self.pending_detections[i]
+            del self._pending_detections[i]
 
     def _create_track_from_pending(self, pending: PendingDetection):
         """Create track from pending detection with proper embedding setup"""
-        new_track = FastTrackState(id=self.next_id, position=pending.average_position.copy(), kalman_type=self.kalman_type)
+        new_track = FastTrackState(id=self._next_id, position=pending.average_position.copy(), kalman_type=self.kalman_type)
 
         # IMPORTANT: Set embedding parameters
         new_track.set_embedding_params(
@@ -1834,31 +1835,31 @@ class SwarmSortTracker:
             pending.average_position,
             pending.embedding,  # This will add to history again, but that's ok
             pending.bbox,
-            self.frame_count,
+            self._frame_count,
             pending.confidence,
         )
 
         new_track.hits = min(pending.total_detections, 3)
         new_track.age = pending.consecutive_frames
 
-        self.tracks[self.next_id] = new_track
+        self._tracks[self._next_id] = new_track
 
         if self.debug_embeddings:
-            logger.info(f"Created track {self.next_id} from pending detection")
+            logger.info(f"Created track {self._next_id} from pending detection")
             logger.info(f"  Embedding method: {self.embedding_matching_method}")
             logger.info(f"  Initial embeddings: {len(new_track.embedding_history)}")
 
-        self.next_id += 1
+        self._next_id += 1
 
     def _fast_assignment(self, detections, timer=None, start=None, stop=None):
         """OPTIMIZED assignment with spatial filtering"""
         n_dets = len(detections)
-        n_tracks = len(self.tracks)
+        n_tracks = len(self._tracks)
 
         if n_tracks == 0:
             return [], list(range(n_dets)), []
 
-        tracks = list(self.tracks.values())
+        tracks = list(self._tracks.values())
 
         # Extract positions
         det_positions = np.array(
@@ -1894,7 +1895,7 @@ class SwarmSortTracker:
 
             if len(feasible_pairs[0]) > 0:
                 # Get embeddings (reuse normalized ones from frame cache)
-                if self._frame_det_embeddings_valid != self.frame_count:
+                if self._frame_det_embeddings_valid != self._frame_count:
                     # Normalize once per frame
                     emb_dim = (
                         len(detections[0].embedding)
@@ -1913,7 +1914,7 @@ class SwarmSortTracker:
                         emb = np.asarray(det.embedding, dtype=np.float32)
                         norm = np.linalg.norm(emb)
                         self._reusable_det_embeddings[i] = emb / norm if norm > 0 else emb
-                    self._frame_det_embeddings_valid = self.frame_count
+                    self._frame_det_embeddings_valid = self._frame_count
 
                 det_embeddings = self._reusable_det_embeddings[:n_dets]
 
@@ -2014,12 +2015,12 @@ class SwarmSortTracker:
     def _fast_assignment_probabilistic(self, detections, timer=None, start=None, stop=None):
         """probabilistic assignment with proper multi-embedding support"""
         n_dets = len(detections)
-        n_tracks = len(self.tracks)
+        n_tracks = len(self._tracks)
 
         if n_tracks == 0:
             return [], list(range(n_dets)), []
 
-        tracks = list(self.tracks.values())
+        tracks = list(self._tracks.values())
 
         # Extract positions
         det_positions = np.array(
@@ -2087,7 +2088,7 @@ class SwarmSortTracker:
 
         embedding_median = np.median(scaled_embedding_matrix)
         track_frames_since_detection = np.array(
-            [self.frame_count - track.last_detection_frame for track in tracks], dtype=np.float32
+            [self._frame_count - track.last_detection_frame for track in tracks], dtype=np.float32
         )
 
         cost_matrix = compute_probabilistic_cost_matrix_vectorized(
@@ -2134,12 +2135,12 @@ class SwarmSortTracker:
         Reduces ID switching by prioritizing high-confidence assignments.
         """
         n_dets = len(detections)
-        n_tracks = len(self.tracks)
+        n_tracks = len(self._tracks)
 
         if n_tracks == 0:
             return [], list(range(n_dets)), []
 
-        tracks = list(self.tracks.values())
+        tracks = list(self._tracks.values())
 
         # Extract positions (same as existing methods)
         det_positions = np.array([det.position.flatten()[:2] for det in detections], dtype=np.float32)
@@ -2273,12 +2274,12 @@ class SwarmSortTracker:
         OPTIMIZED Pure greedy assignment with full logic but faster implementation.
         """
         n_dets = len(detections)
-        n_tracks = len(self.tracks)
+        n_tracks = len(self._tracks)
 
         if n_tracks == 0:
             return [], list(range(n_dets)), []
 
-        tracks = list(self.tracks.values())
+        tracks = list(self._tracks.values())
 
         # Same setup as hybrid but with pure greedy logic
         det_positions = np.array([det.position.flatten()[:2] for det in detections], dtype=np.float32)
@@ -2365,15 +2366,15 @@ class SwarmSortTracker:
         if not detections:
             return
 
-        logger.info(f"=== EMBEDDING DEBUG WITH SCALING COMPARISON (Frame {self.frame_count}) ===")
+        logger.info(f"=== EMBEDDING DEBUG WITH SCALING COMPARISON (Frame {self._frame_count}) ===")
 
         det_with_emb = [
             det for det in detections if hasattr(det, "embedding") and det.embedding is not None
         ]
-        tracks_with_emb = [t for t in self.tracks.values() if t.avg_embedding is not None]
+        tracks_with_emb = [t for t in self._tracks.values() if t.avg_embedding is not None]
 
         logger.info(f"Detections: {len(detections)}, With embeddings: {len(det_with_emb)}")
-        logger.info(f"Active tracks: {len(self.tracks)}, With embeddings: {len(tracks_with_emb)}")
+        logger.info(f"Active tracks: {len(self._tracks)}, With embeddings: {len(tracks_with_emb)}")
 
         if det_with_emb and tracks_with_emb:
             # Normalize embeddings (same as in assignment)
@@ -2442,7 +2443,7 @@ class SwarmSortTracker:
         if not matches:
             return
 
-        tracks = list(self.tracks.values())
+        tracks = list(self._tracks.values())
 
         for det_idx, track_idx in matches:
             detection = detections[det_idx]
@@ -2451,11 +2452,11 @@ class SwarmSortTracker:
             position = detection.position.flatten()[:2].astype(np.float32)
 
             # Update observation history BEFORE spatial update
-            track.update_observation_history(position, self.frame_count)
+            track.update_observation_history(position, self._frame_count)
 
             # Rest of the existing update logic...
             track.last_detection_pos = position
-            track.last_detection_frame = self.frame_count
+            track.last_detection_frame = self._frame_count
             track.detection_confidence = detection.confidence
             track.confidence_score = detection.confidence
 
@@ -2490,7 +2491,7 @@ class SwarmSortTracker:
 
     def _update_embedding_freeze_status(self):
         """OPTIMIZED vectorized density-based embedding freeze status"""
-        if not self.collision_freeze_embeddings or len(self.tracks) < 2:
+        if not self.collision_freeze_embeddings or len(self._tracks) < 2:
             return
         
         # Only check freeze status every N frames for performance
@@ -2498,7 +2499,7 @@ class SwarmSortTracker:
         if self._freeze_frame_count % self._freeze_check_interval != 0:
             return
         
-        tracks = list(self.tracks.values())
+        tracks = list(self._tracks.values())
         n_tracks = len(tracks)
         
         # Vectorized distance computation using broadcasting
@@ -2583,7 +2584,7 @@ class SwarmSortTracker:
 
     def _handle_unmatched_tracks(self, unmatched_track_indices):
         """Handle unmatched tracks - predict position and increment miss counter"""
-        tracks = list(self.tracks.values())
+        tracks = list(self._tracks.values())
 
         for track_idx in unmatched_track_indices:
             if track_idx < len(tracks):
@@ -2607,7 +2608,7 @@ class SwarmSortTracker:
 
         # Filter tracks that are missing detections but still eligible for ReID
         valid_reid_tracks = []
-        for track_id, track in self.tracks.items():
+        for track_id, track in self._tracks.items():
             if (
                 track.misses > 0
                 and track.confirmed
@@ -2692,7 +2693,7 @@ class SwarmSortTracker:
         if self.use_probabilistic_costs:
             # For probabilistic ReID, need additional parameters
             track_frames_since_detection = np.array(
-                [self.frame_count - track.last_detection_frame for _, track in valid_reid_tracks],
+                [self._frame_count - track.last_detection_frame for _, track in valid_reid_tracks],
                 dtype=np.float32,
             )
             embedding_median = (
@@ -2773,9 +2774,9 @@ class SwarmSortTracker:
                 det_conf = self._get_detection_confidence(detection)
 
                 best_track.update_with_detection(
-                    position, embedding, bbox, self.frame_count, det_conf
+                    position, embedding, bbox, self._frame_count, det_conf
                 )
-                # Track is already in self.tracks, no need to move it
+                # Track is already in self._tracks, no need to move it
                 reid_matches.append(original_det_idx)
 
         end_assignment = time.perf_counter() if self.debug_timings else None
@@ -2784,7 +2785,7 @@ class SwarmSortTracker:
 
     def _handle_empty_frame(self):
         """Handle empty frame"""
-        for track in self.tracks.values():
+        for track in self._tracks.values():
             track.predict_only()
         self._update_pending_detections()
         self._cleanup_tracks()
@@ -2794,20 +2795,20 @@ class SwarmSortTracker:
         """Remove old tracks from both active and lost, handle ReID transitions"""
         to_remove = []
 
-        for track_id, track in self.tracks.items():
+        for track_id, track in self._tracks.items():
             if track.misses > self.max_track_age or (not track.confirmed and track.misses > 3):
                 # Remove tracks that are too old or unconfirmed with too many misses
                 to_remove.append(track_id)
 
         # Remove tracks that should be deleted
         for track_id in to_remove:
-            if track_id in self.tracks:
-                del self.tracks[track_id]
+            if track_id in self._tracks:
+                del self._tracks[track_id]
 
     def _get_results(self) -> List[TrackedObject]:
         """Get tracking results converted to TrackedObject instances"""
         results = []
-        for track in self.tracks.values():
+        for track in self._tracks.values():
             # Only return confirmed tracks that are currently alive (detected this frame)
             # This ensures only truly active tracks are returned
             if track.confirmed and track.misses == 0:
@@ -2839,7 +2840,7 @@ class SwarmSortTracker:
             List of TrackedObject instances for recently lost tracks
         """
         results = []
-        for track in self.tracks.values():
+        for track in self._tracks.values():
             # Return confirmed tracks that are recently lost (missed but within threshold)
             if track.confirmed and 0 < track.misses <= max_frames_lost:
                 # Convert FastTrackState to TrackedObject
@@ -2879,21 +2880,30 @@ class SwarmSortTracker:
 
     def reset(self):
         """Reset tracker state."""
-        self.tracks.clear()
-        self.pending_detections.clear()
-        self.next_id = 1
-        self.frame_count = 0
+        self._tracks.clear()
+        self._pending_detections.clear()
+        self._next_id = 1
+        self._frame_count = 0
 
     def get_statistics(self) -> dict:
         """Get tracker statistics."""
         stats = {
-            "frame_count": self.frame_count,
-            "active_tracks": len(self.tracks),
-            "pending_detections": len(self.pending_detections),
-            "next_id": self.next_id,
+            "frame_count": self._frame_count,
+            "active_tracks": len(self._tracks),
+            "pending_detections": len(self._pending_detections),
+            "next_id": self._next_id,
             "assignment_strategy": self.assignment_strategy,
             "embedding_scaler_stats": self.embedding_scaler.get_statistics(),
         }
 
 
         return stats
+
+    def get_frame_count(self):
+        return self._frame_count
+
+    def get_tracks(self):
+        return self._tracks
+
+    def get_pendings(self):
+        return self._pending_detections
