@@ -834,7 +834,7 @@ class TestIntegrationPerformance:
                 assert abs(memory_increase) < 150, \
                     f"Memory usage at frame {frame_idx}: {memory_increase:.2f}MB"
 
-    @pytest.mark.skipif(os.getenv('CI'), reason="Skip flaky performance test in CI")
+    @pytest.mark.skipif(os.getenv('CI') is not None, reason="Skip flaky performance test in CI")
     @pytest.mark.parametrize("embedding_type", ['cupytexture', 'cupytexture_color', 'mega_cupytexture'])
     def test_all_embeddings_performance(self, embedding_type):
         """Test performance of all available embeddings."""

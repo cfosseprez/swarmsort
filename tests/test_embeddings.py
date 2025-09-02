@@ -350,7 +350,7 @@ class TestEmbeddingConsistency:
 class TestEmbeddingPerformance:
     """Test embedding performance characteristics."""
 
-    @pytest.mark.skipif(os.getenv('CI'), reason="Skip flaky performance test in CI")
+    @pytest.mark.skipif(os.getenv('CI') is not None, reason="Skip flaky performance test in CI")
     def test_batch_processing_efficiency(self):
         """Test that batch processing is more efficient than single processing."""
         import time

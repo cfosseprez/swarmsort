@@ -2808,7 +2808,9 @@ class SwarmSortTracker:
         """Get tracking results converted to TrackedObject instances"""
         results = []
         for track in self.tracks.values():
-            if track.confirmed:
+            # Only return confirmed tracks that are currently alive (detected this frame)
+            # This ensures only truly active tracks are returned
+            if track.confirmed and track.misses == 0:
                 # Convert FastTrackState to TrackedObject
                 tracked_obj = TrackedObject(
                     id=track.id,
@@ -2818,13 +2820,62 @@ class SwarmSortTracker:
                     age=track.age,
                     hits=track.hits,
                     time_since_update=track.misses,
-                    state=1 if track.confirmed else 0,
+                    state=1,  # Alive and confirmed
                     bbox=track.bbox.copy() if track.bbox is not None else None,
                     class_id=None,
                     predicted_position=(track.position + track.velocity).copy(),  # Add predicted position
                 )
                 results.append(tracked_obj)
         return results
+    
+    def get_recently_lost_tracks(self, max_frames_lost: int = 5) -> List[TrackedObject]:
+        """
+        Get tracks that were recently lost (not detected but still tracked).
+        
+        Args:
+            max_frames_lost: Maximum number of frames since last detection to consider "recently lost"
+            
+        Returns:
+            List of TrackedObject instances for recently lost tracks
+        """
+        results = []
+        for track in self.tracks.values():
+            # Return confirmed tracks that are recently lost (missed but within threshold)
+            if track.confirmed and 0 < track.misses <= max_frames_lost:
+                # Convert FastTrackState to TrackedObject
+                tracked_obj = TrackedObject(
+                    id=track.id,
+                    position=track.position.copy(),  # Last known position
+                    velocity=track.velocity.copy(),
+                    confidence=track.detection_confidence * (1.0 - track.misses / max_frames_lost),  # Decay confidence
+                    age=track.age,
+                    hits=track.hits,
+                    time_since_update=track.misses,
+                    state=2,  # Recently lost state
+                    bbox=track.bbox.copy() if track.bbox is not None else None,
+                    class_id=None,
+                    predicted_position=track.predicted_position.copy() if hasattr(track, 'predicted_position') else track.position.copy(),
+                )
+                results.append(tracked_obj)
+        return results
+
+    def get_all_active_tracks(self, max_frames_lost: int = 5) -> List[TrackedObject]:
+        """
+        Get all active tracks (both currently detected and recently lost).
+        
+        This is a convenience method that combines alive and recently lost tracks,
+        useful for visualization when you want to show tracks that have temporarily
+        lost detection but are still being tracked.
+        
+        Args:
+            max_frames_lost: Maximum frames since last detection for recently lost tracks
+            
+        Returns:
+            List of all active TrackedObject instances (alive + recently lost)
+        """
+        alive_tracks = self._get_results()
+        recently_lost = self.get_recently_lost_tracks(max_frames_lost)
+        return alive_tracks + recently_lost
 
     def reset(self):
         """Reset tracker state."""
