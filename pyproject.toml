@@ -1,9 +1,9 @@
 [tool.poetry]
 name = "swarmsort"
-version = "0.1.0"
+version = "0.1.1"
 description = "Standalone SwarmSort multi-object tracker with deep learning embeddings"
 authors = ["Charles Fosseprez <charles.fosseprez.pro@gmail.com>"]
-license = "MIT"
+license = "GPL-3.0-or-later"
 readme = "README.md"
 homepage = "https://github.com/cfosseprez/swarmsort"
 repository = "https://github.com/cfosseprez/swarmsort"
@@ -14,7 +14,7 @@ classifiers = [
     "Intended Audience :: Science/Research",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
     "Topic :: Scientific/Engineering :: Image Recognition",
-    "License :: OSI Approved :: GPL 3.0 or later",
+    "License :: OSI Approved :: GNU General Public License v3 or later (GPLv3+)",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",

@@ -229,7 +229,7 @@ all_active = tracker.get_all_active_tracks()  # Both alive and recently lost
 | `kalman_type` | 'simple' | Kalman filter type: 'simple' or 'oc' (OC-SORT style) |
 | **Uncertainty System** | | |
 | `uncertainty_weight` | 0.33 | Weight for uncertainty penalties (0 = disabled) |
-| `local_density_radius` | 150.0 | Radius for computing local track density |
+| `local_density_radius` | max_distance | Radius for computing local track density (defaults to max_distance) |
 | **Embeddings** | | |
 | `do_embeddings` | True | Whether to use embedding features |
 | `embedding_weight` | 1.0 | Weight for embedding similarity in cost function |
@@ -240,7 +240,7 @@ all_active = tracker.get_all_active_tracks()  # Both alive and recently lost
 | `embedding_freeze_density` | 1 | Freeze when ≥N tracks within radius |
 | **Assignment Strategy** | | |
 | `assignment_strategy` | 'hybrid' | Assignment method: 'hungarian', 'greedy', or 'hybrid' |
-| `greedy_threshold` | 30.0 | Distance threshold for greedy assignment |
+| `greedy_threshold` | 30.0 | Distance threshold for greedy assignment (default: max_distance/5) |
 | **Track Initialization** | | |
 | `min_consecutive_detections` | 6 | Minimum consecutive detections to create track |
 | `max_detection_gap` | 2 | Maximum gap between detections |
@@ -277,6 +277,210 @@ if is_gpu_available():
 else:
     print("Using CPU mode")
     tracker = SwarmSortTracker()
+```
+
+## Visualization Example
+
+Here's a complete example showing how to visualize tracking results:
+
+```python
+import cv2
+import numpy as np
+from swarmsort import SwarmSortTracker, Detection, SwarmSortConfig
+
+# Initialize tracker
+config = SwarmSortConfig(
+    do_embeddings=True,
+    assignment_strategy='hybrid',
+    uncertainty_weight=0.33
+)
+tracker = SwarmSortTracker(config)
+
+# Function to draw tracking results
+def draw_tracks(frame, tracked_objects, show_trails=True):
+    """Draw bounding boxes and tracking information on frame."""
+    # Store trail history (in production, store this outside the function)
+    if not hasattr(draw_tracks, 'trails'):
+        draw_tracks.trails = {}
+    
+    for obj in tracked_objects:
+        # Get track color (consistent color per ID)
+        color = np.random.RandomState(obj.id).randint(0, 255, 3).tolist()
+        
+        # Draw bounding box if available
+        if obj.bbox is not None:
+            x1, y1, x2, y2 = obj.bbox.astype(int)
+            cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+            
+            # Draw track ID and confidence
+            label = f"ID:{obj.id} ({obj.confidence:.2f})"
+            cv2.putText(frame, label, (x1, y1-10), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
+        
+        # Draw center point
+        cx, cy = obj.position.astype(int)
+        cv2.circle(frame, (cx, cy), 5, color, -1)
+        
+        # Update and draw trail
+        if show_trails:
+            if obj.id not in draw_tracks.trails:
+                draw_tracks.trails[obj.id] = []
+            draw_tracks.trails[obj.id].append((cx, cy))
+            
+            # Keep only last 30 points
+            draw_tracks.trails[obj.id] = draw_tracks.trails[obj.id][-30:]
+            
+            # Draw trail
+            points = draw_tracks.trails[obj.id]
+            for i in range(1, len(points)):
+                cv2.line(frame, points[i-1], points[i], color, 2)
+    
+    # Clean up old trails
+    active_ids = {obj.id for obj in tracked_objects}
+    draw_tracks.trails = {k: v for k, v in draw_tracks.trails.items() 
+                         if k in active_ids}
+    
+    return frame
+
+# Example usage with video
+cap = cv2.VideoCapture('video.mp4')  # Or use 0 for webcam
+
+while True:
+    ret, frame = cap.read()
+    if not ret:
+        break
+    
+    # Detect objects (replace with your detector)
+    # Here's a mock detection for demonstration
+    detections = [
+        Detection(
+            position=np.array([100, 200]),
+            confidence=0.9,
+            bbox=np.array([80, 180, 120, 220])
+        ),
+        Detection(
+            position=np.array([300, 400]),
+            confidence=0.85,
+            bbox=np.array([280, 380, 320, 420])
+        )
+    ]
+    
+    # Update tracker
+    tracked_objects = tracker.update(detections)
+    
+    # Draw results
+    frame = draw_tracks(frame, tracked_objects, show_trails=True)
+    
+    # Show recently lost tracks in different style
+    recently_lost = tracker.get_recently_lost_tracks(max_frames_lost=5)
+    for obj in recently_lost:
+        cx, cy = obj.position.astype(int)
+        cv2.circle(frame, (cx, cy), 8, (128, 128, 128), 1)  # Gray dashed circle
+        cv2.putText(frame, f"Lost:{obj.id}", (cx-20, cy-15),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.4, (128, 128, 128), 1)
+    
+    # Display frame
+    cv2.imshow('SwarmSort Tracking', frame)
+    if cv2.waitKey(1) & 0xFF == ord('q'):
+        break
+
+cap.release()
+cv2.destroyAllWindows()
+```
+
+### Simple Visualization with Matplotlib
+
+For a simpler visualization or for Jupyter notebooks:
+
+```python
+import matplotlib.pyplot as plt
+import matplotlib.patches as patches
+from matplotlib.animation import FuncAnimation
+import numpy as np
+from swarmsort import SwarmSortTracker, Detection
+
+# Create figure
+fig, ax = plt.subplots(figsize=(10, 8))
+ax.set_xlim(0, 640)
+ax.set_ylim(480, 0)  # Invert y-axis for image coordinates
+ax.set_aspect('equal')
+ax.set_title('SwarmSort Multi-Object Tracking')
+
+tracker = SwarmSortTracker()
+track_history = {}
+
+def update_plot(frame_num):
+    ax.clear()
+    ax.set_xlim(0, 640)
+    ax.set_ylim(480, 0)
+    ax.set_title(f'Frame {frame_num}')
+    
+    # Generate mock detections (replace with real detections)
+    detections = [
+        Detection(
+            position=np.array([320 + 100*np.sin(frame_num/10), 240]),
+            confidence=0.9,
+            bbox=np.array([300 + 100*np.sin(frame_num/10), 220, 
+                          340 + 100*np.sin(frame_num/10), 260])
+        ),
+        Detection(
+            position=np.array([200, 240 + 100*np.cos(frame_num/10)]),
+            confidence=0.85,
+            bbox=np.array([180, 220 + 100*np.cos(frame_num/10),
+                          220, 260 + 100*np.cos(frame_num/10)])
+        )
+    ]
+    
+    # Update tracker
+    tracked_objects = tracker.update(detections)
+    
+    # Plot tracked objects
+    for obj in tracked_objects:
+        # Get consistent color for track ID
+        np.random.seed(obj.id)
+        color = np.random.rand(3)
+        
+        # Draw bounding box
+        if obj.bbox is not None:
+            x1, y1, x2, y2 = obj.bbox
+            rect = patches.Rectangle((x1, y1), x2-x1, y2-y1,
+                                    linewidth=2, edgecolor=color, 
+                                    facecolor='none')
+            ax.add_patch(rect)
+        
+        # Draw center point
+        ax.scatter(obj.position[0], obj.position[1], 
+                  c=[color], s=100, marker='o')
+        
+        # Add ID label
+        ax.text(obj.position[0], obj.position[1]-20, f'ID:{obj.id}',
+               color=color, fontsize=12, ha='center', weight='bold')
+        
+        # Update history
+        if obj.id not in track_history:
+            track_history[obj.id] = []
+        track_history[obj.id].append(obj.position.copy())
+        
+        # Draw trail
+        if len(track_history[obj.id]) > 1:
+            trail = np.array(track_history[obj.id])
+            ax.plot(trail[:, 0], trail[:, 1], color=color, 
+                   linewidth=2, alpha=0.5)
+    
+    # Clean old tracks
+    active_ids = {obj.id for obj in tracked_objects}
+    for track_id in list(track_history.keys()):
+        if track_id not in active_ids:
+            if len(track_history[track_id]) > 50:  # Remove very old tracks
+                del track_history[track_id]
+
+# Create animation
+anim = FuncAnimation(fig, update_plot, frames=200, 
+                    interval=50, repeat=True)
+plt.show()
+
+# To save as video:
+# anim.save('tracking_visualization.mp4', writer='ffmpeg', fps=20)
 ```
 
 ## Advanced Features
