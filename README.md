@@ -1,7 +1,7 @@
 [![Documentation Status](https://readthedocs.org/projects/swarmsort/badge/?version=latest)](https://swarmsort.readthedocs.io/en/latest/)
 [![PyPI Version](https://img.shields.io/pypi/v/swarmsort.svg)](https://pypi.org/project/swarmsort/)
 [![Python Version](https://img.shields.io/pypi/pyversions/swarmsort.svg)](https://pypi.org/project/swarmsort/)
-[![CI Tests](https://github.com/cfosseprez/swarmsort/actions/workflows/ci.yml/badge.svg)](https://github.com/cfosseprez/swarmsort/actions/workflows/ci.yml)
+[![CI Tests](https://github.com/cfosseprez/swarmsort/actions/workflows/test.yml/badge.svg)](https://github.com/cfosseprez/swarmsort/actions/workflows/test.yml)
 [![GPL-3.0 License](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://github.com/cfosseprez/swarmsort/blob/main/LICENSE)
 
 ![logo](https://raw.githubusercontent.com/cfosseprez/swarmsort/main/docs/_static/readme_assets/logo-swarmsort-horizontal.jpg)
@@ -11,6 +11,9 @@
 
 **Multi-object tracking made simple, fast, and accurate.
 Optimised for microscopy (top view) and hundreds of objects** 🎯
+
+![tracking_gif_lighter](https://github.com/user-attachments/assets/206946bb-9553-405d-812f-4056afeecc28)
+*Real-time tracking of paramecia at 100 FPS over an entire arena with 150 individuals has never been easier*
 
 ## Core Capabilities
 
