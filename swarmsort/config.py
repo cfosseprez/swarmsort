@@ -166,7 +166,7 @@ class SwarmSortConfig(BaseConfig):
     
     # Embedding freeze (simplified density-based)
     collision_freeze_embeddings: bool = True  # Freeze embedding updates in dense areas
-    embedding_freeze_density: int = 2  # Freeze embeddings when ≥N tracks within radius
+    embedding_freeze_density: int = 1  # Freeze embeddings when ≥N tracks within radius
 
     # Embedding parameters
     do_embeddings: bool = True  # Whether to compute and use embedding features

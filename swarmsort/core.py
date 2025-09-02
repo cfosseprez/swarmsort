@@ -2488,7 +2488,7 @@ class SwarmSortTracker:
 
 
     def _update_embedding_freeze_status(self):
-        """Simplified density-based embedding freeze status"""
+        """OPTIMIZED vectorized density-based embedding freeze status"""
         if not self.collision_freeze_embeddings or len(self.tracks) < 2:
             return
         
@@ -2498,23 +2498,30 @@ class SwarmSortTracker:
             return
         
         tracks = list(self.tracks.values())
+        n_tracks = len(tracks)
         
-        for track in tracks:
-            # Count nearby tracks within local density radius
-            nearby_count = 0
-            for other_track in tracks:
-                if other_track.id != track.id:
-                    distance = np.linalg.norm(track.position - other_track.position)
-                    if distance < self.local_density_radius:
-                        nearby_count += 1
-            
-            should_freeze = nearby_count >= self.embedding_freeze_density
+        # Vectorized distance computation using broadcasting
+        positions = np.array([track.position for track in tracks], dtype=np.float32)
+        
+        # Compute all pairwise distances at once using broadcasting
+        # positions.shape = (n_tracks, 2)
+        # diff.shape = (n_tracks, n_tracks, 2) 
+        diff = positions[:, np.newaxis, :] - positions[np.newaxis, :, :]
+        distances = np.linalg.norm(diff, axis=2)  # shape: (n_tracks, n_tracks)
+        
+        # Count nearby tracks for each track (exclude self with diagonal mask)
+        nearby_mask = (distances < self.local_density_radius) & (distances > 0)  # exclude self
+        nearby_counts = np.sum(nearby_mask, axis=1)  # Count neighbors for each track
+        
+        # Update freeze status for all tracks
+        for i, track in enumerate(tracks):
+            should_freeze = nearby_counts[i] >= self.embedding_freeze_density
             
             if should_freeze and not track.embedding_frozen:
-                # Start freezing - save current embedding
+                # Start freezing - reference existing embedding (no copy!)
                 track.embedding_frozen = True
                 if len(track.embedding_history) > 0 and track.last_safe_embedding is None:
-                    track.last_safe_embedding = track.embedding_history[-1].copy()
+                    track.last_safe_embedding = track.embedding_history[-1]
                     
             elif not should_freeze and track.embedding_frozen:
                 # Safe to unfreeze - restore embeddings
