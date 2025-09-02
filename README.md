@@ -25,32 +25,37 @@ The library achieves real-time performance (30-120 FPS) through Numba JIT compil
 
 **[Full Documentation](https://swarmsort.readthedocs.io/en/latest/)**
 
-## 🚀 Key Features
+## Key Features
 
-### 🎯 **Smart & Accurate Tracking**
-- **Keeps track of multiple objects** even in crowded scenes - perfect for busy environments like airports, stadiums, or traffic monitoring
-- **Never loses track unnecessarily** - Our re-identification system can recognize and reconnect with temporarily lost objects (like when someone walks behind a pillar)
-- **Handles occlusions gracefully** - When objects overlap or hide each other, SwarmSort maintains identity consistency
+### Advanced Tracking Algorithms
+- **Uncertainty-based cost system** - Adaptive association costs based on track age, local density, and detection reliability
+- **Smart collision handling** - Density-based embedding freezing prevents ID switches in crowded scenarios
+- **Re-identification capability** - Recovers lost tracks using visual embeddings and motion prediction
+- **Hybrid assignment strategy** - Combines greedy matching for obvious associations with Hungarian algorithm for complex cases
 
-### ⚡ **Lightning Fast Performance**
-- **Real-time processing** - Track objects at 30+ FPS on standard hardware
-- **GPU acceleration available** - Get even faster performance with CUDA-enabled GPUs (optional - works great on CPU too!)
-- **Optimized algorithms** - Uses Numba JIT compilation and vectorized operations for maximum speed
+### Performance Optimization
+- **Real-time performance** - 30-120 FPS depending on configuration and hardware
+- **Numba JIT compilation** - Critical mathematical functions compiled to machine code
+- **Vectorized operations** - Batch processing using NumPy for efficient computation
+- **GPU acceleration** - Optional CUDA support via CuPy for embedding extraction
+- **Memory efficient** - Bounded memory usage with automatic cleanup of stale tracks
 
-### 🧠 **Intelligent Decision Making**
-- **Uncertainty-aware** - The tracker knows when it's confident and when it's not, leading to better decisions
-- **Adaptive to scenarios** - Automatically adjusts behavior in crowded vs sparse environments
-- **Smart collision prevention** - Prevents ID switches when objects get close together
+### Robust Motion Modeling
+- **Dual Kalman filter options** - Simple constant velocity or OC-SORT style acceleration model
+- **Adaptive motion prediction** - Handles both linear and non-linear motion patterns
+- **Occlusion handling** - Maintains tracks through temporary occlusions using motion prediction
 
-### 🔧 **Easy to Use & Customize**
-- **Simple API** - Get started with just 3 lines of code
-- **Flexible configuration** - Tune parameters for your specific use case (or use our optimized defaults)
-- **Works with any detector** - Compatible with YOLO, Detectron2, or any detection source
+### Flexible Integration
+- **Detector agnostic** - Works with any object detection source (YOLO, Detectron2, custom detectors)
+- **Configurable parameters** - Fine-tune behavior for specific domains (crowds, highways, microscopy)
+- **Multiple embedding methods** - Support for various visual feature extractors
+- **Comprehensive API** - Access to track states, lifecycle management, and detailed statistics
 
-### 📊 **Production Ready**
-- **Battle-tested** - Over 200+ unit tests ensure reliability
-- **Memory efficient** - Smart cleanup and bounded memory usage for long-running applications
-- **Detailed tracking info** - Get position, velocity, confidence, and history for each track
+### Production Ready
+- **Extensive test coverage** - 200+ unit tests covering edge cases and error conditions
+- **Cross-platform support** - Tested on Linux, Windows, macOS
+- **Detailed documentation** - Complete API reference with practical examples
+- **Active maintenance** - Regular updates and performance improvements
 
 ## 📦 Installation
 

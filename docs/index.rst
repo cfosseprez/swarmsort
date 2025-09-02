@@ -7,7 +7,7 @@ SwarmSort Documentation
 
 *A fast, flexible, and GPU-accelerated Python library for real-time multi-object tracking.*
 
-SwarmSort provides advanced tracking algorithms using embeddings, Kalman filtering, and collision-free assignment. It is highly configurable for 2D and 3D tracking scenarios.
+SwarmSort provides advanced tracking algorithms using embeddings, Kalman filtering, and collision-free assignment. It is highly configurable and easy to use.
 
 Quick Start
 -----------
