@@ -2904,6 +2904,41 @@ class SwarmSortTracker:
 
     def get_tracks(self):
         return self._tracks
+    
+    @property
+    def next_id(self):
+        """Get the next track ID."""
+        return self._next_id
+    
+    @next_id.setter
+    def next_id(self, value):
+        """Set the next track ID (for testing purposes)."""
+        self._next_id = value
+    
+    @property
+    def frame_count(self):
+        """Get the current frame count."""
+        return self._frame_count
+    
+    @frame_count.setter
+    def frame_count(self, value):
+        """Set the frame count (for testing purposes)."""
+        self._frame_count = value
+    
+    @property
+    def tracks(self):
+        """Get the tracks dictionary."""
+        return self._tracks
+    
+    @tracks.setter
+    def tracks(self, value):
+        """Set the tracks dictionary (for testing purposes)."""
+        self._tracks = value
+    
+    @property
+    def pending_detections(self):
+        """Get the pending detections list."""
+        return self._pending_detections
 
     def get_pendings(self):
         return self._pending_detections
