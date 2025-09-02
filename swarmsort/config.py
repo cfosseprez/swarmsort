@@ -205,7 +205,7 @@ class SwarmSortConfig(BaseConfig):
     # Debug options
     debug_embeddings: bool = False  # Enable embedding debugging output
     plot_embeddings: bool = False  # Generate embedding visualization plots
-    debug_timings: bool = True  # Enable timing debug output
+    debug_timings: bool = False  # Enable timing debug output
 
     def validate(self) -> None:
         """Validate configuration parameters."""

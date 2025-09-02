@@ -87,10 +87,18 @@ MOT20_CONFIG = SwarmSortConfig(
     min_consecutive_detections=3,     # Require 3 consecutive detections before confirming track (default)
 
     # Distance thresholds
-    max_distance=50.0,               # Maximum distance for track-detection association
+    max_distance=100.0,               # Maximum distance for track-detection association
     reid_enabled=True,                # Enable re-identification for lost tracks
     reid_max_distance=100.0,          # Maximum distance for ReID associations
     reid_embedding_threshold=0.4,     # Minimum embedding similarity for ReID (0-1, lower=more permissive)
+
+    # Kalman
+    kalman_type="oc",
+    assignment_strategy="hybrid",
+
+    # uncertainty
+    uncertainty_weight=0.1,
+    local_density_radius=20 ,
 )
 
 
