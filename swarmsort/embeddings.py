@@ -608,8 +608,8 @@ class CupyTextureEmbedding(EmbeddingExtractor):
                 gray = patch.astype(np.float32)
             features[0, :min(8, self._dim)] = [
                 np.mean(gray), np.std(gray), np.min(gray), np.max(gray),
-                np.mean(np.abs(cv2.Sobel(gray, cv2.CV_64F, 1, 0, ksize=3))),
-                np.mean(np.abs(cv2.Sobel(gray, cv2.CV_64F, 0, 1, ksize=3))),
+                np.mean(np.abs(cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3))),
+                np.mean(np.abs(cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=3))),
                 np.var(gray), np.max(gray) - np.min(gray)
             ][:min(8, self._dim)]
         return features[0]
@@ -650,8 +650,8 @@ class CupyTextureEmbedding(EmbeddingExtractor):
                 # Fill with basic statistics
                 features[i, :min(8, self._dim)] = [
                     np.mean(gray), np.std(gray), np.min(gray), np.max(gray),
-                    np.mean(np.abs(cv2.Sobel(gray, cv2.CV_64F, 1, 0, ksize=3))),
-                    np.mean(np.abs(cv2.Sobel(gray, cv2.CV_64F, 0, 1, ksize=3))),
+                    np.mean(np.abs(cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3))),
+                    np.mean(np.abs(cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=3))),
                     np.var(gray), np.max(gray) - np.min(gray)
                 ][:min(8, self._dim)]
 
@@ -1296,8 +1296,8 @@ class MegaCupyTextureEmbedding(EmbeddingExtractor):
         feature_idx += 4
         
         # Gradients (4 features) 
-        grad_x = cv2.Sobel(gray, cv2.CV_64F, 1, 0, ksize=3)
-        grad_y = cv2.Sobel(gray, cv2.CV_64F, 0, 1, ksize=3)
+        grad_x = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3)
+        grad_y = cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=3)
         features[feature_idx:feature_idx+4] = [
             np.mean(np.abs(grad_x)), np.std(grad_x),
             np.mean(np.abs(grad_y)), np.std(grad_y)
@@ -1325,7 +1325,7 @@ class MegaCupyTextureEmbedding(EmbeddingExtractor):
         feature_idx += 6
         
         # Simple texture features - fill remaining with basic texture stats
-        laplacian = cv2.Laplacian(gray, cv2.CV_64F)
+        laplacian = cv2.Laplacian(gray, cv2.CV_32F)
         remaining_features = self._dim - feature_idx
         if remaining_features > 0:
             # Fill remaining with Laplacian stats and zeros
