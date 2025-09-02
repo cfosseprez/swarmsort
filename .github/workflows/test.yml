@@ -50,11 +50,10 @@ jobs:
         key: venv-${{ runner.os }}-${{ matrix.python-version }}-${{ hashFiles('**/poetry.lock') }}
     
     - name: Install dependencies
-      # Run install only if no cache was found.
-      if: steps.cached-poetry-dependencies.outputs.cache-hit != 'true'
       run: poetry install --with dev --no-interaction
 
-
+    - name: Verify package installation
+      run: poetry run python -c "import swarmsort; print(swarmsort.__file__)"
 
     - name: Run linters and type checks
       if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.11'
