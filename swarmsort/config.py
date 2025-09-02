@@ -159,6 +159,13 @@ class SwarmSortConfig(BaseConfig):
     
     # Kalman filter type
     kalman_type: Literal["simple", "oc"] = "oc"  # Kalman filter type: simple or OC-SORT style
+    
+    # OC-SORT collision handling parameters
+    collision_detection_enabled: bool = True  # Enable collision/occlusion detection
+    collision_distance_threshold: float = 30.0  # Distance threshold for collision detection
+    collision_velocity_threshold: float = -5.0  # Closing velocity threshold (negative = approaching)
+    collision_hypothesis_frames: int = 5  # Max frames to use multi-hypothesis tracking after collision
+    collision_appearance_weight: float = 2.0  # Weight boost for appearance features during collision recovery
 
     # Embedding parameters
     use_embeddings: bool = True  # Whether to use embedding features

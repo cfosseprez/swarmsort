@@ -846,6 +846,121 @@ def compute_oc_sort_cost_matrix(
     return cost_matrix
 
 
+@nb.njit(fastmath=True, cache=True)
+def detect_collision_risk(
+    track_positions: np.ndarray,
+    track_velocities: np.ndarray,
+    collision_distance_threshold: float,
+    collision_velocity_threshold: float
+) -> np.ndarray:
+    """
+    Detect tracks likely to collide based on proximity and closing velocity.
+    Returns array of collision pairs as [track_i, track_j] indices.
+    """
+    n_tracks = len(track_positions)
+    max_pairs = n_tracks * (n_tracks - 1) // 2  # Maximum possible pairs
+    collision_pairs = np.empty((max_pairs, 2), dtype=np.int32)
+    num_pairs = 0
+    
+    for i in range(n_tracks):
+        for j in range(i + 1, n_tracks):
+            # Distance between tracks
+            distance = np.sqrt(
+                (track_positions[i, 0] - track_positions[j, 0])**2 +
+                (track_positions[i, 1] - track_positions[j, 1])**2
+            )
+            
+            if distance < collision_distance_threshold:
+                # Check if tracks are converging (closing velocity)
+                pos_diff = track_positions[i] - track_positions[j]
+                vel_diff = track_velocities[i] - track_velocities[j]
+                
+                # Dot product: negative means converging
+                closing_speed = np.dot(vel_diff, pos_diff)
+                
+                if closing_speed < collision_velocity_threshold:
+                    collision_pairs[num_pairs, 0] = i
+                    collision_pairs[num_pairs, 1] = j
+                    num_pairs += 1
+    
+    # Return only the used portion
+    return collision_pairs[:num_pairs]
+
+
+@nb.njit(fastmath=True, cache=True)
+def compute_collision_aware_cost_matrix(
+    det_positions: np.ndarray,
+    track_last_positions: np.ndarray,
+    track_velocities: np.ndarray,
+    track_misses: np.ndarray,
+    collision_risk_tracks: np.ndarray,  # Track indices at collision risk
+    frames_since_collision: np.ndarray,  # Frames since collision detected for each track
+    max_distance: float,
+    collision_hypothesis_frames: int = 5
+) -> np.ndarray:
+    """
+    Enhanced OC-SORT cost matrix with collision-aware multi-hypothesis tracking.
+    For tracks in collision, considers multiple movement hypotheses.
+    """
+    n_dets = det_positions.shape[0]
+    n_tracks = track_last_positions.shape[0]
+    cost_matrix = np.full((n_dets, n_tracks), np.inf, dtype=np.float32)
+    
+    # Convert to numba-compatible structure - can't use set() in numba
+    collision_risk_map = np.zeros(n_tracks, dtype=np.bool_)
+    for idx in collision_risk_tracks:
+        if idx < n_tracks:
+            collision_risk_map[idx] = True
+    
+    for i in range(n_dets):
+        for j in range(n_tracks):
+            min_cost = np.inf
+            
+            if collision_risk_map[j] and frames_since_collision[j] <= collision_hypothesis_frames:
+                # Multi-hypothesis tracking for collision-risk tracks
+                
+                # Hypothesis 1: Continued in same direction (standard OC-SORT)
+                h1_pos = track_last_positions[j] + track_velocities[j] * track_misses[j]
+                h1_cost = np.sqrt(
+                    (det_positions[i, 0] - h1_pos[0])**2 +
+                    (det_positions[i, 1] - h1_pos[1])**2
+                )
+                min_cost = min(min_cost, h1_cost)
+                
+                # Hypothesis 2: Reversed direction (collision effect)
+                h2_pos = track_last_positions[j] - track_velocities[j] * track_misses[j]
+                h2_cost = np.sqrt(
+                    (det_positions[i, 0] - h2_pos[0])**2 +
+                    (det_positions[i, 1] - h2_pos[1])**2
+                )
+                min_cost = min(min_cost, h2_cost)
+                
+                # Hypothesis 3: Stayed near collision point (stuck/slow)
+                h3_cost = np.sqrt(
+                    (det_positions[i, 0] - track_last_positions[j, 0])**2 +
+                    (det_positions[i, 1] - track_last_positions[j, 1])**2
+                )
+                min_cost = min(min_cost, h3_cost)
+                
+                # Use best hypothesis
+                cost = min_cost
+                
+            else:
+                # Standard OC-SORT cost computation
+                cost = np.sqrt(
+                    (det_positions[i, 0] - track_last_positions[j, 0])**2 +
+                    (det_positions[i, 1] - track_last_positions[j, 1])**2
+                )
+            
+            # Adaptive threshold based on misses
+            adaptive_threshold = max_distance * (1.0 + 0.2 * track_misses[j])
+            
+            if cost <= adaptive_threshold:
+                cost_matrix[i, j] = cost
+    
+    return cost_matrix
+
+
 # ============================================================================
 # NEW 3D ASSIGNMENT FUNCTIONS
 # ============================================================================
@@ -1027,6 +1142,11 @@ class FastTrackState:
     
     # Track type
     kalman_type: str = "simple"
+    
+    # Collision tracking
+    collision_detected: bool = False
+    frames_since_collision: int = 0
+    collision_partners: set = field(default_factory=set)  # IDs of tracks this collided with
 
     # Embedding history with configurable size
     embedding_history: deque = field(default_factory=lambda: deque(maxlen=5))
@@ -1450,6 +1570,13 @@ class SwarmSortTracker:
         
         # Kalman type
         self.kalman_type = getattr(self.config, "kalman_type", "simple")
+        
+        # Collision detection parameters
+        self.collision_detection_enabled = getattr(self.config, "collision_detection_enabled", True)
+        self.collision_distance_threshold = getattr(self.config, "collision_distance_threshold", 30.0)
+        self.collision_velocity_threshold = getattr(self.config, "collision_velocity_threshold", -5.0)
+        self.collision_hypothesis_frames = getattr(self.config, "collision_hypothesis_frames", 5)
+        self.collision_appearance_weight = getattr(self.config, "collision_appearance_weight", 2.0)
 
         # Anti-duplicate parameters
         self.duplicate_detection_threshold = self.config.duplicate_detection_threshold
@@ -1571,6 +1698,11 @@ class SwarmSortTracker:
                 norm = np.linalg.norm(emb)
                 if norm > 0:
                     det.embedding = emb / norm  # Store normalized version
+
+        # Detect and manage collisions (for OC-SORT)
+        start("collision_detection")
+        self._detect_and_manage_collisions()
+        stop("collision_detection")
 
         start("assignment")
         if self.assignment_strategy == "hungarian":
@@ -2572,6 +2704,61 @@ class SwarmSortTracker:
 
             if track.hits >= self.min_consecutive_detections:
                 track.confirmed = True
+
+    def _detect_and_manage_collisions(self):
+        """Detect collision risks and update collision state for tracks"""
+        if not self.collision_detection_enabled or self.kalman_type != "oc":
+            return
+            
+        if len(self.tracks) < 2:
+            return
+            
+        tracks = list(self.tracks.values())
+        
+        # Extract current positions and velocities
+        track_positions = np.array([t.position for t in tracks], dtype=np.float32)
+        track_velocities = np.array([t.velocity for t in tracks], dtype=np.float32)
+        
+        # Detect collision pairs
+        collision_pairs = detect_collision_risk(
+            track_positions,
+            track_velocities, 
+            self.collision_distance_threshold,
+            self.collision_velocity_threshold
+        )
+        
+        # Update collision state for all tracks
+        currently_colliding = set()
+        
+        for i, j in collision_pairs:
+            track_i = tracks[i]
+            track_j = tracks[j]
+            
+            # Mark both tracks as in collision
+            track_i.collision_detected = True
+            track_j.collision_detected = True
+            track_i.frames_since_collision = 0
+            track_j.frames_since_collision = 0
+            
+            # Track collision partners
+            track_i.collision_partners.add(track_j.id)
+            track_j.collision_partners.add(track_i.id)
+            
+            currently_colliding.add(track_i.id)
+            currently_colliding.add(track_j.id)
+        
+        # Update collision counters for all tracks
+        for track in tracks:
+            if track.id not in currently_colliding:
+                if track.collision_detected:
+                    # Still in collision recovery period
+                    track.frames_since_collision += 1
+                    
+                    # End collision tracking after threshold
+                    if track.frames_since_collision > self.collision_hypothesis_frames:
+                        track.collision_detected = False
+                        track.frames_since_collision = 0
+                        track.collision_partners.clear()
 
     def _handle_unmatched_tracks(self, unmatched_track_indices):
         """Handle unmatched tracks - predict position and increment miss counter"""
