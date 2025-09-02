@@ -1507,7 +1507,8 @@ class SwarmSortTracker:
         self._frame_det_embeddings_valid = -1  # Track which frame embeddings are valid for
 
         logger.info(
-            f"Initialized SwarmSortTracker with {self.assignment_strategy} assignment strategy"
+            "Initialized SwarmSortTracker with parameters: %s",
+            ", ".join(f"{k}={v}" for k, v in vars(self).items())
         )
 
     def _create_new_track(self, track_id: int, position: np.ndarray) -> FastTrackState:
@@ -1538,7 +1539,7 @@ class SwarmSortTracker:
             _ = compute_track_uncertainties_numba(dummy_pos, dummy_misses, dummy_ages, 50.0)
 
 
-            logger.info("Numba functions compiled successfully")
+            logger.debug("Numba functions compiled successfully")
         except Exception as e:
             logger.warning(f"Numba compilation failed: {e}")
 

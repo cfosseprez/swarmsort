@@ -13,12 +13,22 @@ Features:
 - Supports all original configuration options
 """
 
+# ============================================================================
+# STANDARD IMPORTS
+# ============================================================================
 import numpy as np
 from typing import Dict, List, Optional, Tuple, Union, Any, NamedTuple
 from dataclasses import dataclass, asdict
-
+# ============================================================================
+# LOGGER
+# ============================================================================
+from loguru import logger
+# ============================================================================
+# Internal imports
+# ============================================================================
 from .core import SwarmSortTracker as StandaloneSwarmSortTracker, SwarmSortConfig
 from .data_classes import Detection as StandaloneDetection, TrackedObject
+
 
 # ============================================================================
 # SWARMTRACKER PIPELINE COMPATIBILITY
@@ -247,7 +257,7 @@ def create_swarmsort_tracker(runtime_config=None, yaml_config_location=None):
                 # It's an object with attributes
                 config_dict = {k: v for k, v in runtime_config.__dict__.items() if not k.startswith('_')}
         
-        print(f"Using config from SwarmTracker: {config_dict}")
+        logger.debug(f"Using config from SwarmTracker: {config_dict}")
         
         # Determine GPU availability and embedding type
         use_gpu = is_gpu_available() and config_dict.get('use_gpu', True)
@@ -255,12 +265,12 @@ def create_swarmsort_tracker(runtime_config=None, yaml_config_location=None):
         
         # Validate and adjust embedding type for GPU availability
         if not use_gpu and embedding_type in ['cupytexture', 'mega_cupytexture', 'cupytexture_color']:
-            print(f"GPU not available, switching from {embedding_type} to histogram")
+            logger.warning(f"GPU not available, switching from {embedding_type} to histogram")
             embedding_type = 'histogram'
         elif use_gpu and embedding_type == 'histogram':
             # Upgrade to GPU embedding if available
             embedding_type = 'cupytexture'
-            print("Upgrading to GPU-accelerated cupytexture embedding")
+            logger.debug("Upgrading to GPU-accelerated cupytexture embedding")
 
         # Create SwarmSort config with all available parameters from SwarmTracker
         swarmsort_config = SwarmSortConfig(
@@ -281,14 +291,14 @@ def create_swarmsort_tracker(runtime_config=None, yaml_config_location=None):
             embedding_function=config_dict.get('embedding_function', 'cupytexture'),
         )
         
-        print(f"Created SwarmSortConfig: max_distance={swarmsort_config.max_distance}, "
-              f"embedding_weight={swarmsort_config.embedding_weight}, "
-              f"reid_enabled={swarmsort_config.reid_enabled}")
+        logger.debug(f"Created SwarmSortConfig: {swarmsort_config}")
 
         # Create and return the new SwarmSort package tracker
+        # Don't pass embedding_type since SwarmTracker already computes embeddings
+        # This avoids creating an unnecessary embedding extractor
         return SwarmSortTracker(
             config=swarmsort_config,
-            embedding_type=embedding_type,
+            embedding_type=None,  # SwarmTracker provides embeddings, don't create extractor
             use_gpu=use_gpu
         )
         

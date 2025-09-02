@@ -78,14 +78,13 @@ Key Parameters to Tune:
 # MOT20 Tracker Configuration - Tune these parameters as needed
 MOT20_CONFIG = SwarmSortConfig(
     # Core tracking parameters
-    use_embeddings=True,              # Enable visual embeddings for better association
+    do_embeddings=True,              # Enable visual embeddings for better association
     use_probabilistic_costs=False,    # Use deterministic assignment for benchmark
     embedding_weight=1,             # Balance between motion and appearance (0=motion only, 1=equal)
     
     # Track lifecycle parameters  
     max_track_age=40,                       # Keep tracks alive for N frames without detections
     min_consecutive_detections=3,     # Require 3 consecutive detections before confirming track (default)
-    duplicate_detection_threshold=2,
 
     # Distance thresholds
     max_distance=50.0,               # Maximum distance for track-detection association
