@@ -149,7 +149,7 @@ def fast_mahalanobis_distance(diff: np.ndarray, cov_inv: np.ndarray) -> float:
 
 @nb.njit(fastmath=True, parallel=False, cache=True)
 def compute_embedding_distances_optimized(det_embeddings, track_embeddings):
-    """Optimized embedding distance computation for Python 3.11"""
+    """Optimized embedding distance computation"""
     n_dets, emb_dim = det_embeddings.shape
     n_tracks = track_embeddings.shape[0]
 

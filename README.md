@@ -1,19 +1,30 @@
+[![Documentation Status](https://readthedocs.org/projects/graphizy/badge/?version=latest)](https://graphizy.readthedocs.io/en/latest/)
+[![PyPI Version](https://img.shields.io/pypi/v/graphizy.svg)](https://pypi.org/project/graphizy/)
+[![Python Version](https://img.shields.io/pypi/pyversions/graphizy.svg)](https://pypi.org/project/graphizy/)
+[![CI Tests](https://github.com/cfosseprez/graphizy/actions/workflows/ci.yml/badge.svg)](https://github.com/cfosseprez/graphizy/actions/workflows/ci.yml)
+[![GPL-2.0 License](https://img.shields.io/badge/License-GPL%202.0-blue.svg)](https://github.com/cfosseprez/graphizy/blob/main/LICENSE)
+
 
 ![logo](https://raw.githubusercontent.com/cfosseprez/swarmsort/releases/download/0.0.0/logo-swarmsort-horizontal.jpg)
 
 # SwarmSort
 
-A high-performance standalone multi-object tracking library with GPU-accelerated embeddings. SwarmSort combines advanced computer vision techniques with deep learning embeddings for real-time tracking applications.
+A high-performance standalone multi-object tracking library with GPU-accelerated embeddings. SwarmSort combines advanced computer vision techniques with uncertainty-based cost systems and intelligent collision handling for robust real-time tracking applications.
+
+## Documentation
+
+**[Full Documentation](https://graphizy.readthedocs.io/en/latest/)**
 
 ## Features
 
 - **Real-time multi-object tracking** with optimized algorithms
 - **GPU-accelerated embedding extraction** using CuPy (optional)
-- **Advanced distance scaling** with 11 different normalization methods
-- **Kalman filtering** for motion prediction and smoothing
-- **Hungarian algorithm** for optimal detection-track assignment
+- **Uncertainty-based cost system** for intelligent track association
+- **Smart collision handling** with density-based embedding freezing
+- **Hybrid assignment strategy** combining greedy and Hungarian algorithms
+- **Advanced Kalman filtering** with simple and OC-SORT style options
 - **Re-identification capabilities** for lost track recovery
-- **Standalone operation** with optional SwarmTracker integration
+- **Track lifecycle management** with alive/recently lost track separation
 - **Comprehensive test suite** with 200+ tests
 
 ## Installation
@@ -66,8 +77,8 @@ from swarmsort import SwarmSortTracker, SwarmSortConfig, Detection
 
 # Configure tracker for embeddings
 config = SwarmSortConfig(
-    use_embeddings=True,
-    embedding_weight=0.4,
+    do_embeddings=True,  # Updated parameter name
+    embedding_weight=1.0,
     embedding_matching_method='weighted_average'
 )
 tracker = SwarmSortTracker(config)
@@ -90,25 +101,41 @@ tracked_objects = tracker.update([detection])
 from swarmsort import SwarmSortConfig
 
 config = SwarmSortConfig(
-    max_distance=80.0,                    # Maximum association distance
-    high_score_threshold=0.8,             # High confidence detection threshold
-    use_embeddings=True,                  # Enable embedding matching
-    embedding_weight=0.3,                 # Weight of embeddings in cost function
+    # Core tracking parameters
+    max_distance=150.0,                   # Maximum association distance
+    detection_conf_threshold=0.0,         # Minimum confidence for detections
+    max_track_age=30,                     # Maximum frames before track deletion
+    
+    # Kalman filter type
+    kalman_type='simple',                 # 'simple' or 'oc' (OC-SORT style)
+    
+    # Uncertainty-based cost system
+    uncertainty_weight=0.33,              # Weight for uncertainty penalties
+    local_density_radius=150.0,           # Radius for computing local track density
+    
+    # Embedding parameters
+    do_embeddings=True,                   # Enable embedding matching
+    embedding_weight=1.0,                 # Weight of embeddings in cost function
     max_embeddings_per_track=15,          # Maximum embeddings stored per track
-    embedding_matching_method='best_match', # 'best_match', 'average', 'weighted_average'
+    embedding_matching_method='weighted_average', # 'best_match', 'average', 'weighted_average'
+    
+    # Smart collision handling
+    collision_freeze_embeddings=True,     # Freeze embeddings in dense areas
+    embedding_freeze_density=1,           # Freeze when ≥N tracks within radius
+    
+    # Assignment strategy
+    assignment_strategy='hybrid',         # 'hungarian', 'greedy', or 'hybrid'
+    greedy_threshold=30.0,                # Distance threshold for greedy assignment
     
     # Track initialization
-    min_consecutive_detections=3,         # Minimum detections to create track
+    min_consecutive_detections=6,         # Minimum detections to create track
     max_detection_gap=2,                  # Maximum gap between detections
+    pending_detection_distance=80.0,      # Distance threshold for pending detection matching
     
     # Re-identification
     reid_enabled=True,                    # Enable re-identification
     reid_max_distance=150.0,              # Maximum distance for ReID
-    reid_embedding_threshold=0.4,         # Embedding threshold for ReID
-    
-    # Performance tuning
-    embedding_scaling_method='min_robustmax', # Embedding distance scaling method
-    duplicate_detection_threshold=25.0,   # Distance threshold for duplicate removal
+    reid_embedding_threshold=0.3,         # Embedding threshold for ReID
 )
 
 tracker = SwarmSortTracker(config)
@@ -125,11 +152,11 @@ from swarmsort import SwarmSortTracker, SwarmSortConfig
 tracker = SwarmSortTracker()
 
 # With configuration object
-config = SwarmSortConfig(max_distance=100.0, use_embeddings=True)
+config = SwarmSortConfig(max_distance=100.0, do_embeddings=True)
 tracker = SwarmSortTracker(config)
 
 # With dictionary config
-tracker = SwarmSortTracker({'max_distance': 100.0, 'use_embeddings': True})
+tracker = SwarmSortTracker({'max_distance': 100.0, 'do_embeddings': True})
 ```
 
 ### Basic Standalone Usage
@@ -142,9 +169,11 @@ tracker = SwarmSortTracker()
 
 # Configure for specific use cases
 config = SwarmSortConfig(
-    use_embeddings=True,
+    do_embeddings=True,
     reid_enabled=True,
-    max_distance=100.0
+    max_distance=100.0,
+    assignment_strategy='hybrid',  # Use hybrid assignment strategy
+    uncertainty_weight=0.33         # Enable uncertainty-based costs
 )
 tracker_configured = SwarmSortTracker(config)
 ```
@@ -178,38 +207,60 @@ for tracked_obj in tracked_objects:
     print(f"Confidence: {tracked_obj.confidence}")
     print(f"Age: {tracked_obj.age}")
     print(f"Hits: {tracked_obj.hits}")
-    print(f"Lost frames: {tracked_obj.lost_frames}")
+    print(f"Time since update: {tracked_obj.time_since_update}")
+    print(f"State: {tracked_obj.state}")
     print(f"Bbox: {tracked_obj.bbox}")
+
+# Track lifecycle management
+alive_tracks = tracker.update(detections)  # Only currently detected tracks
+recently_lost = tracker.get_recently_lost_tracks(max_frames_lost=5)  # Recently lost tracks
+all_active = tracker.get_all_active_tracks()  # Both alive and recently lost
 ```
 
 ## Configuration Parameters
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `max_distance` | 80.0 | Maximum distance for detection-track association |
-| `high_score_threshold` | 0.8 | Threshold for high-confidence detections |
-| `max_age` | 20 | Maximum frames to keep track alive without detections |
-| `detection_conf_threshold` | 0.3 | Minimum confidence for detections |
-| `use_embeddings` | True | Whether to use embedding features |
-| `embedding_weight` | 0.3 | Weight for embedding similarity in cost function |
+| **Core Tracking** | | |
+| `max_distance` | 150.0 | Maximum distance for detection-track association |
+| `detection_conf_threshold` | 0.0 | Minimum confidence for detections |
+| `max_track_age` | 30 | Maximum frames to keep track alive without detections |
+| **Kalman Filtering** | | |
+| `kalman_type` | 'simple' | Kalman filter type: 'simple' or 'oc' (OC-SORT style) |
+| **Uncertainty System** | | |
+| `uncertainty_weight` | 0.33 | Weight for uncertainty penalties (0 = disabled) |
+| `local_density_radius` | 150.0 | Radius for computing local track density |
+| **Embeddings** | | |
+| `do_embeddings` | True | Whether to use embedding features |
+| `embedding_weight` | 1.0 | Weight for embedding similarity in cost function |
 | `max_embeddings_per_track` | 15 | Maximum embeddings stored per track |
 | `embedding_matching_method` | 'weighted_average' | Method for multi-embedding matching |
-| `min_consecutive_detections` | 5 | Minimum consecutive detections to create track |
-| `max_detection_gap` | 2 | Maximum gap between detections for same pending track |
+| **Collision Handling** | | |
+| `collision_freeze_embeddings` | True | Freeze embedding updates in dense areas |
+| `embedding_freeze_density` | 1 | Freeze when ≥N tracks within radius |
+| **Assignment Strategy** | | |
+| `assignment_strategy` | 'hybrid' | Assignment method: 'hungarian', 'greedy', or 'hybrid' |
+| `greedy_threshold` | 30.0 | Distance threshold for greedy assignment |
+| **Track Initialization** | | |
+| `min_consecutive_detections` | 6 | Minimum consecutive detections to create track |
+| `max_detection_gap` | 2 | Maximum gap between detections |
+| `pending_detection_distance` | 80.0 | Distance threshold for pending detection matching |
+| **Re-identification** | | |
 | `reid_enabled` | True | Enable re-identification of lost tracks |
 | `reid_max_distance` | 150.0 | Maximum distance for ReID |
-| `reid_embedding_threshold` | 0.4 | Embedding threshold for ReID |
-| `duplicate_detection_threshold` | 25.0 | Distance threshold for duplicate removal |
+| `reid_embedding_threshold` | 0.3 | Embedding threshold for ReID |
 
 ## Performance Optimizations
 
 SwarmSort includes several performance optimizations:
 
 1. **Numba JIT Compilation**: Core mathematical functions are compiled with Numba for maximum speed
-2. **Vectorized Operations**: Efficient numpy-based matrix operations
-3. **Adaptive Embedding Scaling**: Dynamic scaling of embedding distances for numerical stability
-4. **Optimized Memory Usage**: Efficient data structures and memory management
-5. **Parallel Processing**: Multi-threaded operations where beneficial
+2. **Vectorized Operations**: Efficient numpy-based matrix operations replacing O(n²) loops
+3. **Hybrid Assignment Strategy**: Combines fast greedy assignment with Hungarian algorithm fallback
+4. **Uncertainty-Based Costs**: Intelligent track association using track age, density, and reliability
+5. **Smart Embedding Freezing**: Reduces computational overhead in crowded scenarios
+6. **Adaptive Embedding Scaling**: Dynamic scaling of embedding distances for numerical stability
+7. **Optimized Memory Usage**: Efficient data structures and memory management
 
 ## GPU Acceleration
 
@@ -221,11 +272,47 @@ from swarmsort import is_gpu_available, SwarmSortTracker, SwarmSortConfig
 if is_gpu_available():
     print("GPU acceleration available")
     # GPU will be used automatically for embedding operations
-    config = SwarmSortConfig(use_embeddings=True)
+    config = SwarmSortConfig(do_embeddings=True)
     tracker = SwarmSortTracker(config)
 else:
     print("Using CPU mode")
     tracker = SwarmSortTracker()
+```
+
+## Advanced Features
+
+### Track Lifecycle Management
+
+SwarmSort provides fine-grained control over track states:
+
+```python
+# Get only currently detected tracks (alive)
+alive_tracks = tracker.update(detections)
+
+# Get recently lost tracks (useful for visualization)
+recently_lost = tracker.get_recently_lost_tracks(max_frames_lost=5)
+
+# Get all active tracks (alive + recently lost)
+all_active = tracker.get_all_active_tracks(max_frames_lost=5)
+```
+
+### Uncertainty-Based Cost System
+
+The tracker uses an intelligent cost system that considers:
+- **Track age uncertainty**: Newer tracks have higher uncertainty
+- **Local density**: Tracks in crowded areas have adjusted costs
+- **Track reliability**: Based on detection history and consistency
+
+### Smart Collision Handling
+
+In dense scenarios, SwarmSort intelligently freezes embedding updates to prevent identity switches:
+
+```python
+config = SwarmSortConfig(
+    collision_freeze_embeddings=True,  # Enable smart freezing
+    embedding_freeze_density=1,        # Freeze when ≥1 other tracks nearby
+    local_density_radius=150.0         # Define "nearby" radius
+)
 ```
 
 ## Examples
