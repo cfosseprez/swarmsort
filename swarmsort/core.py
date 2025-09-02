@@ -1038,6 +1038,32 @@ def compute_3d_cost_tensor(
 
 
 @nb.njit(fastmath=True, cache=True)
+def compute_freeze_flags_vectorized(positions: np.ndarray, safety_distance: float) -> np.ndarray:
+    """
+    Vectorized computation of freeze flags based on track proximity.
+    Returns boolean array where True means track should be frozen.
+    """
+    n_tracks = positions.shape[0]
+    freeze_flags = np.zeros(n_tracks, dtype=nb.boolean)
+    
+    # Use vectorized distance computation
+    for i in range(n_tracks):
+        for j in range(i + 1, n_tracks):
+            # Compute squared distance to avoid sqrt
+            dx = positions[i, 0] - positions[j, 0]
+            dy = positions[i, 1] - positions[j, 1]
+            distance_sq = dx * dx + dy * dy
+            
+            if distance_sq < safety_distance * safety_distance:
+                freeze_flags[i] = True
+                freeze_flags[j] = True
+                # Early termination for i once frozen
+                break
+    
+    return freeze_flags
+
+
+@nb.njit(fastmath=True, cache=True)
 def solve_3d_assignment_flattened(cost_tensor: np.ndarray, max_distance: float) -> Tuple[
     np.ndarray, np.ndarray, np.ndarray]:
     """
@@ -1147,6 +1173,8 @@ class FastTrackState:
     collision_detected: bool = False
     frames_since_collision: int = 0
     collision_partners: set = field(default_factory=set)  # IDs of tracks this collided with
+    embedding_frozen: bool = False  # Whether embeddings are frozen due to collision/occlusion
+    last_safe_embedding: Optional[np.ndarray] = None  # Last embedding before collision
 
     # Embedding history with configurable size
     embedding_history: deque = field(default_factory=lambda: deque(maxlen=5))
@@ -1214,12 +1242,21 @@ class FastTrackState:
         self._cache_valid = False
 
     def add_embedding(self, embedding: np.ndarray):
-        """Add new embedding to history with smart invalidation based on method"""
+        """Add new embedding to history with smart invalidation based on method and freeze check"""
+        # Don't update embeddings during collision/occlusion
+        if self.embedding_frozen:
+            return
+            
         if embedding is not None:
             embedding = np.asarray(embedding, dtype=np.float32)
             norm = np.linalg.norm(embedding)
             if norm > 0:
                 normalized_emb = embedding / norm
+
+                # Store embedding as last safe embedding before potential collision
+                # Only store if we don't already have one to avoid redundant copies
+                if not self.collision_detected and self.last_safe_embedding is None:
+                    self.last_safe_embedding = normalized_emb.copy()
 
                 # Method-specific cache invalidation logic
                 should_invalidate = True
@@ -1437,6 +1474,10 @@ class FastTrackState:
 
     def add_embedding_fast(self, embedding: np.ndarray, pre_normalized: bool = True):
         """Fast embedding addition without expensive checks"""
+        # Don't update embeddings during collision/occlusion
+        if self.embedding_frozen:
+            return
+            
         if embedding is None:
             return
 
@@ -1444,6 +1485,11 @@ class FastTrackState:
             norm = np.linalg.norm(embedding)
             if norm > 0:
                 embedding = embedding / norm
+
+        # Store embedding as last safe embedding before potential collision
+        # Only store if we don't already have one to avoid redundant copies
+        if not self.collision_detected and self.last_safe_embedding is None:
+            self.last_safe_embedding = embedding.copy()
 
         # Only invalidate if deque is full
         if len(self.embedding_history) == self.embedding_history.maxlen:
@@ -1469,6 +1515,29 @@ class FastTrackState:
             else:
                 self.avg_embedding = self.embedding_history[-1]
         return self.avg_embedding
+
+    def unfreeze_embeddings(self, restore_last_safe: bool = True):
+        """Unfreeze embeddings and optionally restore the last safe embedding"""
+        self.embedding_frozen = False
+        
+        # Optionally restore the last safe embedding to prevent drift during collision
+        if restore_last_safe and self.last_safe_embedding is not None:
+            # Clear any embeddings that might have been added during frozen state
+            # and restore the safe embedding
+            if len(self.embedding_history) == 0 or self.embedding_method == "best_match":
+                # For best_match or empty history, replace with safe embedding
+                if len(self.embedding_history) > 0:
+                    self.embedding_history.pop()
+                self.embedding_history.append(self.last_safe_embedding.copy())
+            
+            # Invalidate caches
+            self._cache_valid = False
+            self._representative_cache_valid = False
+            self.avg_embedding = None
+            self._update_avg_embedding()
+        
+        # Clear the safe embedding
+        self.last_safe_embedding = None
 
 
 # ============================================================================
@@ -1577,6 +1646,12 @@ class SwarmSortTracker:
         self.collision_velocity_threshold = getattr(self.config, "collision_velocity_threshold", -5.0)
         self.collision_hypothesis_frames = getattr(self.config, "collision_hypothesis_frames", 5)
         self.collision_appearance_weight = getattr(self.config, "collision_appearance_weight", 2.0)
+        self.collision_freeze_embeddings = getattr(self.config, "collision_freeze_embeddings", True)
+        self.collision_embedding_safety_distance = getattr(self.config, "collision_embedding_safety_distance", 50.0)
+        
+        # Embedding freeze optimization - only check every N frames
+        self._freeze_check_interval = 3  # Check every 3 frames for better performance
+        self._freeze_frame_count = 0
 
         # Anti-duplicate parameters
         self.duplicate_detection_threshold = self.config.duplicate_detection_threshold
@@ -1702,6 +1777,7 @@ class SwarmSortTracker:
         # Detect and manage collisions (for OC-SORT)
         start("collision_detection")
         self._detect_and_manage_collisions()
+        self._update_embedding_freeze_status()
         stop("collision_detection")
 
         start("assignment")
@@ -2759,6 +2835,66 @@ class SwarmSortTracker:
                         track.collision_detected = False
                         track.frames_since_collision = 0
                         track.collision_partners.clear()
+
+    def _update_embedding_freeze_status(self):
+        """Update embedding freeze status based on track proximity - optimized with frame interval"""
+        if not self.collision_freeze_embeddings or len(self.tracks) < 2:
+            return
+            
+        # Only check freeze status every N frames for performance
+        self._freeze_frame_count += 1
+        if self._freeze_frame_count % self._freeze_check_interval != 0:
+            return
+            
+        tracks = list(self.tracks.values())
+        n_tracks = len(tracks)
+        
+        # Early exit for few tracks
+        if n_tracks < 2:
+            return
+            
+        # Vectorized distance computation
+        positions = np.array([track.position for track in tracks], dtype=np.float32)
+        freeze_flags = compute_freeze_flags_vectorized(
+            positions, self.collision_embedding_safety_distance
+        )
+        
+        # Update freeze status efficiently
+        for i, track in enumerate(tracks):
+            should_freeze = freeze_flags[i]
+            
+            if should_freeze and not track.embedding_frozen:
+                # Starting to freeze - save current embedding (avoid copy if possible)
+                track.embedding_frozen = True
+                if len(track.embedding_history) > 0:
+                    # Only copy if we actually need to store it
+                    if track.last_safe_embedding is None:
+                        track.last_safe_embedding = track.embedding_history[-1].copy()
+                    
+            elif not should_freeze and track.embedding_frozen:
+                # Safe to unfreeze - use optimized restoration
+                self._unfreeze_track_embedding(track)
+
+    def _unfreeze_track_embedding(self, track):
+        """Optimized embedding unfreezing with minimal overhead"""
+        track.embedding_frozen = False
+        
+        # Only restore if we have a safe embedding and embedding method benefits from it
+        if (track.last_safe_embedding is not None and 
+            track.embedding_method == "best_match" and 
+            len(track.embedding_history) > 0):
+            
+            # Replace last embedding with safe one for best_match method
+            track.embedding_history.pop()
+            track.embedding_history.append(track.last_safe_embedding)
+            
+            # Quick cache invalidation without expensive operations
+            track._cache_valid = False
+            track._representative_cache_valid = False
+            track.avg_embedding = None
+        
+        # Clear safe embedding reference
+        track.last_safe_embedding = None
 
     def _handle_unmatched_tracks(self, unmatched_track_indices):
         """Handle unmatched tracks - predict position and increment miss counter"""

@@ -166,6 +166,8 @@ class SwarmSortConfig(BaseConfig):
     collision_velocity_threshold: float = -5.0  # Closing velocity threshold (negative = approaching)
     collision_hypothesis_frames: int = 5  # Max frames to use multi-hypothesis tracking after collision
     collision_appearance_weight: float = 2.0  # Weight boost for appearance features during collision recovery
+    collision_freeze_embeddings: bool = True  # Freeze embedding updates during collision/occlusion
+    collision_embedding_safety_distance: float = 50.0  # Distance below which to freeze embeddings
 
     # Embedding parameters
     use_embeddings: bool = True  # Whether to use embedding features
