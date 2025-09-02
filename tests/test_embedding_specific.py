@@ -813,6 +813,7 @@ class TestEmbeddingIntegrationScenarios:
             reid_embedding_threshold=0.3,
             reid_max_distance=100.0,
             max_track_age=5,  # Short age for testing ReID
+            min_consecutive_detections=3,  # Allow tracks to be created quickly
         )
         tracker = SwarmSort(config)
 

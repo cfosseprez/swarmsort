@@ -158,7 +158,7 @@ class SwarmSortConfig(BaseConfig):
     max_track_age: int = 30  # Maximum frames a track can exist without detection before deletion
     
     # Kalman filter type
-    kalman_type: Literal["simple", "oc"] = "simple"  # Kalman filter type: simple or OC-SORT style
+    kalman_type: Literal["simple", "oc"] = "oc"  # Kalman filter type: simple or OC-SORT style
     
     # Uncertainty-based cost system for smart collision handling
     uncertainty_weight: float = 0.33  # Weight for uncertainty penalties (0 = disabled, typical 0.2-0.5)

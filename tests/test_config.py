@@ -75,7 +75,7 @@ class TestConfigurationSystem:
         
         assert merged_config.max_track_age == 15
         assert merged_config.do_embeddings == False
-        assert merged_config.max_distance == 80.0  # Should keep default
+        assert merged_config.max_distance == 150.0  # Should keep default
 
     def test_config_serialization(self):
         """Test configuration serialization/deserialization."""

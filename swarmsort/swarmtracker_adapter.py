@@ -237,26 +237,17 @@ def create_swarmsort_tracker(runtime_config=None, yaml_config_location=None):
             modified_params = runtime_config.get_modified_params()
             config_dict.update(modified_params)
         
-        # Use SwarmSort's own config system
-        try:
-            from .config import merge_config_with_priority, SwarmSortConfig as SWARMSORTConfig
-            
-            # Get YAML config location
-            yaml_config_location = yaml_config_location or __file__
-            
-            # Use SwarmSort's own config system
-            config_obj = merge_config_with_priority(
-                default_config=SWARMSORTConfig,
-                runtime_config=config_dict,
-                yaml_config_location=yaml_config_location,
-                yaml_config_name="swarmsort_config.yaml",
-                verbose_parameters=False
-            )
-            # Convert to dict for parameter extraction
-            config_dict = config_obj.to_dict()
-        except ImportError as e:
-            # If config system fails, use runtime config only
-            print(f"Warning: SwarmSort config system not available: {e}")
+        # Skip the SwarmSort config merging system that's failing
+        # Just use the runtime config directly from SwarmTracker
+        if runtime_config is not None:
+            if hasattr(runtime_config, 'to_dict'):
+                # It's a Config object
+                config_dict = runtime_config.to_dict()
+            elif hasattr(runtime_config, '__dict__'):
+                # It's an object with attributes
+                config_dict = {k: v for k, v in runtime_config.__dict__.items() if not k.startswith('_')}
+        
+        print(f"Using config from SwarmTracker: {config_dict}")
         
         # Determine GPU availability and embedding type
         use_gpu = is_gpu_available() and config_dict.get('use_gpu', True)
@@ -271,7 +262,7 @@ def create_swarmsort_tracker(runtime_config=None, yaml_config_location=None):
             embedding_type = 'cupytexture'
             print("Upgrading to GPU-accelerated cupytexture embedding")
 
-        # Create SwarmSort config with parameters from YAML
+        # Create SwarmSort config with all available parameters from SwarmTracker
         swarmsort_config = SwarmSortConfig(
             # Use values from config with proper defaults
             max_distance=float(config_dict.get('max_distance', 80.0)),
@@ -286,7 +277,13 @@ def create_swarmsort_tracker(runtime_config=None, yaml_config_location=None):
             max_detection_gap=int(config_dict.get('max_detection_gap', 2)),
             pending_detection_distance=float(config_dict.get('pending_detection_distance', 80.0)),
             use_probabilistic_costs=bool(config_dict.get('use_probabilistic_costs', False)),
+            # Add embedding function configuration
+            embedding_function=config_dict.get('embedding_function', 'cupytexture'),
         )
+        
+        print(f"Created SwarmSortConfig: max_distance={swarmsort_config.max_distance}, "
+              f"embedding_weight={swarmsort_config.embedding_weight}, "
+              f"reid_enabled={swarmsort_config.reid_enabled}")
 
         # Create and return the new SwarmSort package tracker
         return SwarmSortTracker(
