@@ -63,7 +63,6 @@ The library achieves real-time performance (30-120 FPS) through Numba JIT compil
 
 ## 📦 Installation
 
-### Quick Install (Recommended)
 
 ```bash
 # Option 1: Install from PyPI 
@@ -76,30 +75,9 @@ pip install swarmsort[gpu]
 pip install git+https://github.com/cfosseprez/swarmsort.git
 ```
 
-### Development Setup
 
-Want to contribute or modify SwarmSort? Here's how to set up a development environment:
 
-```bash
-# Clone the repository
-git clone https://github.com/cfosseprez/swarmsort.git
-cd swarmsort
-
-# Install with Poetry (recommended for development)
-poetry install --with dev
-
-# Or use pip in editable mode
-pip install -e ".[dev]"
-```
-
-### 🐳 Docker Option
-
-```bash
-# Coming soon: Docker image for easy deployment
-docker run -it cfosseprez/swarmsort
-```
-
-## 🏃 Quick Start
+##  Quick Start
 
 ### Your First Tracker in 30 Seconds
 
@@ -126,7 +104,7 @@ for obj in tracked_objects:
     # Output: Person 1 is at position [100. 200.] with 90% confidence
 ```
 
-### 🎬 Real-World Example: Tracking People in Video
+###  Real-World Example: Tracking Paramecia in Video
 
 ```python
 import cv2
@@ -135,7 +113,7 @@ from swarmsort import SwarmSortTracker, Detection
 tracker = SwarmSortTracker()
 
 # Process a video file
-video = cv2.VideoCapture('shopping_mall.mp4')
+video = cv2.VideoCapture('microscopy.mp4')
 
 while True:
     ret, frame = video.read()
@@ -164,7 +142,7 @@ while True:
     for person in tracked:
         if person.bbox is not None:
             x1, y1, x2, y2 = person.bbox.astype(int)
-            # Each person keeps the same ID and color throughout the video!
+            # Each Paramecium keeps the same ID and color throughout the video!
             color = (0, 255, 0)  # Green for tracked objects
             cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
             cv2.putText(frame, f"ID: {person.id}", (x1, y1-10),
@@ -175,7 +153,11 @@ while True:
         break
 ```
 
-### 🎨 Using Visual Features (Embeddings) for Better Tracking
+
+###  Using Visual Features (Embeddings) for Better Tracking
+
+SwarmSort can use your GPU for fast lightweight embedding (Optional)
+Or embeddings can be directly passed in the Detection.
 
 Embeddings help the tracker recognize objects by their appearance, not just position. This is super useful when:
 - Objects move quickly or unpredictably
@@ -198,7 +180,7 @@ tracker = SwarmSortTracker(config)
 def get_embedding_from_image(image_patch):
     """Your feature extractor - could be a neural network"""
     # This would be your CNN/feature extractor
-    # Returns a 128-dimensional feature vector
+    # Returns a N-dimensional feature vector
     return np.random.randn(128).astype(np.float32)
 
 # Create detection with visual features
@@ -237,49 +219,28 @@ reid_max_distance = 150         # Same as max_distance
 
 ### 🎯 Preset Configurations for Common Scenarios
 
+Best Settings for Performance:
+
+
+  For good balance (speed + accuracy): up to 300 individuals
 ```python
-from swarmsort import SwarmSortConfig, SwarmSortTracker
-
-# Scenario 1: Tracking in a crowded scene (like a busy street)
-crowded_config = SwarmSortConfig(
-    max_distance=100.0,                   # Shorter distance - objects are close
-    uncertainty_weight=0.5,               # Higher uncertainty handling
-    collision_freeze_embeddings=True,     # Prevent ID switches in crowds
-    embedding_freeze_density=1,           # Freeze when anyone is nearby
-    assignment_strategy='hybrid',         # Use smart assignment
-    min_consecutive_detections=3,         # Quick initialization in dynamic scenes
-)
-
-# Scenario 2: Highway vehicle tracking (fast, spread out)
-highway_config = SwarmSortConfig(
-    max_distance=200.0,                   # Longer distance - fast moving vehicles
-    kalman_type='oc',                     # Better motion model for vehicles
-    uncertainty_weight=0.2,               # Less uncertainty - predictable motion
-    min_consecutive_detections=2,         # Quick init for fast vehicles
-    max_track_age=15,                     # Remove lost tracks quickly
-)
-
-# Scenario 3: Security camera (people tracking with re-identification)
-security_config = SwarmSortConfig(
-    do_embeddings=True,                   # Use appearance features
-    embedding_weight=1.5,                 # Trust appearance more than motion
-    reid_enabled=True,                    # Re-identify people who return
-    reid_max_distance=200.0,              # Large reID distance
-    reid_embedding_threshold=0.25,        # Permissive reID matching
-    max_track_age=60,                     # Keep tracks longer (2 seconds at 30fps)
-)
-
-# Scenario 4: Sports tracking (fast action, clear visibility)
-sports_config = SwarmSortConfig(
-    max_distance=150.0,                   # Medium distance
-    detection_conf_threshold=0.5,         # Only track clear detections
-    assignment_strategy='greedy',         # Fast assignment for real-time
-    kalman_type='simple',                 # Simple but fast motion model
-    min_consecutive_detections=2,         # Quick player detection
-)
-
-# Use the configuration that fits your needs
-tracker = SwarmSortTracker(security_config)
+  config = SwarmSortConfig(
+      kalman_type="simple",           # Fast but accurate enough                                                                                                                                         
+      assignment_strategy="hybrid",    # Good balance                                                                                                                                                    
+      uncertainty_weight=0.33,         # Some uncertainty handling                                                                                                                                       
+      do_embeddings=True,              # Use embeddings if available                                                                                                                                     
+      reid_enabled=False,              # Skip for speed                                                                                                                                                  
+  )
+```
+  For maximum speed across all scales: 300+ individuals
+```python
+  config = SwarmSortConfig(
+      kalman_type="simple",           # Fastest Kalman filter                                                                                                                                            
+      assignment_strategy="greedy",    # Fastest assignment                                                                                                                                              
+      uncertainty_weight=0.0,          # Disable uncertainty                                                                                                                                             
+      do_embeddings=False,             # No embeddings                                                                                                                                                   
+      reid_enabled=False,              # No re-identification                                                                                                                                            
+  )
 ```
 
 ### 🔧 Understanding Key Parameters
@@ -449,36 +410,36 @@ for obj in recently_lost:
 
 ## Configuration Parameters
 
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| **Core Tracking** | | |
-| `max_distance` | 150.0 | Maximum distance for detection-track association |
-| `detection_conf_threshold` | 0.0 | Minimum confidence for detections |
-| `max_track_age` | 30 | Maximum frames to keep track alive without detections |
-| **Kalman Filtering** | | |
-| `kalman_type` | 'simple' | Kalman filter type: 'simple' or 'oc' (OC-SORT style) |
-| **Uncertainty System** | | |
-| `uncertainty_weight` | 0.33 | Weight for uncertainty penalties (0 = disabled) |
-| `local_density_radius` | max_distance | Radius for computing local track density (defaults to max_distance) |
-| **Embeddings** | | |
-| `do_embeddings` | True | Whether to use embedding features |
-| `embedding_weight` | 1.0 | Weight for embedding similarity in cost function |
-| `max_embeddings_per_track` | 15 | Maximum embeddings stored per track |
+| Parameter | Default            | Description |
+|-----------|--------------------|-------------|
+| **Core Tracking** |                    | |
+| `max_distance` | 150.0              | Maximum distance for detection-track association |
+| `detection_conf_threshold` | 0.0                | Minimum confidence for detections |
+| `max_track_age` | 30                 | Maximum frames to keep track alive without detections |
+| **Kalman Filtering** |                    | |
+| `kalman_type` | 'simple'           | Kalman filter type: 'simple' or 'oc' (OC-SORT style) |
+| **Uncertainty System** |                    | |
+| `uncertainty_weight` | 0.33               | Weight for uncertainty penalties (0 = disabled) |
+| `local_density_radius` | max_distance       | Radius for computing local track density (defaults to max_distance) |
+| **Embeddings** |                    | |
+| `do_embeddings` | True               | Whether to use embedding features |
+| `embedding_weight` | 1.0                | Weight for embedding similarity in cost function |
+| `max_embeddings_per_track` | 15                 | Maximum embeddings stored per track |
 | `embedding_matching_method` | 'weighted_average' | Method for multi-embedding matching |
-| **Collision Handling** | | |
-| `collision_freeze_embeddings` | True | Freeze embedding updates in dense areas |
-| `embedding_freeze_density` | 1 | Freeze when ≥N tracks within radius |
-| **Assignment Strategy** | | |
-| `assignment_strategy` | 'hybrid' | Assignment method: 'hungarian', 'greedy', or 'hybrid' |
-| `greedy_threshold` | 30.0 | Distance threshold for greedy assignment (default: max_distance/5) |
-| **Track Initialization** | | |
-| `min_consecutive_detections` | 6 | Minimum consecutive detections to create track |
-| `max_detection_gap` | 2 | Maximum gap between detections |
-| `pending_detection_distance` | 80.0 | Distance threshold for pending detection matching |
-| **Re-identification** | | |
-| `reid_enabled` | True | Enable re-identification of lost tracks |
-| `reid_max_distance` | 150.0 | Maximum distance for ReID |
-| `reid_embedding_threshold` | 0.3 | Embedding threshold for ReID |
+| **Collision Handling** |                    | |
+| `collision_freeze_embeddings` | True               | Freeze embedding updates in dense areas |
+| `embedding_freeze_density` | 1                  | Freeze when ≥N tracks within radius |
+| **Assignment Strategy** |                    | |
+| `assignment_strategy` | 'hybrid'           | Assignment method: 'hungarian', 'greedy', or 'hybrid' |
+| `greedy_threshold` | max_distance/5     | Distance threshold for greedy assignment |
+| **Track Initialization** |                    | |
+| `min_consecutive_detections` | 6                  | Minimum consecutive detections to create track |
+| `max_detection_gap` | 2                  | Maximum gap between detections |
+| `pending_detection_distance` | max_distance       | Distance threshold for pending detection matching |
+| **Re-identification** |                    | |
+| `reid_enabled` | True               | Enable re-identification of lost tracks |
+| `reid_max_distance` | max_distance*1.5   | Maximum distance for ReID |
+| `reid_embedding_threshold` | 0.3                | Embedding threshold for ReID |
 
 ## ⚡ Performance & Optimization
 
@@ -492,40 +453,7 @@ SwarmSort is optimized for real-world performance:
 - **Memory Pooling**: Reduces allocation overhead
 - **Early Exit Logic**: Skips unnecessary computations
 
-### 🖥️ GPU Acceleration (Optional)
 
-SwarmSort can use your GPU for even faster performance:
-
-```python
-from swarmsort import is_gpu_available, SwarmSortTracker, SwarmSortConfig
-
-# Check if GPU is available
-if is_gpu_available():
-    print("🎮 GPU detected! SwarmSort will automatically use it for:")
-    print("  - Embedding extraction (if using visual features)")
-    print("  - Matrix operations (distance calculations)")
-    
-    # GPU is used automatically when available
-    config = SwarmSortConfig(do_embeddings=True)
-    tracker = SwarmSortTracker(config)
-else:
-    print("💻 No GPU detected - using CPU (still fast!)")
-    tracker = SwarmSortTracker()
-
-# Force CPU mode (useful for debugging)
-tracker = SwarmSortTracker(embedding_type='cupytexture', use_gpu=False)
-```
-
-### 📊 Performance Benchmarks
-
-Typical performance on a mid-range system:
-- **CPU Only (i7-9700K)**: 45-60 FPS with 50 objects
-- **With GPU (RTX 2070)**: 80-120 FPS with 50 objects
-
-Memory usage:
-- ~50MB base memory
-- ~1MB per 100 active tracks
-- Automatic cleanup of old tracks
 
 ## Visualization Example
 
@@ -867,15 +795,6 @@ config = SwarmSortConfig(
 **Q: Performance is too slow**
 Consider processing every other frame
 
-
-### 💡 Pro Tips
-
-1. **Start Simple**: Begin with default settings, then tune based on your results
-2. **Log Everything**: Use `debug_timings=True` to identify bottlenecks
-3. **Visualize**: Always visualize your tracks to understand behavior
-4. **Test Incrementally**: Change one parameter at a time
-5. **Know Your Domain**: Highway tracking needs different settings than indoor tracking
-
 ## Examples
 
 See the `examples/` directory for comprehensive usage examples.
@@ -893,19 +812,27 @@ poetry run pytest --cov=swarmsort --cov-report=html
 poetry run pytest tests/test_basic.py::test_basic_tracking
 ```
 
+
+
 ## Development
 
+### Development Setup
+
+Want to contribute or modify SwarmSort? Here's how to set up a development environment:
+
 ```bash
-# Install development dependencies
+# Clone the repository
+git clone https://github.com/cfosseprez/swarmsort.git
+cd swarmsort
+
+# Install with Poetry (recommended for development)
 poetry install --with dev
 
-# Run linting
-poetry run black swarmsort/
-poetry run flake8 swarmsort/
-
-# Run type checking
-poetry run mypy swarmsort/
+# Or use pip in editable mode
+pip install -e ".[dev]"
 ```
+
+
 
 ## Benchmarking
 
@@ -926,13 +853,28 @@ GPL 3.0 or later - see LICENSE file for details.
 4. Push to the branch (`git push origin feature/amazing-feature`)
 5. Open a Pull Request
 
+### Development Workflow
+
+
+```bash
+# Install development dependencies
+poetry install --with dev
+
+# Run linting
+poetry run black swarmsort/
+poetry run flake8 swarmsort/
+
+# Run type checking
+poetry run mypy swarmsort/
+```
+
 ## Citation
 
 If you use SwarmSort in your research, please cite:
 
 ```bibtex
 @software{swarmsort,
-    title={SwarmSort: High-Performance Multi-Object Tracking with Deep Learning},
+    title={SwarmSort: High-Performance Multi-Object Tracking},
     author={Charles Fosseprez},
     year={2024},
     url={https://github.com/cfosseprez/swarmsort}

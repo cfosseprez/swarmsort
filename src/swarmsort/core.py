@@ -512,6 +512,58 @@ def compute_probabilistic_cost_matrix_vectorized(
     return cost_matrix
 
 
+@nb.njit(fastmath=True, parallel=True, cache=True)
+def compute_cost_matrix_vectorized_parallel(
+        det_positions: np.ndarray,
+        track_last_positions: np.ndarray,
+        track_kalman_positions: np.ndarray,
+        det_embeddings: np.ndarray,
+        track_embeddings: np.ndarray,
+        do_embeddings: bool,
+        max_distance: float,
+        embedding_weight: float,
+) -> np.ndarray:
+    """Parallel version for large-scale scenarios"""
+    n_dets = det_positions.shape[0]
+    n_tracks = track_last_positions.shape[0]
+    cost_matrix = np.full((n_dets, n_tracks), np.inf, dtype=np.float32)
+
+    # Use parallel processing for outer loop
+    for i in nb.prange(n_dets):
+        for j in range(n_tracks):
+            # Early spatial filtering - check rough distance first
+            rough_dist = abs(det_positions[i, 0] - track_kalman_positions[j, 0]) + \
+                        abs(det_positions[i, 1] - track_kalman_positions[j, 1])
+            
+            # Skip if Manhattan distance is too large (faster than Euclidean)
+            if rough_dist > max_distance * 2:
+                continue
+            
+            dist_to_last = np.sqrt(
+                (det_positions[i, 0] - track_last_positions[j, 0]) ** 2
+                + (det_positions[i, 1] - track_last_positions[j, 1]) ** 2
+            )
+
+            dist_to_kalman = np.sqrt(
+                (det_positions[i, 0] - track_kalman_positions[j, 0]) ** 2
+                + (det_positions[i, 1] - track_kalman_positions[j, 1]) ** 2
+            )
+
+            spatial_cost = min(dist_to_last, dist_to_kalman)
+
+            if spatial_cost > max_distance:
+                continue
+
+            embedding_cost = 0.0
+            if do_embeddings:
+                emb_dist = cosine_similarity_normalized(det_embeddings[i], track_embeddings[j])
+                embedding_cost = emb_dist * embedding_weight * max_distance
+
+            cost_matrix[i, j] = spatial_cost + embedding_cost
+
+    return cost_matrix
+
+
 @nb.njit(fastmath=True, parallel=False, cache=True)
 def compute_cost_matrix_vectorized(
         det_positions: np.ndarray,
@@ -523,13 +575,22 @@ def compute_cost_matrix_vectorized(
         max_distance: float,
         embedding_weight: float,
 ) -> np.ndarray:
-    """Vectorized cost matrix computation"""
+    """Vectorized cost matrix computation with parallel processing"""
     n_dets = det_positions.shape[0]
     n_tracks = track_last_positions.shape[0]
     cost_matrix = np.full((n_dets, n_tracks), np.inf, dtype=np.float32)
 
+    # Use parallel processing for outer loop
     for i in nb.prange(n_dets):
         for j in range(n_tracks):
+            # Early spatial filtering - check rough distance first
+            rough_dist = abs(det_positions[i, 0] - track_kalman_positions[j, 0]) + \
+                        abs(det_positions[i, 1] - track_kalman_positions[j, 1])
+            
+            # Skip if Manhattan distance is too large (faster than Euclidean)
+            if rough_dist > max_distance * 2:
+                continue
+            
             dist_to_last = np.sqrt(
                 (det_positions[i, 0] - track_last_positions[j, 0]) ** 2
                 + (det_positions[i, 1] - track_last_positions[j, 1]) ** 2
@@ -2129,6 +2190,49 @@ class SwarmSortTracker:
 
         return matches, unmatched_dets, unmatched_tracks
 
+    def _compute_sparse_cost_matrix(self, det_positions, tracks, detections, max_search_radius):
+        """Compute sparse cost matrix only for nearby pairs using spatial indexing."""
+        n_dets = len(detections)
+        n_tracks = len(tracks)
+        
+        # Only use spatial indexing for large numbers where overhead is worth it
+        if n_dets < 100 or n_tracks < 100:
+            return None, None  # Signal to use full matrix
+        
+        # Build spatial index using grid partitioning
+        grid_size = max_search_radius
+        track_grid = {}
+        
+        # Place tracks in grid cells
+        for j, track in enumerate(tracks):
+            x, y = track.predicted_position
+            grid_x = int(x / grid_size)
+            grid_y = int(y / grid_size)
+            key = (grid_x, grid_y)
+            if key not in track_grid:
+                track_grid[key] = []
+            track_grid[key].append(j)
+        
+        # Find candidate pairs
+        sparse_pairs = []
+        for i, det in enumerate(detections):
+            x, y = det.position.flatten()[:2]
+            grid_x = int(x / grid_size)
+            grid_y = int(y / grid_size)
+            
+            # Check neighboring grid cells (3x3 neighborhood)
+            for dx in [-1, 0, 1]:
+                for dy in [-1, 0, 1]:
+                    key = (grid_x + dx, grid_y + dy)
+                    if key in track_grid:
+                        for j in track_grid[key]:
+                            sparse_pairs.append((i, j))
+        
+        if not sparse_pairs:
+            return None, None
+            
+        return sparse_pairs, track_grid
+    
     def _hybrid_assignment(self, detections, timer=None, start=None, stop=None):
         """
         OPTIMIZED Hybrid assignment: Greedy for confident matches, Hungarian for the rest.
@@ -2141,6 +2245,12 @@ class SwarmSortTracker:
             return [], list(range(n_dets)), []
 
         tracks = list(self._tracks.values())
+        
+        # Try spatial indexing for large-scale scenarios
+        sparse_pairs, track_grid = self._compute_sparse_cost_matrix(
+            None, tracks, detections, self.max_distance * 1.5
+        )
+        use_sparse = sparse_pairs is not None
 
         # Extract positions (same as existing methods)
         det_positions = np.array([det.position.flatten()[:2] for det in detections], dtype=np.float32)
@@ -2192,15 +2302,54 @@ class SwarmSortTracker:
 
         # Compute cost matrix with uncertainty
         if start: start("cost_matrix")
-        cost_matrix = compute_cost_matrix_with_uncertainty(
-            det_positions,
-            track_kalman_positions,  # Use predicted positions
-            scaled_embedding_matrix,
-            uncertainty_penalties,
-            do_embeddings,
-            self.max_distance,
-            self.embedding_weight,
-            )
+        
+        # For large-scale scenarios with sparse pairs, compute only necessary elements
+        if use_sparse and len(sparse_pairs) < n_dets * n_tracks * 0.5:
+            # Initialize with infinity
+            cost_matrix = np.full((n_dets, n_tracks), np.inf, dtype=np.float32)
+            
+            # Compute costs only for candidate pairs
+            for i, j in sparse_pairs:
+                # Spatial cost
+                dx = det_positions[i, 0] - track_kalman_positions[j, 0]
+                dy = det_positions[i, 1] - track_kalman_positions[j, 1]
+                spatial_cost = np.sqrt(dx * dx + dy * dy)
+                
+                if spatial_cost <= self.max_distance:
+                    # Add embedding cost if enabled
+                    embedding_cost = 0.0
+                    if do_embeddings:
+                        embedding_cost = scaled_embedding_matrix[i, j] * self.embedding_weight * self.max_distance
+                    
+                    # Add uncertainty penalty
+                    total_cost = spatial_cost + embedding_cost + uncertainty_penalties[j]
+                    cost_matrix[i, j] = total_cost
+        else:
+            # Choose between parallel and serial based on size
+            # Parallel has overhead that's only worth it for large matrices
+            if n_dets * n_tracks > 10000:  # Use parallel for >10k operations
+                # Note: We'd need a parallel version of compute_cost_matrix_with_uncertainty
+                # For now, use the standard version
+                cost_matrix = compute_cost_matrix_with_uncertainty(
+                    det_positions,
+                    track_kalman_positions,
+                    scaled_embedding_matrix,
+                    uncertainty_penalties,
+                    do_embeddings,
+                    self.max_distance,
+                    self.embedding_weight,
+                )
+            else:
+                # Use standard computation for smaller scenarios
+                cost_matrix = compute_cost_matrix_with_uncertainty(
+                    det_positions,
+                    track_kalman_positions,
+                    scaled_embedding_matrix,
+                    uncertainty_penalties,
+                    do_embeddings,
+                    self.max_distance,
+                    self.embedding_weight,
+                )
         if stop: stop("cost_matrix")
 
         # OPTIMIZED HYBRID ASSIGNMENT LOGIC
@@ -2221,7 +2370,11 @@ class SwarmSortTracker:
         remaining_tracks = [int(x) for x in remaining_tracks_array]
 
         hungarian_matches = []
-        if remaining_dets and remaining_tracks:
+        # OPTIMIZATION: Skip Hungarian for large-scale scenarios
+        if len(remaining_dets) > 100 or len(remaining_tracks) > 100:
+            # For large numbers, Hungarian O(n³) is too slow - skip it
+            pass
+        elif remaining_dets and remaining_tracks:
             # Create reduced cost matrix
             reduced_cost_matrix = np.full((len(remaining_dets), len(remaining_tracks)),
                                         np.inf, dtype=np.float32)

@@ -51,16 +51,25 @@ def run_single_benchmark(
         random_seed=random_seed,
     )
     
-    # Configure tracker - optimized for benchmarking
+    # Configure tracker - consistent settings for benchmarking
+    # Use adaptive strategies based on object count
+    if num_objects > 300:
+        assignment_strategy = "greedy"  # Pure greedy for large scale
+    else:
+        assignment_strategy = "hybrid"  # Hybrid for better accuracy
+    
     config = SwarmSortConfig(
         max_distance=150.0,
         do_embeddings=use_embeddings,
-        assignment_strategy="hybrid",
-        uncertainty_weight=0.33,
-        # Disable expensive features for more consistent benchmarking
-        reid_enabled=False,  # Disable re-identification for speed
-        min_consecutive_detections=2,  # Faster track creation
-        max_detection_gap=1,  # Less pending detection management
+        assignment_strategy=assignment_strategy,
+        kalman_type="simple",  # Always use simple for consistent benchmarking
+        uncertainty_weight=0.33,  # Keep consistent uncertainty
+        # Disable expensive features for benchmarking
+        reid_enabled=False,
+        min_consecutive_detections=2,
+        max_detection_gap=1,
+        # Keep consistent thresholds
+        greedy_threshold=30.0,
     )
     tracker = SwarmSortTracker(config)
     
@@ -557,4 +566,4 @@ if __name__ == "__main__":
     
     # Example for IDE usage - uncomment and modify as needed:
     # Quick test with fewer frames and objects
-    main(run=True, plot=True, objects=[50, 100, 500, 1000], frames=1000, cli_mode=False)
+    main(run=True, plot=True, objects=[10, 100, 500, 1000], frames=1000, cli_mode=False)

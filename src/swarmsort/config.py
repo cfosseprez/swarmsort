@@ -182,20 +182,20 @@ class SwarmSortConfig(BaseConfig):
 
     # Assignment strategy parameters
     assignment_strategy: Literal["hungarian", "greedy", "hybrid"] = "hybrid"
-    greedy_threshold: float = max_distance/5  # Distance threshold for greedy assignment
+    greedy_threshold: float = max_distance/4  # Distance threshold for greedy assignment
     greedy_confidence_boost: float = 1  # Confidence multiplier for greedy matches
     hungarian_fallback_threshold: float = 1  # Multiplier of max_distance for Hungarian fallback
 
     # Re-identification (ReID) parameters
     reid_enabled: bool = True  # Enable re-identification of lost tracks
-    reid_max_distance: float = 150.0  # Maximum distance for ReID
+    reid_max_distance: float = max_distance*1.5  # Maximum distance for ReID
     reid_embedding_threshold: float = 0.3  # Embedding threshold for ReID (lower more permissive)
 
     # Track initialization parameters
     init_conf_threshold: float = 0  # Minimum confidence for track initialization (initialization filter)
     min_consecutive_detections: int = 6  # Minimum consecutive detections to create track
     max_detection_gap: int = 2  # Maximum gap between detections for same pending track
-    pending_detection_distance: float = 80.0  # Distance threshold for pending detection matching
+    pending_detection_distance: float = max_distance  # Distance threshold for pending detection matching
 
     # Embedding distance scaling
     embedding_scaling_method: str = "min_robustmax"  # "robust_minmax" "min_robustmax" Method for scaling embedding distances
