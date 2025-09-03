@@ -2573,14 +2573,6 @@ class SwarmSortTracker:
         return compute_track_uncertainties_numba(
             track_positions, track_misses, track_ages, self.local_density_radius
         )
-    
-    def _compute_track_uncertainty(self, track, all_tracks):
-        """
-        DEPRECATED: Use _compute_track_uncertainties_batch for better performance.
-        Kept for backward compatibility.
-        """
-        # Fall back to batch computation with single track
-        return self._compute_track_uncertainties_batch([track])[0]
 
     def _handle_unmatched_tracks(self, unmatched_track_indices):
         """Handle unmatched tracks - predict position and increment miss counter"""

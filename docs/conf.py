@@ -76,6 +76,9 @@ myst_enable_extensions = [
 # -- Suppress warnings -------------------------------------------------------
 suppress_warnings = ['image.not_readable']
 
+# -- Exclude patterns --------------------------------------------------------
+exclude_patterns.extend(['generated/**'])
+
 # -- Link check --------------------------------------------------------------
 linkcheck_ignore = [
     r'http://localhost:\d+/',

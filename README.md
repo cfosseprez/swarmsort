@@ -19,7 +19,7 @@ Optimised for microscopy (top view) and hundreds of objects** 🎯
 
 SwarmSort solves the data association problem in multi-object tracking by:
 - **Maintaining temporal consistency** of object identities across frames using Kalman filtering and motion prediction
-- **Handling occlusions and reappearances** through re-identification with visual embeddings
+- **Handling occlusions and reappearances** through re-identification with visual embeddings (lightweight gpu based embedding integrated)
 - **Preventing ID switches** in dense scenarios using uncertainty-aware cost computation and collision detection
 - **Adapting to scene dynamics** with hybrid assignment strategies that balance speed and accuracy
 
@@ -66,10 +66,13 @@ The library achieves real-time performance (30-120 FPS) through Numba JIT compil
 ### Quick Install (Recommended)
 
 ```bash
-# Option 1: Install from PyPI (coming soon!)
+# Option 1: Install from PyPI 
 pip install swarmsort
 
-# Option 2: Install from GitHub
+# Option 2: Install from PyPI with gpu embedding support
+pip install swarmsort[gpu]
+
+# Option 3: Install from GitHub
 pip install git+https://github.com/cfosseprez/swarmsort.git
 ```
 
@@ -214,6 +217,23 @@ tracked_objects = tracker.update([detection])
 ```
 
 ## ⚙️ Configuration Made Easy
+
+### Understanding the max_distance Parameter
+
+The `max_distance` parameter is the foundation of SwarmSort's configuration. **Important**: Set it **1.5-2x higher** than the expected maximum pixel movement between frames because:
+
+- The actual matching uses a **combination** of spatial distance, embedding similarity, and uncertainty penalties
+- With embeddings enabled, the effective matching distance is reduced by visual similarity  
+- Uncertainty penalties further modify the association costs
+- Example: If objects move up to 100 pixels between frames, set `max_distance=150-200`
+
+Many other parameters **automatically scale** with `max_distance`:
+```python
+# When you set max_distance=150, these defaults are automatically set:
+local_density_radius = 150      # Same as max_distance
+greedy_threshold = 30           # max_distance / 5
+reid_max_distance = 150         # Same as max_distance
+```
 
 ### 🎯 Preset Configurations for Common Scenarios
 

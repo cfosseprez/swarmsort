@@ -317,21 +317,14 @@ class ObjectMotionSimulator:
         # Add noise to position
         noisy_position = obj.position + np.random.normal(0, self.config.position_noise_std, 2)
 
-        # Generate bounding box with noise
+        # Generate bounding box with noise - simplified for performance
+        half_size = obj.size[0] / 2
         bbox = np.array(
             [
-                noisy_position[0]
-                - obj.size[0] / 2
-                + np.random.normal(0, self.config.bbox_noise_std),
-                noisy_position[1]
-                - obj.size[1] / 2
-                + np.random.normal(0, self.config.bbox_noise_std),
-                noisy_position[0]
-                + obj.size[0] / 2
-                + np.random.normal(0, self.config.bbox_noise_std),
-                noisy_position[1]
-                + obj.size[1] / 2
-                + np.random.normal(0, self.config.bbox_noise_std),
+                noisy_position[0] - half_size,
+                noisy_position[1] - half_size,
+                noisy_position[0] + half_size,
+                noisy_position[1] + half_size,
             ]
         )
 
@@ -344,9 +337,10 @@ class ObjectMotionSimulator:
         embedding = None
         if self.config.use_embeddings and obj.object_id in self.base_embeddings:
             base_emb = self.base_embeddings[obj.object_id]
+            # Simplified embedding generation for performance
             embedding = base_emb + np.random.normal(
-                0, self.config.embedding_noise_std, len(base_emb)
-            )
+                0, self.config.embedding_noise_std, self.config.embedding_dim
+            ).astype(np.float32)
 
         return Detection(
             position=noisy_position,
@@ -414,16 +408,20 @@ class ObjectMotionSimulator:
         """Advance simulation by one time step and return detections."""
         detections = []
 
-        # Update all objects
+        # Batch update all objects first (more cache-friendly)
         for obj in self.objects:
             self.update_object_motion(obj)
+        
+        # Then generate detections
+        for obj in self.objects:
             detection = self.generate_detection(obj)
             if detection is not None:
                 detections.append(detection)
 
-        # Add false positives
-        false_positives = self.generate_false_positives()
-        detections.extend(false_positives)
+        # Add false positives only occasionally for performance
+        if self.frame_count % 10 == 0:  # Reduce false positive generation frequency
+            false_positives = self.generate_false_positives()
+            detections.extend(false_positives)
 
         self.frame_count += 1
         return detections
@@ -446,6 +444,139 @@ class ObjectMotionSimulator:
             obj.position = obj.initial_position.copy()
             obj.velocity = np.zeros(2, dtype=np.float64)
             obj.is_active = True
+
+
+def create_scalability_scenario(
+    num_objects: int,
+    use_embeddings: bool = False,
+    world_size: Optional[Tuple[float, float]] = None,
+    motion_type: str = "mixed",
+    random_seed: Optional[int] = None,
+) -> ObjectMotionSimulator:
+    """Create a scenario with controlled number of objects for scalability testing.
+    
+    Args:
+        num_objects: Number of objects to simulate
+        use_embeddings: Whether to generate embeddings for detections
+        world_size: Size of simulation world (width, height). Auto-scales with object count if None
+        motion_type: Type of motion - "mixed", "linear", "circular", or "random_walk"
+        random_seed: Random seed for reproducibility
+        
+    Returns:
+        Configured ObjectMotionSimulator
+    """
+    # Auto-scale world size with number of objects to maintain reasonable density
+    if world_size is None:
+        # Approximately 10000 pixels^2 per object
+        area_per_object = 10000
+        total_area = area_per_object * num_objects
+        # Maintain 4:3 aspect ratio
+        world_height = np.sqrt(total_area * 3 / 4)
+        world_width = world_height * 4 / 3
+        world_size = (world_width, world_height)
+    
+    config = SimulationConfig(
+        world_width=world_size[0],
+        world_height=world_size[1],
+        detection_probability=0.95,
+        false_positive_rate=0.01,
+        position_noise_std=2.0,
+        use_embeddings=use_embeddings,
+        embedding_dim=128 if use_embeddings else 0,
+        embedding_noise_std=0.1,
+        occlusion_probability=0.005,  # Low occlusion for consistent benchmarking
+        random_seed=random_seed,
+    )
+    
+    sim = ObjectMotionSimulator(config)
+    
+    # Generate objects with diverse starting positions and motion patterns
+    for i in range(num_objects):
+        # Distribute objects across the space
+        grid_size = int(np.ceil(np.sqrt(num_objects)))
+        row = i // grid_size
+        col = i % grid_size
+        
+        # Add randomness to grid positions
+        x = (col + 0.5 + np.random.uniform(-0.3, 0.3)) * world_size[0] / grid_size
+        y = (row + 0.5 + np.random.uniform(-0.3, 0.3)) * world_size[1] / grid_size
+        
+        # Ensure within bounds
+        x = np.clip(x, 50, world_size[0] - 50)
+        y = np.clip(y, 50, world_size[1] - 50)
+        
+        if motion_type == "mixed":
+            # Mix of different motion types
+            motion_choice = i % 4
+            if motion_choice == 0:
+                # Linear motion
+                velocity = np.random.uniform(-2, 2, 2)
+                obj = sim.create_linear_motion_object(
+                    object_id=i,
+                    start_pos=(x, y),
+                    velocity=tuple(velocity),
+                    class_id=i % 3,
+                )
+            elif motion_choice == 1:
+                # Circular motion
+                radius = np.random.uniform(30, 80)
+                angular_vel = np.random.uniform(0.02, 0.05) * np.random.choice([-1, 1])
+                obj = sim.create_circular_motion_object(
+                    object_id=i,
+                    center=(x, y),
+                    radius=radius,
+                    angular_velocity=angular_vel,
+                    class_id=i % 3,
+                )
+            elif motion_choice == 2:
+                # Random walk
+                obj = sim.create_random_walk_object(
+                    object_id=i,
+                    start_pos=(x, y),
+                    step_size=np.random.uniform(1, 3),
+                    class_id=i % 3,
+                )
+            else:
+                # Figure eight
+                obj = sim.create_figure_eight_object(
+                    object_id=i,
+                    center=(x, y),
+                    width=np.random.uniform(40, 80),
+                    height=np.random.uniform(30, 60),
+                    period=np.random.uniform(80, 120),
+                    class_id=i % 3,
+                )
+        elif motion_type == "linear":
+            velocity = np.random.uniform(-2, 2, 2)
+            obj = sim.create_linear_motion_object(
+                object_id=i,
+                start_pos=(x, y),
+                velocity=tuple(velocity),
+                class_id=i % 3,
+            )
+        elif motion_type == "circular":
+            radius = np.random.uniform(30, 80)
+            angular_vel = np.random.uniform(0.02, 0.05) * np.random.choice([-1, 1])
+            obj = sim.create_circular_motion_object(
+                object_id=i,
+                center=(x, y),
+                radius=radius,
+                angular_velocity=angular_vel,
+                class_id=i % 3,
+            )
+        elif motion_type == "random_walk":
+            obj = sim.create_random_walk_object(
+                object_id=i,
+                start_pos=(x, y),
+                step_size=np.random.uniform(1, 3),
+                class_id=i % 3,
+            )
+        else:
+            raise ValueError(f"Unknown motion type: {motion_type}")
+        
+        sim.add_object(obj)
+    
+    return sim
 
 
 def create_demo_scenario(scenario_name: str = "crossing_paths") -> ObjectMotionSimulator:

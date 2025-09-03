@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "swarmsort"
-version = "0.1.4"
+version = "0.1.5"
 description = "Standalone SwarmSort multi-object tracker with deep learning embeddings"
 authors = ["Charles Fosseprez <charles.fosseprez.pro@gmail.com>"]
 license = "GPL-3.0-or-later"
