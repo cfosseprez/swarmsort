@@ -1,14 +1,30 @@
-cff-version: 1.0.0
-message: If you use Swarmsort, please cite it using the following metadata.
-title: 'SwarmTracker: Scalable Real-Time Tracking and Compression of Dense Biological Swarms'
+cff-version: 1.2.0
+message: 'If you use SwarmSort, please cite it using these metadata.'
+title: 'SwarmSort: High-Performance Multi-Object Tracking for Microscopy'
 authors:
-- family-names: Fosseprez
-  given-names: Charles
-  orcid: https://orcid.org/0009-0000-4524-0399
-version: 1.0.0
-date-released: '2025-08-28'
-repository-code: https://github.com/cfosseprez/swarmsort
-url: https://github.com/cfosseprez/swarmsort
-license: GPL 2.0 or later
+  - family-names: Fosseprez
+    given-names: Charles
+    email: charles.fosseprez.pro@gmail.com
+    orcid: 'https://orcid.org/0009-0000-4524-0399'
+abstract: >-
+  SwarmSort is a high-performance multi-object tracking library 
+  optimized for top-view microscopy with hundreds of objects. 
+  It combines motion prediction, visual embeddings, and 
+  uncertainty-aware assignment for reliable real-time tracking 
+  at 80-100 FPS for typical scenarios.
+keywords:
+  - multi-object-tracking
+  - computer-vision
+  - microscopy
+  - real-time
+  - tracking-by-detection
+  - kalman-filter
+  - hungarian-algorithm
+version: 0.1.0
+date-released: '2025-01-04'
+doi: # TO BE ADDED AFTER ZENODO RELEASE
+repository-code: 'https://github.com/cfosseprez/swarmsort'
+url: 'https://github.com/cfosseprez/swarmsort'
+license: GPL-3.0-or-later
 type: software
 

@@ -67,6 +67,18 @@ SwarmSort solves the data association problem in multi-object tracking by:
 - **Cross-platform support** - Tested on Linux, Windows, macOS
 - **Detailed documentation** - Complete API reference with practical examples
 
+## Citation
+
+If you use SwarmSort in your research, please cite:
+
+```bibtex
+@software{swarmsort,
+    title={SwarmSort: High-Performance Multi-Object Tracking},
+    author={Charles Fosseprez},
+    year={2024},
+    url={https://github.com/cfosseprez/swarmsort}
+}
+```
 
 ## 📦 Installation
 
@@ -910,15 +922,3 @@ poetry run flake8 swarmsort/
 poetry run mypy swarmsort/
 ```
 
-## Citation
-
-If you use SwarmSort in your research, please cite:
-
-```bibtex
-@software{swarmsort,
-    title={SwarmSort: High-Performance Multi-Object Tracking},
-    author={Charles Fosseprez},
-    year={2024},
-    url={https://github.com/cfosseprez/swarmsort}
-}
-```

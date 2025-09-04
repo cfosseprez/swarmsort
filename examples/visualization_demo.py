@@ -96,7 +96,7 @@ def run_visualization_demo(num_objects: int = 50, realtime: bool = True):
     # Create tracker with embeddings (FIXED: Both ReID and assignment stability now work in both modes)
     config = SwarmSortConfig(
         max_distance=100,
-        use_embeddings=True,
+        do_embeddings=True,
         use_probabilistic_costs=True,
         embedding_weight=1,
         min_consecutive_detections=3,
