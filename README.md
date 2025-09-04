@@ -12,8 +12,6 @@
 **Multi-object tracking made simple, fast, and accurate.
 Optimised for microscopy (top view) and hundreds of objects** 🎯
 
-![tracking_gif_lighter](https://github.com/user-attachments/assets/206946bb-9553-405d-812f-4056afeecc28)
-*Real-time tracking of paramecia at 100 FPS over an entire arena with 150 individuals has never been easier*
 
 ## Core Capabilities
 
@@ -23,7 +21,21 @@ SwarmSort solves the data association problem in multi-object tracking by:
 - **Preventing ID switches** in dense scenarios using uncertainty-aware cost computation and collision detection
 - **Adapting to scene dynamics** with hybrid assignment strategies that balance speed and accuracy
 
-The library achieves real-time performance (30-120 FPS) through Numba JIT compilation, vectorized operations, and optional GPU acceleration.
+The library achieves real-time performance (80-120 FPS for 100 objects) through Numba JIT compilation, vectorized operations, and optional GPU acceleration.
+
+![arena_light-ezgif com-optimize](https://github.com/user-attachments/assets/f67f8cb0-4d57-407c-9723-6dc7e5037a2c)
+
+*Reliable real-time tracking of paramecia at 100 FPS over an entire arena with 150 individuals has never been easier*
+
+![Scalability](https://github.com/user-attachments/assets/b1a95557-a1db-4328-9442-d85c41d82e7c)
+
+*Real time performances for up to 500 individuals*
+
+<div style="position: relative; display: inline-block;">
+  <img src="https://github.com/user-attachments/assets/f67f8cb0-4d57-407c-9723-6dc7e5037a2c" style="width:600px;">
+  <img src="https://github.com/user-attachments/assets/b1a95557-a1db-4328-9442-d85c41d82e7c" style="position: absolute; bottom: 8px; right: 0px; width:500px;">
+</div>
+
 
 ## 📖 Documentation
 
@@ -36,22 +48,18 @@ The library achieves real-time performance (30-120 FPS) through Numba JIT compil
 - **Smart collision handling** - Density-based embedding freezing prevents ID switches in crowded scenarios
 - **Re-identification capability** - Recovers lost tracks using visual embeddings and motion prediction
 - **Hybrid assignment strategy** - Combines greedy matching for obvious associations with Hungarian algorithm for complex cases
+- **Dual Kalman filter options** - Simple constant velocity or OC-SORT style acceleration model
+- **Occlusion handling** - Maintains tracks through temporary occlusions using motion prediction
 
-### Performance Optimization
-- **Real-time performance** - 30-120 FPS depending on configuration and hardware
+### Real-time performance
 - **Numba JIT compilation** - Critical mathematical functions compiled to machine code
 - **Vectorized operations** - Batch processing using NumPy for efficient computation
 - **GPU acceleration** - Optional CUDA support via CuPy for embedding extraction
 - **Memory efficient** - Bounded memory usage with automatic cleanup of stale tracks
 
-### Robust Motion Modeling
-- **Dual Kalman filter options** - Simple constant velocity or OC-SORT style acceleration model
-- **Adaptive motion prediction** - Handles both linear and non-linear motion patterns
-- **Occlusion handling** - Maintains tracks through temporary occlusions using motion prediction
-
 ### Flexible Integration
 - **Detector agnostic** - Works with any object detection source (YOLO, Detectron2, custom detectors)
-- **Configurable parameters** - Fine-tune behavior for specific domains (crowds, highways, microscopy)
+- **Configurable parameters** - Fine-tune behavior for specific species (microscopy, crowds ..)
 - **Multiple embedding methods** - Support for various visual feature extractors
 - **Comprehensive API** - Access to track states, lifecycle management, and detailed statistics
 
@@ -59,7 +67,7 @@ The library achieves real-time performance (30-120 FPS) through Numba JIT compil
 - **Extensive test coverage** - 200+ unit tests covering edge cases and error conditions
 - **Cross-platform support** - Tested on Linux, Windows, macOS
 - **Detailed documentation** - Complete API reference with practical examples
-- **Active maintenance** - Regular updates and performance improvements
+
 
 ## 📦 Installation
 

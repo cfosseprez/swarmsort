@@ -238,6 +238,7 @@ def plot_scalability_results(
     results_file: Path = None,
     output_dir: Path = None,
     show_plot: bool = True,
+    plot_timing_only: bool = True,
 ) -> None:
     """Plot scalability results from saved data.
     
@@ -245,6 +246,7 @@ def plot_scalability_results(
         results_file: Path to CSV or JSON results file (uses latest if None)
         output_dir: Directory for saving plots
         show_plot: Whether to display the plot
+        plot_timing_only: If True, only plot the timing graph (left plot)
     """
     import matplotlib.pyplot as plt
     import matplotlib.patches as mpatches
@@ -268,8 +270,12 @@ def plot_scalability_results(
     if "run_idx" in df.columns:
         df = df[df["run_idx"].isna()]
     
-    # Create figure with two subplots
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
+    # Create figure with appropriate number of subplots
+    if plot_timing_only:
+        fig, ax1 = plt.subplots(1, 1, figsize=(6, 3))
+        ax2 = None  # No second subplot
+    else:
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 4))
     
     # Colors for with/without embeddings
     colors = {"without": "#2E86AB", "with": "#A23B72"}
@@ -303,67 +309,129 @@ def plot_scalability_results(
             color=color,
         )
     
-    ax1.set_xlabel("Number of Objects", fontsize=12)
-    ax1.set_ylabel("Median Processing Time (ms)", fontsize=12)
+    # Set x-axis ticks to only show tested object counts
+    unique_objects = sorted(df["num_objects"].unique())
+    ax1.set_xticks(unique_objects)
+    ax1.set_xticklabels(unique_objects)
+    
+    ax1.set_xlabel("Number of Objects", fontsize=10)
+    ax1.set_ylabel("Median Processing Time (ms)", fontsize=10)
     ax1.set_title("SwarmSort Scalability: Processing Time", fontsize=14, fontweight="bold")
     ax1.legend(loc="upper left", fontsize=11)
     ax1.grid(True, alpha=0.3)
-    ax1.set_xscale("log")
-    ax1.set_yscale("log")
+    # ax1.set_xscale("log")
+    # ax1.set_yscale("log")
     
     # Add minor gridlines
     ax1.grid(True, which="minor", alpha=0.1)
     
-    # Plot 2: FPS vs Number of Objects
+    # Add text labels above/below each point showing median time and FPS
+    # Do this after axis setup to get proper y-limits
+    y_min, y_max = ax1.get_ylim()
+    y_range = y_max - y_min
+    y_offset = 0.05 * y_range  # 5% of y-range for text offset
+    
+    # Adjust y-axis limits to accommodate text boxes
+    # Add extra space at bottom for the lower text boxes and at top for upper ones
+    ax1.set_ylim(y_min - 0.20 * y_range, y_max + 0.1 * y_range)
+    
+    # Remove negative ticks from y-axis
+    current_yticks = ax1.get_yticks()
+    ax1.set_yticks([tick for tick in current_yticks if tick >= 0])
+    
+    # Add horizontal dashed line at y=0
+    ax1.axhline(y=0, color='gray', linestyle='--', alpha=0.3, linewidth=0.5)
+    
     for use_embeddings in [False, True]:
         subset = df[df["use_embeddings"] == use_embeddings]
-        label = "With embeddings" if use_embeddings else "Without embeddings"
         color = colors["with" if use_embeddings else "without"]
-        
         subset = subset.sort_values("num_objects")
         
-        ax2.plot(
-            subset["num_objects"],
-            subset["fps"],
-            marker="s",
-            markersize=8,
-            linewidth=2,
-            label=label,
-            color=color,
-        )
-        
-        # Add error bars for FPS
-        if "fps_std" in subset.columns:
-            ax2.fill_between(
-                subset["num_objects"],
-                subset["fps"] - subset["fps_std"],
-                subset["fps"] + subset["fps_std"],
-                alpha=0.2,
+        for _, row in subset.iterrows():
+            x = row["num_objects"]
+            y = row["median_time_ms"]
+            fps = row["fps"]
+            
+            # Format the text
+            text = f"{y:.1f}ms\n{fps:.0f}fps"
+            
+            if use_embeddings:
+                # With embeddings: place text above points
+                y_pos = y + y_offset
+                va = 'bottom'
+            else:
+                # Without embeddings: place text below points
+                y_pos = y - y_offset
+                va = 'top'
+            
+            # Add text with smaller font
+            ax1.text(
+                x, y_pos, text,
+                ha='center', va=va,
+                fontsize=7,
                 color=color,
+                alpha=0.9,
+                bbox=dict(boxstyle='round,pad=0.3', facecolor='white', 
+                         edgecolor=color, alpha=0.7, linewidth=0.5)
             )
     
-    # Add reference lines for common frame rates
-    ax2.axhline(y=30, color="gray", linestyle="--", alpha=0.5, label="30 FPS (Real-time)")
-    ax2.axhline(y=60, color="gray", linestyle=":", alpha=0.5, label="60 FPS")
-    
-    ax2.set_xlabel("Number of Objects", fontsize=12)
-    ax2.set_ylabel("Frames Per Second (FPS)", fontsize=12)
-    ax2.set_title("SwarmSort Scalability: Throughput", fontsize=14, fontweight="bold")
-    ax2.legend(loc="upper right", fontsize=11)
-    ax2.grid(True, alpha=0.3)
-    ax2.set_xscale("log")
-    ax2.set_yscale("log")
-    
-    # Add minor gridlines
-    ax2.grid(True, which="minor", alpha=0.1)
+    # Plot 2: FPS vs Number of Objects (only if not plot_timing_only)
+    if not plot_timing_only:
+        for use_embeddings in [False, True]:
+            subset = df[df["use_embeddings"] == use_embeddings]
+            label = "With embeddings" if use_embeddings else "Without embeddings"
+            color = colors["with" if use_embeddings else "without"]
+            
+            subset = subset.sort_values("num_objects")
+            
+            ax2.plot(
+                subset["num_objects"],
+                subset["fps"],
+                marker="s",
+                markersize=8,
+                linewidth=2,
+                label=label,
+                color=color,
+            )
+            
+            # Add error bars for FPS
+            if "fps_std" in subset.columns:
+                ax2.fill_between(
+                    subset["num_objects"],
+                    subset["fps"] - subset["fps_std"],
+                    subset["fps"] + subset["fps_std"],
+                    alpha=0.2,
+                    color=color,
+                )
+        
+        # Add reference lines for common frame rates
+        ax2.axhline(y=30, color="gray", linestyle="--", alpha=0.5, label="30 FPS (Real-time)")
+        ax2.axhline(y=60, color="gray", linestyle=":", alpha=0.5, label="60 FPS")
+        
+        # Set x-axis ticks to only show tested object counts
+        ax2.set_xticks(unique_objects)
+        ax2.set_xticklabels(unique_objects)
+        
+        ax2.set_xlabel("Number of Objects", fontsize=12)
+        ax2.set_ylabel("Frames Per Second (FPS)", fontsize=12)
+        ax2.set_title("SwarmSort Scalability: Throughput", fontsize=14, fontweight="bold")
+        ax2.legend(loc="upper right", fontsize=11)
+        ax2.grid(True, alpha=0.3)
+        # ax2.set_xscale("log")
+        # ax2.set_yscale("log")
+        
+        # Add minor gridlines
+        ax2.grid(True, which="minor", alpha=0.1)
     
     # Add overall title
-    fig.suptitle(
-        f"SwarmSort Performance Scalability Analysis",
-        fontsize=16,
-        fontweight="bold",
-        y=1.02,
-    )
+    SUP_TITLE=False
+    if SUP_TITLE:
+        fig.suptitle(
+            f"SwarmSort Performance Scalability Analysis",
+            fontsize=16,
+            fontweight="bold",
+            y=1.02,
+        )
     
     plt.tight_layout()
     
@@ -393,6 +461,7 @@ def main(
     output: Path = None,
     input_file: Path = None,
     no_show: bool = False,
+    plot_timing_only: bool = True,
     cli_mode: bool = True,
 ):
     """Main function that supports both CLI and programmatic usage.
@@ -406,6 +475,7 @@ def main(
         output: Output directory for results
         input_file: Input file for plotting (uses latest if None)
         no_show: Don't display plot (only save)
+        plot_timing_only: If True, only plot the timing graph (left plot)
         cli_mode: If True, parse command line args. If False, use provided args.
     
     Examples for IDE usage:
@@ -499,6 +569,12 @@ Examples:
             help="Don't display plot (only save)",
         )
         
+        parser.add_argument(
+            "--timing-only",
+            action="store_true",
+            help="Only plot the timing graph (left plot)",
+        )
+        
         args = parser.parse_args()
         
         # Override function arguments with CLI arguments
@@ -510,6 +586,10 @@ Examples:
         output = args.output
         input_file = args.input
         no_show = args.no_show
+        plot_timing_only = args.timing_only
+    else:
+        # plot_timing_only is already a parameter, no need to set it
+        pass
     
     # Set defaults
     if objects is None:
@@ -557,6 +637,7 @@ Examples:
             results_file=input_file,
             output_dir=output,
             show_plot=not no_show,
+            plot_timing_only=plot_timing_only,
         )
 
 
@@ -566,4 +647,4 @@ if __name__ == "__main__":
     
     # Example for IDE usage - uncomment and modify as needed:
     # Quick test with fewer frames and objects
-    main(run=True, plot=True, objects=[10, 100, 500, 1000], frames=1000, cli_mode=False)
+    main(run=True, plot=True, objects=[10, 100, 500, 1000], frames=500, cli_mode=False)

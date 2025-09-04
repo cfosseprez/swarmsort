@@ -2196,7 +2196,7 @@ class SwarmSortTracker:
         n_tracks = len(tracks)
         
         # Only use spatial indexing for large numbers where overhead is worth it
-        if n_dets < 100 or n_tracks < 100:
+        if n_dets < 200 or n_tracks < 200:
             return None, None  # Signal to use full matrix
         
         # Build spatial index using grid partitioning
