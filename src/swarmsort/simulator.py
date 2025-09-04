@@ -5,7 +5,7 @@ This module provides tools for creating realistic object trajectories,
 motion patterns, and detection sequences for testing tracking algorithms.
 """
 import numpy as np
-from typing import List, Dict, Tuple, Optional, Any, Callable
+from typing import List, Dict, Tuple, Optional, Any
 from dataclasses import dataclass, field
 from enum import Enum
 import random
