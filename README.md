@@ -4,7 +4,6 @@
 [![CI Tests](https://github.com/cfosseprez/swarmsort/actions/workflows/test.yml/badge.svg)](https://github.com/cfosseprez/swarmsort/actions/workflows/test.yml)
 [![GPL-3.0 License](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://github.com/cfosseprez/swarmsort/blob/main/LICENSE)
 [![DOI](https://img.shields.io/badge/DOI-10.5281%2Fzenodo.17051857-blue)](https://doi.org/10.5281/zenodo.17051857)
-
 ![logo](https://raw.githubusercontent.com/cfosseprez/swarmsort/main/docs/_static/readme_assets/logo-swarmsort-horizontal.jpg)
 
 
