@@ -38,9 +38,6 @@ SwarmSort solves the data association problem in multi-object tracking by:
 - **Preventing ID switches** in dense scenarios using uncertainty-aware cost computation and embedding freezing
 - **Fast!** The library achieves real-time performance (80-100 FPS for 100 objects) through Numba JIT compilation, vectorized operations, and optional GPU acceleration.
 
-## 📖 Documentation
-
-**[Full Documentation](https://swarmsort.readthedocs.io/en/latest/)**
 
 ## Key Features
 
@@ -81,6 +78,9 @@ If you use SwarmSort in your research, please cite:
     url={https://github.com/cfosseprez/swarmsort}
 }
 ```
+## 📖 Documentation
+
+**[Full Documentation](https://swarmsort.readthedocs.io/en/latest/)**
 
 ## 📦 Installation
 
