@@ -9,32 +9,35 @@
 
 # SwarmSort
 
-**Multi-object tracking made simple, fast, and accurate.
-Optimised for microscopy (top view) and hundreds of objects** 🎯
+**Reliable multi-object tracking: fast, accurate, and easy — perfect for top-view microscopy with hundreds of objects** 🎯
 
+<div align="center">
+  <table>
+    <tr>
+      <td align="center">
+        <img src="https://github.com/user-attachments/assets/f67f8cb0-4d57-407c-9723-6dc7e5037a2c" width="400" alt="Detection Demo">
+        <br><b>Reliable real-time tracking of paramecia at 100 FPS over an entire arena with 150 individuals has never been easier</b>
+      </td>
+      <td align="center">
+        <img src="https://github.com/user-attachments/assets/b1a95557-a1db-4328-9442-d85c41d82e7c" width="800" alt="Tracking Demo">
+        <br><b>Real time performances for up to 500 individuals</b>
+      </td>
+    </tr>
+  </table>
+</div>
 
 ## Core Capabilities
 
 SwarmSort solves the data association problem in multi-object tracking by:
-- **Maintaining temporal consistency** of object identities across frames using Kalman filtering and motion prediction
-- **Handling occlusions and reappearances** through re-identification with visual embeddings (lightweight gpu based embedding integrated)
-- **Preventing ID switches** in dense scenarios using uncertainty-aware cost computation and collision detection
-- **Adapting to scene dynamics** with hybrid assignment strategies that balance speed and accuracy
+- **Maintaining temporal consistency** of object identities across frames using motion prediction, appearance and uncertainty
+- **Handling occlusions and collisions** through re-identification with visual embeddings (lightweight gpu based embedding integrated)
+- **Preventing ID switches** in dense scenarios using uncertainty-aware cost computation and embedding freezing
+- **Fast!** The library achieves real-time performance (80-120 FPS for 100 objects) through Numba JIT compilation, vectorized operations, and optional GPU acceleration.
 
-The library achieves real-time performance (80-120 FPS for 100 objects) through Numba JIT compilation, vectorized operations, and optional GPU acceleration.
 
-![arena_light-ezgif com-optimize](https://github.com/user-attachments/assets/f67f8cb0-4d57-407c-9723-6dc7e5037a2c)
 
-*Reliable real-time tracking of paramecia at 100 FPS over an entire arena with 150 individuals has never been easier*
 
-![Scalability](https://github.com/user-attachments/assets/b1a95557-a1db-4328-9442-d85c41d82e7c)
 
-*Real time performances for up to 500 individuals*
-
-<div style="position: relative; display: inline-block;">
-  <img src="https://github.com/user-attachments/assets/f67f8cb0-4d57-407c-9723-6dc7e5037a2c" style="width:600px;">
-  <img src="https://github.com/user-attachments/assets/b1a95557-a1db-4328-9442-d85c41d82e7c" style="position: absolute; bottom: 8px; right: 0px; width:500px;">
-</div>
 
 
 ## 📖 Documentation
