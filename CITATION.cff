@@ -22,7 +22,7 @@ keywords:
   - hungarian-algorithm
 version: 1.0.0
 date-released: '2025-09-04'
-doi: # TO BE ADDED AFTER ZENODO RELEASE
+doi: 10.5281/zenodo.17051857
 repository-code: 'https://github.com/cfosseprez/swarmsort'
 url: 'https://github.com/cfosseprez/swarmsort'
 license: GPL-3.0-or-later
