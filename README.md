@@ -226,36 +226,37 @@ reid_max_distance = 150         # Same as max_distance
 
 ### All Parameters
 
-| Parameter                     | Default            | Description |
-|-------------------------------|--------------------|-------------|
-| **Core Tracking**             |                    | |
-| `max_distance`                | 150.0              | Maximum distance for detection-track association |
-| `detection_conf_threshold`    | 0.0                | Minimum confidence for detections |
-| `max_track_age`               | 30                 | Maximum frames to keep track alive without detections |
-| **Motion prediction**         |                    | |
-| `kalman_type`                 | 'simple'           | Kalman filter type: 'simple' or 'oc' (OC-SORT style) |
-| **Uncertainty System**        |                    | |
-| `uncertainty_weight`          | 0.33               | Weight for uncertainty penalties (0 = disabled) |
+| Parameter                     | Default            | Description                                                         |
+|-------------------------------|--------------------|---------------------------------------------------------------------|
+| **Core Tracking**             |                    |                                                                     |
+| `max_distance`                | 150.0              | Maximum distance for detection-track association                    |
+| `detection_conf_threshold`    | 0.0                | Minimum confidence for detections                                   |
+| `max_track_age`               | 30                 | Maximum frames to keep track alive without detections               |
+| **Motion prediction**         |                    |                                                                     |
+| `kalman_type`                 | 'simple'           | Kalman filter type: 'simple' or 'oc' (OC-SORT style)                |
+| **Uncertainty System**        |                    |                                                                     |
+| `uncertainty_weight`          | 0.33               | Weight for uncertainty penalties (0 = disabled)                     |
 | `local_density_radius`        | max_distance       | Radius for computing local track density (defaults to max_distance) |
-| **Embeddings**                |                    | |
-| `do_embeddings`               | True               | Whether to use embedding features |
-| `embedding_weight`            | 1.0                | Weight for embedding similarity in cost function |
-| `max_embeddings_per_track`    | 15                 | Maximum embeddings stored per track |
-| `embedding_matching_method`   | 'weighted_average' | Method for multi-embedding matching |
-| **Collision Handling**        |                    | |
-| `collision_freeze_embeddings` | True               | Freeze embedding updates in dense areas |
-| `embedding_freeze_density`    | 1                  | Freeze when ≥N tracks within radius |
-| **Assignment Strategy**       |                    | |
-| `assignment_strategy`         | 'hybrid'           | Assignment method: 'hungarian', 'greedy', or 'hybrid' |
-| `greedy_threshold`            | max_distance/5     | Distance threshold for greedy assignment |
-| **Track Initialization**      |                    | |
-| `min_consecutive_detections`  | 6                  | Minimum consecutive detections to create track |
-| `max_detection_gap`           | 2                  | Maximum gap between detections |
-| `pending_detection_distance`  | max_distance       | Distance threshold for pending detection matching |
-| **Re-identification**         |                    | |
-| `reid_enabled`                | True               | Enable re-identification of lost tracks |
-| `reid_max_distance`           | max_distance*1.5   | Maximum distance for ReID |
-| `reid_embedding_threshold`    | 0.3                | Embedding threshold for ReID |
+| **Embeddings**                |                    |                                                                     |
+| `do_embeddings`               | True               | Whether to use embedding features                                   |
+| `embedding_function`          | 'cupytexture'      | Integrated embedding function: "cupytexture", "cupytexture_color", "mega_cupytexture" |
+| `embedding_weight`            | 1.0                | Weight for embedding similarity in cost function                    |
+| `max_embeddings_per_track`    | 15                 | Maximum embeddings stored per track                                 |
+| `embedding_matching_method`   | 'weighted_average' | Method for multi-embedding matching                                 |
+| **Collision Handling**        |                    |                                                                     |
+| `collision_freeze_embeddings` | True               | Freeze embedding updates in dense areas                             |
+| `embedding_freeze_density`    | 1                  | Freeze when ≥N tracks within radius                                 |
+| **Assignment Strategy**       |                    |                                                                     |
+| `assignment_strategy`         | 'hybrid'           | Assignment method: 'hungarian', 'greedy', or 'hybrid'               |
+| `greedy_threshold`            | max_distance/5     | Distance threshold for greedy assignment                            |
+| **Track Initialization**      |                    |                                                                     |
+| `min_consecutive_detections`  | 6                  | Minimum consecutive detections to create track                      |
+| `max_detection_gap`           | 2                  | Maximum gap between detections                                      |
+| `pending_detection_distance`  | max_distance       | Distance threshold for pending detection matching                   |
+| **Re-identification**         |                    |                                                                     |
+| `reid_enabled`                | True               | Enable re-identification of lost tracks                             |
+| `reid_max_distance`           | max_distance*1.5   | Maximum distance for ReID                                           |
+| `reid_embedding_threshold`    | 0.3                | Embedding threshold for ReID                                        |
 
 
 ### 🎯 Preset Configurations for Common Scenarios

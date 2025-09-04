@@ -1478,17 +1478,21 @@ class SwarmSortTracker:
         else:
             self.config = config
 
-        # Handle embedding extractor setup if provided
+        # Handle embedding extractor setup
+        # Priority: explicit embedding_type parameter > config.embedding_function
         self.embedding_extractor = None
-        if embedding_type is not None:
+        actual_embedding_type = embedding_type or getattr(self.config, 'embedding_function', 'cupytexture')
+        
+        if actual_embedding_type is not None and self.config.do_embeddings:
             try:
                 from .embeddings import get_embedding_extractor
                 self.embedding_extractor = get_embedding_extractor(
-                    embedding_type,
+                    actual_embedding_type,
                     use_gpu=(use_gpu if use_gpu is not None else True)
                 )
+                logger.debug(f"Using embedding extractor: {actual_embedding_type}")
             except Exception as e:
-                logger.warning(f"Failed to create embedding extractor '{embedding_type}': {e}")
+                logger.warning(f"Failed to create embedding extractor '{actual_embedding_type}': {e}")
 
         # Map config to internal parameters
         self.use_probabilistic_costs = getattr(self.config, "use_probabilistic_costs", True)
