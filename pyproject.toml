@@ -1,13 +1,13 @@
 [tool.poetry]
 name = "swarmsort"
 version = "1.0.0"
-description = "Standalone SwarmSort multi-object tracker with deep learning embeddings"
+description = "Standalone SwarmSort real-time multi-object tracker with integrated lightweight embeddings"
 authors = ["Charles Fosseprez <charles.fosseprez.pro@gmail.com>"]
 license = "GPL-3.0-or-later"
 readme = "README.md"
 homepage = "https://github.com/cfosseprez/swarmsort"
 repository = "https://github.com/cfosseprez/swarmsort"
-keywords = ["tracking", "computer-vision", "multi-object-tracking", "embeddings"]
+keywords = ["tracking", "computer-vision", "multi-object-tracking", "embeddings", "real-time"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
