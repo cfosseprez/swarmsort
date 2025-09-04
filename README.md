@@ -9,7 +9,7 @@
 
 # SwarmSort
 
-**Reliable multi-object tracking: fast, accurate, and easy — perfect for top-view microscopy with hundreds of objects** 🎯
+**Reliable multi-object tracking-by-detection: fast, accurate, and easy — perfect for top-view microscopy with hundreds of objects** 🎯
 
 
 <div align="center">
@@ -31,15 +31,10 @@
 
 SwarmSort solves the data association problem in multi-object tracking by:
 - **Maintaining temporal consistency** of object identities across frames using motion prediction, appearance and uncertainty
-- **Handling occlusions and collisions** through re-identification with visual embeddings (lightweight gpu based embedding integrated)
+- **Handling occlusions and collisions** through re-identification with visual embeddings 
+- **optional lightweight gpu based embedding integrated** for more accuracy and speed
 - **Preventing ID switches** in dense scenarios using uncertainty-aware cost computation and embedding freezing
 - **Fast!** The library achieves real-time performance (80-120 FPS for 100 objects) through Numba JIT compilation, vectorized operations, and optional GPU acceleration.
-
-
-
-
-
-
 
 ## 📖 Documentation
 
@@ -229,6 +224,40 @@ greedy_threshold = 30           # max_distance / 5
 reid_max_distance = 150         # Same as max_distance
 ```
 
+### All Parameters
+
+| Parameter                     | Default            | Description |
+|-------------------------------|--------------------|-------------|
+| **Core Tracking**             |                    | |
+| `max_distance`                | 150.0              | Maximum distance for detection-track association |
+| `detection_conf_threshold`    | 0.0                | Minimum confidence for detections |
+| `max_track_age`               | 30                 | Maximum frames to keep track alive without detections |
+| **Motion prediction**         |                    | |
+| `kalman_type`                 | 'simple'           | Kalman filter type: 'simple' or 'oc' (OC-SORT style) |
+| **Uncertainty System**        |                    | |
+| `uncertainty_weight`          | 0.33               | Weight for uncertainty penalties (0 = disabled) |
+| `local_density_radius`        | max_distance       | Radius for computing local track density (defaults to max_distance) |
+| **Embeddings**                |                    | |
+| `do_embeddings`               | True               | Whether to use embedding features |
+| `embedding_weight`            | 1.0                | Weight for embedding similarity in cost function |
+| `max_embeddings_per_track`    | 15                 | Maximum embeddings stored per track |
+| `embedding_matching_method`   | 'weighted_average' | Method for multi-embedding matching |
+| **Collision Handling**        |                    | |
+| `collision_freeze_embeddings` | True               | Freeze embedding updates in dense areas |
+| `embedding_freeze_density`    | 1                  | Freeze when ≥N tracks within radius |
+| **Assignment Strategy**       |                    | |
+| `assignment_strategy`         | 'hybrid'           | Assignment method: 'hungarian', 'greedy', or 'hybrid' |
+| `greedy_threshold`            | max_distance/5     | Distance threshold for greedy assignment |
+| **Track Initialization**      |                    | |
+| `min_consecutive_detections`  | 6                  | Minimum consecutive detections to create track |
+| `max_detection_gap`           | 2                  | Maximum gap between detections |
+| `pending_detection_distance`  | max_distance       | Distance threshold for pending detection matching |
+| **Re-identification**         |                    | |
+| `reid_enabled`                | True               | Enable re-identification of lost tracks |
+| `reid_max_distance`           | max_distance*1.5   | Maximum distance for ReID |
+| `reid_embedding_threshold`    | 0.3                | Embedding threshold for ReID |
+
+
 ### 🎯 Preset Configurations for Common Scenarios
 
 Best Settings for Performance:
@@ -320,7 +349,7 @@ tracker_configured = SwarmSortTracker(config)
 
 ## 📦 Working with Data
 
-### 📥 Input: Detection Objects
+### Input: Detection Objects
 
 Detections are what you feed into the tracker - they represent objects found in the current frame:
 
@@ -339,7 +368,7 @@ full_detection = Detection(
     position=np.array([320, 240]),        # Object center
     confidence=0.95,                      # Detection confidence
     bbox=np.array([300, 220, 340, 260]),  # Bounding box [x1, y1, x2, y2]
-    embedding=feature_vector,             # Visual features (from your CNN)
+    embedding=feature_vector,             # Visual features (for example from your CNN)
     class_id=0,                          # 0=person, 1=car, etc.
     id="yolo_detection_42"               # Your detector's ID (optional)
 )
@@ -361,7 +390,7 @@ def yolo_to_swarmsort(yolo_results):
     return detections
 ```
 
-### 📤 Output: TrackedObject Results
+###  Output: TrackedObject Results
 
 The tracker returns TrackedObject instances with rich information about each tracked object:
 
@@ -420,42 +449,10 @@ for obj in recently_lost:
     draw_dashed_box(frame, obj, color='yellow')  # Dashed box for lost
 ```
 
-## Configuration Parameters
-
-| Parameter | Default            | Description |
-|-----------|--------------------|-------------|
-| **Core Tracking** |                    | |
-| `max_distance` | 150.0              | Maximum distance for detection-track association |
-| `detection_conf_threshold` | 0.0                | Minimum confidence for detections |
-| `max_track_age` | 30                 | Maximum frames to keep track alive without detections |
-| **Kalman Filtering** |                    | |
-| `kalman_type` | 'simple'           | Kalman filter type: 'simple' or 'oc' (OC-SORT style) |
-| **Uncertainty System** |                    | |
-| `uncertainty_weight` | 0.33               | Weight for uncertainty penalties (0 = disabled) |
-| `local_density_radius` | max_distance       | Radius for computing local track density (defaults to max_distance) |
-| **Embeddings** |                    | |
-| `do_embeddings` | True               | Whether to use embedding features |
-| `embedding_weight` | 1.0                | Weight for embedding similarity in cost function |
-| `max_embeddings_per_track` | 15                 | Maximum embeddings stored per track |
-| `embedding_matching_method` | 'weighted_average' | Method for multi-embedding matching |
-| **Collision Handling** |                    | |
-| `collision_freeze_embeddings` | True               | Freeze embedding updates in dense areas |
-| `embedding_freeze_density` | 1                  | Freeze when ≥N tracks within radius |
-| **Assignment Strategy** |                    | |
-| `assignment_strategy` | 'hybrid'           | Assignment method: 'hungarian', 'greedy', or 'hybrid' |
-| `greedy_threshold` | max_distance/5     | Distance threshold for greedy assignment |
-| **Track Initialization** |                    | |
-| `min_consecutive_detections` | 6                  | Minimum consecutive detections to create track |
-| `max_detection_gap` | 2                  | Maximum gap between detections |
-| `pending_detection_distance` | max_distance       | Distance threshold for pending detection matching |
-| **Re-identification** |                    | |
-| `reid_enabled` | True               | Enable re-identification of lost tracks |
-| `reid_max_distance` | max_distance*1.5   | Maximum distance for ReID |
-| `reid_embedding_threshold` | 0.3                | Embedding threshold for ReID |
 
 ## ⚡ Performance & Optimization
 
-### 🏎️ Why SwarmSort is Fast
+### Why SwarmSort is Fast
 
 SwarmSort is optimized for real-world performance:
 
@@ -464,7 +461,6 @@ SwarmSort is optimized for real-world performance:
 - **Smart Caching**: Reuses computed embeddings and distances
 - **Memory Pooling**: Reduces allocation overhead
 - **Early Exit Logic**: Skips unnecessary computations
-
 
 
 ## Visualization Example
@@ -824,8 +820,6 @@ poetry run pytest --cov=swarmsort --cov-report=html
 poetry run pytest tests/test_basic.py::test_basic_tracking
 ```
 
-
-
 ## Development
 
 ### Development Setup
@@ -843,8 +837,6 @@ poetry install --with dev
 # Or use pip in editable mode
 pip install -e ".[dev]"
 ```
-
-
 
 ## Benchmarking
 
