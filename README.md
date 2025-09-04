@@ -11,15 +11,16 @@
 
 **Reliable multi-object tracking: fast, accurate, and easy — perfect for top-view microscopy with hundreds of objects** 🎯
 
+
 <div align="center">
   <table>
     <tr>
       <td align="center">
-        <img src="https://github.com/user-attachments/assets/f67f8cb0-4d57-407c-9723-6dc7e5037a2c" width="400" alt="Detection Demo">
-        <br><b>Reliable real-time tracking of paramecia at 100 FPS over an entire arena with 150 individuals has never been easier</b>
+        <img src="https://github.com/user-attachments/assets/f67f8cb0-4d57-407c-9723-6dc7e5037a2c" style="width:80%;" alt="Detection Demo">
+        <br><b>Real-time tracking of 150 paramecia at 100 FPS</b>
       </td>
       <td align="center">
-        <img src="https://github.com/user-attachments/assets/b1a95557-a1db-4328-9442-d85c41d82e7c" width="800" alt="Tracking Demo">
+        <img src="https://github.com/user-attachments/assets/b1a95557-a1db-4328-9442-d85c41d82e7c" style="width:90%;" alt="Tracking Demo">
         <br><b>Real time performances for up to 500 individuals</b>
       </td>
     </tr>
