@@ -481,6 +481,8 @@ SwarmSort is optimized for real-world performance:
 ## Visualization Example
 
 SwarmSort includes built-in visualization utilities for beautiful tracking displays:
+<details>
+  <summary>Click to expand code example</summary>
 
 ```python
 import cv2
@@ -552,6 +554,8 @@ cap.release()
 cv2.destroyAllWindows()
 ```
 
+</details>
+
 ### Quick Visualization (One-liner)
 
 For quick prototyping, use the convenience function:
@@ -566,6 +570,9 @@ frame_with_tracks = quick_visualize(frame, tracked_objects, show_trails=True)
 ### Custom Drawing (If you need more control)
 
 If you prefer to implement custom visualization:
+
+<details>
+  <summary>Click to expand code example</summary>
 
 ```python
 import cv2
@@ -622,9 +629,14 @@ def draw_tracks(frame, tracked_objects, show_trails=True):
     return frame
 ```
 
+</details>
+
 ### Simple Visualization with Matplotlib
 
 For a simpler visualization or for Jupyter notebooks:
+
+<details>
+  <summary>Click to expand code example</summary>
 
 ```python
 import matplotlib.pyplot as plt
@@ -716,6 +728,8 @@ plt.show()
 # To save as video:
 # anim.save('tracking_visualization.mp4', writer='ffmpeg', fps=20)
 ```
+
+</details>
 
 ## 🚀 Advanced Features
 
