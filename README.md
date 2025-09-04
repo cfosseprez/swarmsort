@@ -8,6 +8,7 @@
 ![logo](https://raw.githubusercontent.com/cfosseprez/swarmsort/main/docs/_static/readme_assets/logo-swarmsort-horizontal.jpg)
 
 
+
 # SwarmSort
 
 **Reliable multi-object tracking-by-detection: fast, accurate, and easy — perfect for top-view microscopy with hundreds of objects** 🎯
