@@ -75,7 +75,8 @@ If you use SwarmSort in your research, please cite:
     title={SwarmSort: High-Performance Multi-Object Tracking},
     author={Charles Fosseprez},
     year={2025},
-    url={https://github.com/cfosseprez/swarmsort}
+    url={https://github.com/cfosseprez/swarmsort},
+    doi={10.5281/zenodo.17051857}
 }
 ```
 ## 📖 Documentation
