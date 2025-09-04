@@ -1059,7 +1059,7 @@ class FastTrackState:
     _cached_avg_embedding: Optional[np.ndarray] = None
     _cache_valid: bool = False
 
-    # NEW: Cache for multi-embedding computation
+    # Cache for multi-embedding computation
     _cached_representative_embedding: Optional[np.ndarray] = None
     _representative_cache_valid: bool = False
 
@@ -1301,7 +1301,7 @@ class FastTrackState:
                     self.velocity[1] = (self.observation_history_array[-1, 1] - 
                                        self.observation_history_array[-2, 1]) / dt
 
-        # NEW: Add embedding to history
+        # Add embedding to history
         if embedding is not None:
             self.add_embedding(embedding)
 
@@ -1552,7 +1552,7 @@ class SwarmSortTracker:
         self._next_id = 1
         self._frame_count = 0
 
-        # NEW: Store assignment methods for debugging/analysis
+        # Store assignment methods for debugging/analysis
         self._assignment_methods = {}
 
         # embedding scaler

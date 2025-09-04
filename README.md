@@ -466,7 +466,92 @@ SwarmSort is optimized for real-world performance:
 
 ## Visualization Example
 
-Here's a complete example showing how to visualize tracking results:
+SwarmSort includes built-in visualization utilities for beautiful tracking displays:
+
+```python
+import cv2
+import numpy as np
+from swarmsort import SwarmSortTracker, Detection, SwarmSortConfig
+from swarmsort import TrackingVisualizer, VisualizationConfig
+
+# Initialize tracker with your preferred settings
+config = SwarmSortConfig(
+    do_embeddings=True,
+    embedding_function='cupytexture',  # or 'mega_cupytexture' for more features
+    assignment_strategy='hybrid',
+    uncertainty_weight=0.33
+)
+tracker = SwarmSortTracker(config)
+
+# Initialize visualizer with custom settings
+vis_config = VisualizationConfig(
+    show_trails=True,
+    trail_length=30,
+    show_ids=True,
+    show_confidence=True,
+    show_velocity_vectors=True,
+    id_font_scale=0.5,
+    id_thickness=2,
+    box_thickness=2
+)
+visualizer = TrackingVisualizer(vis_config)
+
+# Example usage with video
+cap = cv2.VideoCapture('video.mp4')  # Or use 0 for webcam
+
+while True:
+    ret, frame = cap.read()
+    if not ret:
+        break
+    
+    # Detect objects (replace with your detector)
+    # Here's a mock detection for demonstration
+    detections = [
+        Detection(
+            position=np.array([100, 200]),
+            confidence=0.9,
+            bbox=np.array([80, 180, 120, 220])
+        ),
+        Detection(
+            position=np.array([300, 400]),
+            confidence=0.85,
+            bbox=np.array([280, 380, 320, 420])
+        )
+    ]
+    
+    # Update tracker
+    tracked_objects = tracker.update(detections)
+    
+    # Draw tracking results with built-in visualizer
+    frame = visualizer.draw_tracks(frame, tracked_objects)
+    
+    # Optionally show recently lost tracks
+    recently_lost = tracker.get_recently_lost_tracks(max_frames_lost=5)
+    frame = visualizer.draw_lost_tracks(frame, recently_lost)
+    
+    # Display frame
+    cv2.imshow('SwarmSort Tracking', frame)
+    if cv2.waitKey(1) & 0xFF == ord('q'):
+        break
+
+cap.release()
+cv2.destroyAllWindows()
+```
+
+### Quick Visualization (One-liner)
+
+For quick prototyping, use the convenience function:
+
+```python
+from swarmsort import quick_visualize
+
+# One line to visualize tracking results!
+frame_with_tracks = quick_visualize(frame, tracked_objects, show_trails=True)
+```
+
+### Custom Drawing (If you need more control)
+
+If you prefer to implement custom visualization:
 
 ```python
 import cv2
@@ -474,12 +559,7 @@ import numpy as np
 from swarmsort import SwarmSortTracker, Detection, SwarmSortConfig
 
 # Initialize tracker
-config = SwarmSortConfig(
-    do_embeddings=True,
-    assignment_strategy='hybrid',
-    uncertainty_weight=0.33
-)
-tracker = SwarmSortTracker(config)
+tracker = SwarmSortTracker(SwarmSortConfig(do_embeddings=True))
 
 # Function to draw tracking results
 def draw_tracks(frame, tracked_objects, show_trails=True):
@@ -526,51 +606,6 @@ def draw_tracks(frame, tracked_objects, show_trails=True):
                          if k in active_ids}
     
     return frame
-
-# Example usage with video
-cap = cv2.VideoCapture('video.mp4')  # Or use 0 for webcam
-
-while True:
-    ret, frame = cap.read()
-    if not ret:
-        break
-    
-    # Detect objects (replace with your detector)
-    # Here's a mock detection for demonstration
-    detections = [
-        Detection(
-            position=np.array([100, 200]),
-            confidence=0.9,
-            bbox=np.array([80, 180, 120, 220])
-        ),
-        Detection(
-            position=np.array([300, 400]),
-            confidence=0.85,
-            bbox=np.array([280, 380, 320, 420])
-        )
-    ]
-    
-    # Update tracker
-    tracked_objects = tracker.update(detections)
-    
-    # Draw results
-    frame = draw_tracks(frame, tracked_objects, show_trails=True)
-    
-    # Show recently lost tracks in different style
-    recently_lost = tracker.get_recently_lost_tracks(max_frames_lost=5)
-    for obj in recently_lost:
-        cx, cy = obj.position.astype(int)
-        cv2.circle(frame, (cx, cy), 8, (128, 128, 128), 1)  # Gray dashed circle
-        cv2.putText(frame, f"Lost:{obj.id}", (cx-20, cy-15),
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.4, (128, 128, 128), 1)
-    
-    # Display frame
-    cv2.imshow('SwarmSort Tracking', frame)
-    if cv2.waitKey(1) & 0xFF == ord('q'):
-        break
-
-cap.release()
-cv2.destroyAllWindows()
 ```
 
 ### Simple Visualization with Matplotlib
