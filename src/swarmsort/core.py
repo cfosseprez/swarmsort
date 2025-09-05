@@ -1252,11 +1252,24 @@ class FastTrackState:
             bbox: Optional[np.ndarray],
             current_frame: int,
             detection_confidence: float = 0.0,
+            is_reid: bool = False,
     ):
-        """Updated detection update with embedding history and observation history"""
+        """Updated detection update with embedding history and observation history
+        
+        Args:
+            new_pos: New position from detection
+            embedding: Optional embedding vector
+            bbox: Optional bounding box
+            current_frame: Current frame number
+            detection_confidence: Detection confidence score
+            is_reid: If True, this is a re-identification update (handle velocity differently)
+        """
         # Update observation history FIRST
         self.update_observation_history(new_pos, current_frame)
 
+        # Calculate frame gap for ReID detection
+        frame_gap = current_frame - self.last_detection_frame if self.last_detection_frame >= 0 else 1
+        
         # Same spatial update as before
         self.last_detection_pos = new_pos.astype(np.float32)
         self.last_detection_frame = current_frame
@@ -1270,10 +1283,17 @@ class FastTrackState:
             self.kalman_state = simple_kalman_update(self.kalman_state, new_pos_f32)
 
             if self.hits > 0:
-                dt = 1.0
-                new_velocity = (new_pos_f32 - self.position) / dt
-                self.kalman_state[2] = 0.7 * new_velocity[0] + 0.3 * self.kalman_state[2]
-                self.kalman_state[3] = 0.7 * new_velocity[1] + 0.3 * self.kalman_state[3]
+                # Check if this is a ReID or large gap (> 5 frames)
+                if is_reid or frame_gap > 5:
+                    # ReID case: Don't calculate velocity from gap, decay existing velocity
+                    self.kalman_state[2] *= 0.3  # Heavily dampen X velocity
+                    self.kalman_state[3] *= 0.3  # Heavily dampen Y velocity
+                else:
+                    # Normal update with proper dt
+                    dt = float(frame_gap) if frame_gap > 0 else 1.0
+                    new_velocity = (new_pos_f32 - self.position) / dt
+                    self.kalman_state[2] = 0.7 * new_velocity[0] + 0.3 * self.kalman_state[2]
+                    self.kalman_state[3] = 0.7 * new_velocity[1] + 0.3 * self.kalman_state[3]
 
             self.position = self.kalman_state[:2].copy()
             self.velocity = self.kalman_state[2:].copy()
@@ -1294,12 +1314,17 @@ class FastTrackState:
             
             # Compute velocity from observations
             if len(self.observation_frames_array) >= 2:
-                dt = self.observation_frames_array[-1] - self.observation_frames_array[-2]
-                if dt > 0:
-                    self.velocity[0] = (self.observation_history_array[-1, 0] - 
-                                       self.observation_history_array[-2, 0]) / dt
-                    self.velocity[1] = (self.observation_history_array[-1, 1] - 
-                                       self.observation_history_array[-2, 1]) / dt
+                # For ReID or large gaps, be careful with velocity
+                if is_reid or frame_gap > 5:
+                    # Don't compute velocity from large gap, keep small or zero
+                    self.velocity *= 0.3  # Dampen existing velocity
+                else:
+                    dt = self.observation_frames_array[-1] - self.observation_frames_array[-2]
+                    if dt > 0:
+                        self.velocity[0] = (self.observation_history_array[-1, 0] - 
+                                           self.observation_history_array[-2, 0]) / dt
+                        self.velocity[1] = (self.observation_history_array[-1, 1] - 
+                                           self.observation_history_array[-2, 1]) / dt
 
         # Add embedding to history
         if embedding is not None:
@@ -1308,6 +1333,7 @@ class FastTrackState:
         if bbox is not None:
             self.bbox = np.asarray(bbox, dtype=np.float32)
 
+        # Increment counters
         self.hits += 1
         self.age += 1
         self.misses = 0
@@ -2607,41 +2633,16 @@ class SwarmSortTracker:
             track = tracks[track_idx]
 
             position = detection.position.flatten()[:2].astype(np.float32)
+            embedding = getattr(detection, "embedding", None)
+            bbox = getattr(detection, "bbox", None)
+            det_conf = self._get_detection_confidence(detection)
 
-            # Update observation history BEFORE spatial update
-            track.update_observation_history(position, self._frame_count)
-
-            # Rest of the existing update logic...
-            track.last_detection_pos = position
-            track.last_detection_frame = self._frame_count
-            track.detection_confidence = detection.confidence
-            track.confidence_score = detection.confidence
-
-            track.kalman_state = simple_kalman_update(track.kalman_state, position)
-
-            if track.hits > 0:
-                dt = 1.0
-                new_velocity = (position - track.position) / dt
-                track.kalman_state[2] = 0.7 * new_velocity[0] + 0.3 * track.kalman_state[2]
-                track.kalman_state[3] = 0.7 * new_velocity[1] + 0.3 * track.kalman_state[3]
-
-            track.position = track.kalman_state[:2].copy()
-            track.velocity = track.kalman_state[2:].copy()
-            track.predicted_position = track.position + track.velocity
-
-            # Handle embedding and bbox updates...
-            if hasattr(detection, "embedding") and detection.embedding is not None:
-                # Use the existing add_embedding method which respects freeze status
-                track.add_embedding_fast(detection.embedding, pre_normalized=True)
-
-            if hasattr(detection, "bbox") and detection.bbox is not None:
-                track.bbox = np.asarray(detection.bbox, dtype=np.float32)
-
-            track.hits += 1
-            track.age += 1
-            track.misses = 0
-            track.lost_frames = 0
-
+            # Use the unified update method (with is_reid=False for normal updates)
+            track.update_with_detection(
+                position, embedding, bbox, self._frame_count, det_conf, is_reid=False
+            )
+            
+            # Only handle confirmation here (counters are updated in update_with_detection)
             if track.hits >= self.min_consecutive_detections:
                 track.confirmed = True
 
@@ -2916,14 +2917,14 @@ class SwarmSortTracker:
                         f"  Embedding distance: {scaled_embedding_matrix[det_idx_in_matrix, best_track_idx]:.3f}"
                     )
 
-                # Update track
+                # Update track with ReID flag
                 position = detection.position.flatten()[:2].astype(np.float32)
                 embedding = detection.embedding
                 bbox = getattr(detection, "bbox", None)
                 det_conf = self._get_detection_confidence(detection)
 
                 best_track.update_with_detection(
-                    position, embedding, bbox, self._frame_count, det_conf
+                    position, embedding, bbox, self._frame_count, det_conf, is_reid=True
                 )
                 # Track is already in self._tracks, no need to move it
                 reid_matches.append(original_det_idx)
