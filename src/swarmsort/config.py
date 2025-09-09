@@ -9,6 +9,9 @@ Classes:
     BaseConfig: Base configuration class with YAML loading capabilities
     SwarmSortConfig: Main configuration class for SwarmSort tracker parameters
 """
+# ============================================================================
+# STANDARD IMPORTS
+# ============================================================================
 from dataclasses import dataclass, field
 from typing import Dict, Any, Optional, Literal, Type, TypeVar
 from pathlib import Path

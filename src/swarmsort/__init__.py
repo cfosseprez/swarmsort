@@ -117,6 +117,15 @@ from .swarmtracker_adapter import (
     FastMultiHypothesisTracker,
 )
 
+# Input preparation utilities
+from .prepare_input import (
+    yolo_to_detections,
+    yolo_to_detections_batch,
+    numpy_to_detections,
+    verify_detections,
+    prepare_detections,
+)
+
 # Visualization and simulation tools (optional)
 try:
     from .drawing_utils import (
@@ -207,6 +216,12 @@ __all__ = [
     "TrackingResult",
     "create_tracked_object_fast",
     "FastMultiHypothesisTracker",
+    # Input preparation utilities
+    "yolo_to_detections",
+    "yolo_to_detections_batch",
+    "numpy_to_detections",
+    "verify_detections",
+    "prepare_detections",
     # Constants
     "INTEGRATION_AVAILABLE",
     "VISUALIZATION_AVAILABLE",

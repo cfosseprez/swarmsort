@@ -175,16 +175,120 @@ while True:
         break
 ```
 
+### 🔌 Direct Integration with YOLO and Other Detectors
+
+SwarmSort seamlessly integrates with popular object detectors through optimized conversion utilities:
+
+#### **YOLO v8/v11 Integration**
+```python
+from ultralytics import YOLO
+from swarmsort import yolo_to_detections, SwarmSortTracker, SwarmSortConfig
+
+# Initialize YOLO detector
+model = YOLO('yolov8n.pt')  # or yolov11n.pt, yolov8x.pt, etc.
+
+# Initialize SwarmSort tracker
+tracker = SwarmSortTracker(SwarmSortConfig(
+    max_distance=150,
+    uncertainty_weight=0.3
+))
+
+# Process video stream
+cap = cv2.VideoCapture('video.mp4')
+while True:
+    ret, frame = cap.read()
+    if not ret:
+        break
+    
+    # Detect objects with YOLO
+    results = model.predict(frame, conf=0.5)
+    
+    # Convert YOLO output to SwarmSort format (optimized, zero-copy when possible)
+    detections = yolo_to_detections(
+        results[0], 
+        confidence_threshold=0.5,
+        class_filter=[0, 1, 2]  # Only track persons, bicycles, cars
+    )
+    
+    # Track objects
+    tracked_objects = tracker.update(detections)
+    
+    # Draw results
+    for obj in tracked_objects:
+        if obj.bbox is not None:
+            x1, y1, x2, y2 = obj.bbox.astype(int)
+            cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+            cv2.putText(frame, f"ID:{obj.id}", (x1, y1-10),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+```
+
+#### **Custom Detector Integration**
+```python
+from swarmsort import numpy_to_detections, prepare_detections
+
+# If your detector outputs numpy arrays
+boxes = np.array([[100, 100, 200, 200],  # [x1, y1, x2, y2] format
+                  [300, 150, 400, 250]])
+confidences = np.array([0.9, 0.85])
+
+# Convert to SwarmSort format
+detections = numpy_to_detections(
+    boxes=boxes,
+    confidences=confidences,
+    format='xyxy'  # Supports: 'xyxy', 'xywh', 'cxcywh'
+)
+
+# Or with embeddings from your own feature extractor
+embeddings = your_feature_extractor(image_patches)  # Shape: (N, embedding_dim)
+detections = numpy_to_detections(boxes, confidences, embeddings=embeddings)
+```
+
+#### **Universal Auto-Conversion**
+```python
+from swarmsort import prepare_detections
+
+# Automatically detects format and converts + verifies
+detections = prepare_detections(
+    any_detection_data,  # YOLO results, numpy arrays, or Detection objects
+    source_format='auto',  # Auto-detects format
+    confidence_threshold=0.5,
+    auto_fix=True  # Fixes common issues (clips bounds, normalizes, etc.)
+)
+
+# The prepare_detections function:
+# ✓ Auto-detects input format (YOLO, numpy, etc.)
+# ✓ Converts to SwarmSort Detection format
+# ✓ Validates all inputs
+# ✓ Auto-fixes common issues (out-of-bounds, NaN values, etc.)
+# ✓ Optimized with vectorized operations
+```
+
+#### **Batch Processing for Maximum Speed**
+```python
+# Process entire video in batches (useful for offline analysis)
+from swarmsort import yolo_to_detections_batch
+
+# Get all YOLO predictions at once
+results = model.predict('video.mp4', stream=True)
+all_detections = yolo_to_detections_batch(list(results))
+
+# Track through all frames
+all_tracks = []
+for frame_detections in all_detections:
+    tracked = tracker.update(frame_detections)
+    all_tracks.append(tracked)
+```
+
 
 ###  Using Visual Features (Embeddings) for Better Tracking
-
-SwarmSort can use your GPU for fast lightweight embedding (Optional)
-Or embeddings can be directly passed in the Detection.
 
 Embeddings help the tracker recognize objects by their appearance, not just position. This is super useful when:
 - Objects move quickly or unpredictably
 - Multiple similar objects are close together
 - Objects temporarily disappear and reappear
+
+
+SwarmSort can use your GPU for the integrated default fast lightweight embedding:
 
 ```python
 from swarmsort import SwarmSortTracker, SwarmSortConfig, Detection
@@ -196,7 +300,11 @@ config = SwarmSortConfig(
     embedding_weight=1.0,  # How much to trust appearance vs motion
 )
 tracker = SwarmSortTracker(config)
+```
 
+Or you can use a personalized embedding, and pass it directly the Detection.
+
+```python
 # In practice, embeddings come from a feature extractor (ResNet, etc.)
 # Here's a simple example:
 def get_embedding_from_image(image_patch):
