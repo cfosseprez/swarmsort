@@ -1255,6 +1255,7 @@ class FastTrackState:
             bbox: Optional[np.ndarray],
             current_frame: int,
             detection_confidence: float = 0.0,
+            is_reid: bool = False,
     ):
         """Updated detection update with embedding history and observation history"""
         # Update observation history FIRST
@@ -1269,14 +1270,25 @@ class FastTrackState:
         new_pos_f32 = new_pos.astype(np.float32)
 
         if self.kalman_type == "simple":
-            # Simple Kalman filter update
-            self.kalman_state = simple_kalman_update(self.kalman_state, new_pos_f32)
+            # Check if this is a ReID update (track was lost and now found again)
+            is_reid_update = is_reid or (self.misses > 0)
+            
+            if is_reid_update:
+                # Reset Kalman state for ReID to prevent overshooting from stale velocity
+                # Simple approach: reset both position and velocity to current detection
+                self.kalman_state[0] = new_pos_f32[0]  # x position
+                self.kalman_state[1] = new_pos_f32[1]  # y position  
+                self.kalman_state[2] = 0.0  # x velocity - reset to zero
+                self.kalman_state[3] = 0.0  # y velocity - reset to zero
+            else:
+                # Normal Kalman filter update
+                self.kalman_state = simple_kalman_update(self.kalman_state, new_pos_f32)
 
-            if self.hits > 0:
-                dt = 1.0
-                new_velocity = (new_pos_f32 - self.position) / dt
-                self.kalman_state[2] = 0.7 * new_velocity[0] + 0.3 * self.kalman_state[2]
-                self.kalman_state[3] = 0.7 * new_velocity[1] + 0.3 * self.kalman_state[3]
+                if self.hits > 0:
+                    dt = 1.0
+                    new_velocity = (new_pos_f32 - self.position) / dt
+                    self.kalman_state[2] = 0.7 * new_velocity[0] + 0.3 * self.kalman_state[2]
+                    self.kalman_state[3] = 0.7 * new_velocity[1] + 0.3 * self.kalman_state[3]
 
             self.position = self.kalman_state[:2]
             self.velocity = self.kalman_state[2:]
@@ -3044,7 +3056,7 @@ class SwarmSortTracker:
                 det_conf = self._get_detection_confidence(detection)
 
                 best_track.update_with_detection(
-                    position, embedding, bbox, self._frame_count, det_conf
+                    position, embedding, bbox, self._frame_count, det_conf, is_reid=True
                 )
                 # Track is already in self._tracks, no need to move it
                 reid_matches.append(original_det_idx)
