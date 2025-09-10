@@ -1573,7 +1573,12 @@ class SwarmSortTracker:
         self._reusable_cost_matrix = None
         self._max_dets_seen = 0
         self._max_tracks_seen = 0
-        self._frame_det_embeddings_valid = -1  # Track which frame embeddings are valid for
+        
+        # Frame-level embedding caches to avoid recomputation
+        self._frame_det_embeddings_valid = -1
+        self._cached_det_embeddings = None
+        self._frame_track_embeddings_valid = -1
+        self._cached_track_embeddings = None
 
         logger.info(
             f"\033[0;38;5;45mInitialized SwarmSortTracker with parameters:\n"
@@ -2280,24 +2285,42 @@ class SwarmSortTracker:
         scaled_embedding_matrix = np.zeros((n_dets, n_tracks), dtype=np.float32)
         if do_embeddings:
             if start: start("embedding_computation")
+            
+            # Use cached frame embeddings if available
+            if (self._frame_det_embeddings_valid == self._frame_count and 
+                self._cached_det_embeddings is not None and
+                self._cached_det_embeddings.shape[0] == n_dets):
+                det_embeddings = self._cached_det_embeddings
+            else:
+                # Compute and cache detection embeddings for this frame
+                det_embeddings = np.empty((n_dets, detections[0].embedding.shape[0]), dtype=np.float32)
+                for i, det in enumerate(detections):
+                    det_embeddings[i] = det.embedding
+                self._cached_det_embeddings = det_embeddings
+                self._frame_det_embeddings_valid = self._frame_count
 
-            # Fast embedding computation (reuse existing optimized code)
-            det_embeddings = np.empty((n_dets, detections[0].embedding.shape[0]), dtype=np.float32)
-            for i, det in enumerate(detections):
-                det_embeddings[i] = det.embedding
+            # Use cached track embeddings if available
+            if (self._frame_track_embeddings_valid == self._frame_count and 
+                self._cached_track_embeddings is not None and
+                self._cached_track_embeddings.shape[0] == n_tracks):
+                track_embeddings = self._cached_track_embeddings
+            else:
+                # Compute and cache track embeddings
+                track_embeddings = np.empty((n_tracks, det_embeddings.shape[1]), dtype=np.float32)
+                for i, track in enumerate(tracks):
+                    if (track._representative_cache_valid and
+                        track._cached_representative_embedding is not None):
+                        track_embeddings[i] = track._cached_representative_embedding
+                    elif len(track.embedding_history) > 0:
+                        track_embeddings[i] = track.embedding_history[-1]
+                    else:
+                        track_embeddings[i] = np.zeros(det_embeddings.shape[1], dtype=np.float32)
+                self._cached_track_embeddings = track_embeddings
+                self._frame_track_embeddings_valid = self._frame_count
 
-            track_embeddings = np.empty((n_tracks, det_embeddings.shape[1]), dtype=np.float32)
-            for i, track in enumerate(tracks):
-                if (track._representative_cache_valid and
-                    track._cached_representative_embedding is not None):
-                    track_embeddings[i] = track._cached_representative_embedding
-                elif len(track.embedding_history) > 0:
-                    track_embeddings[i] = track.embedding_history[-1]
-                else:
-                    track_embeddings[i] = np.zeros(det_embeddings.shape[1], dtype=np.float32)
-
+            # Ultra-fast cosine similarity computation using matrix multiplication
             cos_similarities = det_embeddings @ track_embeddings.T
-            raw_distances = (1.0 - cos_similarities) / 2.0
+            raw_distances = (1.0 - cos_similarities) * 0.5  # Optimized: avoid division
             raw_distances_flat = raw_distances.flatten()
             scaled_distances_flat = self.embedding_scaler.scale_distances(raw_distances_flat)
             self.embedding_scaler.update_statistics(raw_distances_flat)
@@ -2462,22 +2485,38 @@ class SwarmSortTracker:
         scaled_embedding_matrix = np.zeros((n_dets, n_tracks), dtype=np.float32)
         if do_embeddings:
             if start: start("embedding_computation")
-            det_embeddings = np.empty((n_dets, detections[0].embedding.shape[0]), dtype=np.float32)
-            for i, det in enumerate(detections):
-                det_embeddings[i] = det.embedding
+            
+            # Reuse cached embeddings from previous computation if available
+            if (self._frame_det_embeddings_valid == self._frame_count and 
+                self._cached_det_embeddings is not None and
+                self._cached_det_embeddings.shape[0] == n_dets):
+                det_embeddings = self._cached_det_embeddings
+            else:
+                det_embeddings = np.empty((n_dets, detections[0].embedding.shape[0]), dtype=np.float32)
+                for i, det in enumerate(detections):
+                    det_embeddings[i] = det.embedding
+                self._cached_det_embeddings = det_embeddings
+                self._frame_det_embeddings_valid = self._frame_count
 
-            track_embeddings = np.empty((n_tracks, det_embeddings.shape[1]), dtype=np.float32)
-            for i, track in enumerate(tracks):
-                if (track._representative_cache_valid and
-                    track._cached_representative_embedding is not None):
-                    track_embeddings[i] = track._cached_representative_embedding
-                elif len(track.embedding_history) > 0:
-                    track_embeddings[i] = track.embedding_history[-1]
-                else:
-                    track_embeddings[i] = np.zeros(det_embeddings.shape[1], dtype=np.float32)
+            if (self._frame_track_embeddings_valid == self._frame_count and 
+                self._cached_track_embeddings is not None and
+                self._cached_track_embeddings.shape[0] == n_tracks):
+                track_embeddings = self._cached_track_embeddings
+            else:
+                track_embeddings = np.empty((n_tracks, det_embeddings.shape[1]), dtype=np.float32)
+                for i, track in enumerate(tracks):
+                    if (track._representative_cache_valid and
+                        track._cached_representative_embedding is not None):
+                        track_embeddings[i] = track._cached_representative_embedding
+                    elif len(track.embedding_history) > 0:
+                        track_embeddings[i] = track.embedding_history[-1]
+                    else:
+                        track_embeddings[i] = np.zeros(det_embeddings.shape[1], dtype=np.float32)
+                self._cached_track_embeddings = track_embeddings
+                self._frame_track_embeddings_valid = self._frame_count
 
             cos_similarities = det_embeddings @ track_embeddings.T
-            raw_distances = (1.0 - cos_similarities) / 2.0
+            raw_distances = (1.0 - cos_similarities) * 0.5  # Optimized: avoid division
             raw_distances_flat = raw_distances.flatten()
             scaled_distances_flat = self.embedding_scaler.scale_distances(raw_distances_flat)
             self.embedding_scaler.update_statistics(raw_distances_flat)
@@ -2605,13 +2644,13 @@ class SwarmSortTracker:
         logger.info("=== END EMBEDDING DEBUG ===\n")
 
     def _update_matched_tracks(self, matches, detections):
-        """Ultra-fast vectorized track update - avoid per-track overhead"""
+        """Ultra-fast vectorized track update with batch embedding processing"""
         if not matches:
             return
 
         tracks = list(self._tracks.values())
         
-        # Simple updates for simple kalman (90%+ of cases)
+        # Separate simple and OC tracks
         simple_matches = []
         oc_matches = []
         
@@ -2622,11 +2661,11 @@ class SwarmSortTracker:
             else:
                 oc_matches.append((det_idx, track_idx))
         
-        # Vectorized simple Kalman updates
+        # Ultra-fast vectorized simple Kalman updates
         if simple_matches:
-            self._update_simple_tracks_vectorized(simple_matches, detections, tracks)
+            self._update_simple_tracks_ultra_fast(simple_matches, detections, tracks)
         
-        # Handle OC-SORT tracks (rare)
+        # Handle OC-SORT tracks (rare) - keep individual processing for complex logic
         for det_idx, track_idx in oc_matches:
             detection = detections[det_idx]
             track = tracks[track_idx]
@@ -2639,58 +2678,93 @@ class SwarmSortTracker:
                 detection.confidence
             )
     
-    def _update_simple_tracks_vectorized(self, matches, detections, tracks):
-        """Vectorized update for simple Kalman tracks"""
+    def _update_simple_tracks_ultra_fast(self, matches, detections, tracks):
+        """Ultra-fast batch update for simple Kalman tracks with minimal overhead"""
         if not matches:
             return
             
         n_matches = len(matches)
+        alpha = 0.7  # Kalman smoothing factor
         
-        # Extract all positions at once
+        # Pre-allocate arrays for batch operations
         positions = np.empty((n_matches, 2), dtype=np.float32)
-        for i, (det_idx, _) in enumerate(matches):
-            positions[i] = detections[det_idx].position.flatten()[:2]
+        embeddings_to_add = []
+        bboxes_to_add = []
+        tracks_to_update = []
         
-        # Update all tracks in batch
+        # First pass: extract all data and prepare batch operations
         for i, (det_idx, track_idx) in enumerate(matches):
             track = tracks[track_idx]
             detection = detections[det_idx]
-            pos = positions[i]
+            pos = detection.position.flatten()[:2].astype(np.float32)
+            positions[i] = pos
             
-            # Fast update without function calls
+            # Collect embedding and bbox data for batch processing
+            if (hasattr(detection, "embedding") and detection.embedding is not None 
+                and not track.embedding_frozen):
+                embeddings_to_add.append((track, detection.embedding))
+            
+            if hasattr(detection, "bbox") and detection.bbox is not None:
+                bboxes_to_add.append((track, detection.bbox))
+                
+            tracks_to_update.append((track, detection, pos))
+        
+        # Second pass: ultra-fast track updates with minimal per-track overhead
+        for i, (track, detection, pos) in enumerate(tracks_to_update):
+            # Basic state updates (fastest possible)
             track.last_detection_pos = pos
             track.last_detection_frame = self._frame_count
             track.detection_confidence = detection.confidence
             track.confidence_score = detection.confidence
             
-            # Inline Kalman (avoid function call)
-            alpha = 0.7
+            # Store old position for velocity calculation
+            old_pos_x, old_pos_y = track.position[0], track.position[1]
+            
+            # Inline Kalman update (no function calls) - matches simple_kalman_update logic
             track.kalman_state[0] = alpha * pos[0] + (1 - alpha) * track.kalman_state[0]
             track.kalman_state[1] = alpha * pos[1] + (1 - alpha) * track.kalman_state[1]
-            # Velocity stays same: track.kalman_state[2:] unchanged
             
-            track.position = track.kalman_state[:2]
-            track.velocity = track.kalman_state[2:]
-            track.predicted_position = track.position + track.velocity
+            # Update velocity if track has hits (matches original logic)
+            if track.hits > 0:
+                new_velocity_x = pos[0] - old_pos_x  # dt = 1.0
+                new_velocity_y = pos[1] - old_pos_y
+                track.kalman_state[2] = 0.7 * new_velocity_x + 0.3 * track.kalman_state[2]
+                track.kalman_state[3] = 0.7 * new_velocity_y + 0.3 * track.kalman_state[3]
             
-            # Handle embedding if present and not frozen
-            if (hasattr(detection, "embedding") and detection.embedding is not None 
-                and not track.embedding_frozen):
-                track.add_embedding(detection.embedding)
+            # Update derived positions
+            track.position[0] = track.kalman_state[0]
+            track.position[1] = track.kalman_state[1]
+            track.velocity[0] = track.kalman_state[2]
+            track.velocity[1] = track.kalman_state[3]
+            track.predicted_position[0] = track.position[0] + track.velocity[0]
+            track.predicted_position[1] = track.position[1] + track.velocity[1]
             
-            # Update bbox
-            if hasattr(detection, "bbox") and detection.bbox is not None:
-                track.bbox = detection.bbox
-            
-            # Update counters
+            # Update counters (fastest operations)
             track.hits += 1
             track.age += 1
             track.misses = 0
             track.lost_frames = 0
             
-            # Confirmation check
+            # Confirmation check (minimal logic)
             if not track.confirmed and track.hits >= self.min_consecutive_detections:
                 track.confirmed = True
+        
+        # Batch process embeddings (avoid repeated function calls)
+        for track, embedding in embeddings_to_add:
+            # Direct embedding addition with minimal overhead
+            if embedding is not None:
+                embedding = np.asarray(embedding, dtype=np.float32)
+                norm = np.linalg.norm(embedding)
+                if norm > 0:
+                    normalized_emb = embedding / norm
+                    track.embedding_history.append(normalized_emb.copy())
+                    track.embedding_update_count += 1
+                    track._cache_valid = False
+                    track._representative_cache_valid = False
+        
+        # Batch process bboxes (minimal overhead)
+        for track, bbox in bboxes_to_add:
+            track.bbox = bbox
 
 
     def _update_embedding_freeze_status(self):
