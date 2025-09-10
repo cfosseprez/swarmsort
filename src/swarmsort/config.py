@@ -196,7 +196,7 @@ class SwarmSortConfig(BaseConfig):
 
     # Track initialization parameters
     init_conf_threshold: float = 0.  # Minimum confidence for track initialization (initialization filter)
-    min_consecutive_detections: int = 10  # Minimum consecutive detections to create track
+    min_consecutive_detections: int = 3  # Minimum consecutive detections to create track
     max_detection_gap: int = 2  # Maximum gap between detections for same pending track
     pending_detection_distance: float = max_distance  # Distance threshold for pending detection matching
 
@@ -208,7 +208,7 @@ class SwarmSortConfig(BaseConfig):
     # Debug options
     debug_embeddings: bool = False  # Enable embedding debugging output
     plot_embeddings: bool = False  # Generate embedding visualization plots
-    debug_timings: bool = False  # Enable timing debug output
+    debug_timings: bool = True  # Enable timing debug output
 
     def validate(self) -> None:
         """Validate configuration parameters."""

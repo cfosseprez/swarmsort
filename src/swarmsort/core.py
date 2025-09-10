@@ -735,11 +735,14 @@ def compute_assignment_priorities(cost_matrix: np.ndarray, max_distance: float) 
 
 @nb.njit(fastmath=True, cache=True)
 def simple_kalman_update(x_pred: np.ndarray, z: np.ndarray) -> np.ndarray:
-    """Simplified Kalman update - ORIGINAL"""
+    """Simplified Kalman update with proper type handling"""
     alpha = 0.7
     x_updated = np.zeros(4, dtype=np.float32)
-    x_updated[0] = alpha * z[0] + (1 - alpha) * x_pred[0]
-    x_updated[1] = alpha * z[1] + (1 - alpha) * x_pred[1]
+    # Ensure we're getting scalars by using .item() or flatten
+    z0 = z[0] if z.ndim == 1 else z.flat[0]
+    z1 = z[1] if z.ndim == 1 else z.flat[1]
+    x_updated[0] = alpha * z0 + (1 - alpha) * x_pred[0]
+    x_updated[1] = alpha * z1 + (1 - alpha) * x_pred[1]
     x_updated[2] = x_pred[2]
     x_updated[3] = x_pred[3]
     return x_updated
@@ -747,7 +750,7 @@ def simple_kalman_update(x_pred: np.ndarray, z: np.ndarray) -> np.ndarray:
 
 @nb.njit(fastmath=True, cache=True)
 def simple_kalman_predict(x: np.ndarray) -> np.ndarray:
-    """Simplified Kalman prediction - ORIGINAL"""
+    """Simplified Kalman prediction"""
     x_pred = np.zeros(4, dtype=np.float32)
     x_pred[0] = x[0] + x[2]
     x_pred[1] = x[1] + x[3]
@@ -1252,24 +1255,11 @@ class FastTrackState:
             bbox: Optional[np.ndarray],
             current_frame: int,
             detection_confidence: float = 0.0,
-            is_reid: bool = False,
     ):
-        """Updated detection update with embedding history and observation history
-        
-        Args:
-            new_pos: New position from detection
-            embedding: Optional embedding vector
-            bbox: Optional bounding box
-            current_frame: Current frame number
-            detection_confidence: Detection confidence score
-            is_reid: If True, this is a re-identification update (handle velocity differently)
-        """
+        """Updated detection update with embedding history and observation history"""
         # Update observation history FIRST
         self.update_observation_history(new_pos, current_frame)
 
-        # Calculate frame gap for ReID detection
-        frame_gap = current_frame - self.last_detection_frame if self.last_detection_frame >= 0 else 1
-        
         # Same spatial update as before
         self.last_detection_pos = new_pos.astype(np.float32)
         self.last_detection_frame = current_frame
@@ -1283,21 +1273,14 @@ class FastTrackState:
             self.kalman_state = simple_kalman_update(self.kalman_state, new_pos_f32)
 
             if self.hits > 0:
-                # Check if this is a ReID or large gap (> 5 frames)
-                if is_reid or frame_gap > 5:
-                    # ReID case: Don't calculate velocity from gap, decay existing velocity
-                    self.kalman_state[2] *= 0.3  # Heavily dampen X velocity
-                    self.kalman_state[3] *= 0.3  # Heavily dampen Y velocity
-                else:
-                    # Normal update with proper dt
-                    dt = float(frame_gap) if frame_gap > 0 else 1.0
-                    new_velocity = (new_pos_f32 - self.position) / dt
-                    self.kalman_state[2] = 0.7 * new_velocity[0] + 0.3 * self.kalman_state[2]
-                    self.kalman_state[3] = 0.7 * new_velocity[1] + 0.3 * self.kalman_state[3]
+                dt = 1.0
+                new_velocity = (new_pos_f32 - self.position) / dt
+                self.kalman_state[2] = 0.7 * new_velocity[0] + 0.3 * self.kalman_state[2]
+                self.kalman_state[3] = 0.7 * new_velocity[1] + 0.3 * self.kalman_state[3]
 
-            self.position = self.kalman_state[:2].copy()
-            self.velocity = self.kalman_state[2:].copy()
-            self.predicted_position = self.position + self.velocity
+            self.position = self.kalman_state[:2]
+            self.velocity = self.kalman_state[2:]
+            self.predicted_position = self.kalman_state[:2] + self.kalman_state[2:]
             
         elif self.kalman_type == "oc":
             # OC-SORT style update
@@ -1310,21 +1293,16 @@ class FastTrackState:
             )
             
             # Update current state
-            self.position = new_pos_f32.copy()
+            self.position = new_pos_f32
             
             # Compute velocity from observations
             if len(self.observation_frames_array) >= 2:
-                # For ReID or large gaps, be careful with velocity
-                if is_reid or frame_gap > 5:
-                    # Don't compute velocity from large gap, keep small or zero
-                    self.velocity *= 0.3  # Dampen existing velocity
-                else:
-                    dt = self.observation_frames_array[-1] - self.observation_frames_array[-2]
-                    if dt > 0:
-                        self.velocity[0] = (self.observation_history_array[-1, 0] - 
-                                           self.observation_history_array[-2, 0]) / dt
-                        self.velocity[1] = (self.observation_history_array[-1, 1] - 
-                                           self.observation_history_array[-2, 1]) / dt
+                dt = self.observation_frames_array[-1] - self.observation_frames_array[-2]
+                if dt > 0:
+                    self.velocity[0] = (self.observation_history_array[-1, 0] - 
+                                       self.observation_history_array[-2, 0]) / dt
+                    self.velocity[1] = (self.observation_history_array[-1, 1] - 
+                                       self.observation_history_array[-2, 1]) / dt
 
         # Add embedding to history
         if embedding is not None:
@@ -2002,9 +1980,14 @@ class SwarmSortTracker:
                         )
 
                     for i, det in enumerate(detections):
-                        emb = np.asarray(det.embedding, dtype=np.float32)
-                        norm = np.linalg.norm(emb)
-                        self._reusable_det_embeddings[i] = emb / norm if norm > 0 else emb
+                        emb = det.embedding
+                        # Check if already normalized (norm ≈ 1.0)
+                        norm_sq = np.dot(emb, emb)
+                        if abs(norm_sq - 1.0) > 0.01:  # Not normalized
+                            norm = np.sqrt(norm_sq)
+                            self._reusable_det_embeddings[i] = emb / norm if norm > 0 else emb
+                        else:
+                            self._reusable_det_embeddings[i] = emb
                     self._frame_det_embeddings_valid = self._frame_count
 
                 det_embeddings = self._reusable_det_embeddings[:n_dets]
@@ -2622,28 +2605,69 @@ class SwarmSortTracker:
         logger.info("=== END EMBEDDING DEBUG ===\n")
 
     def _update_matched_tracks(self, matches, detections):
-        """Enhanced update with observation history maintenance"""
+        """Optimized track update with inlined operations"""
         if not matches:
             return
 
         tracks = list(self._tracks.values())
-
+        
         for det_idx, track_idx in matches:
             detection = detections[det_idx]
             track = tracks[track_idx]
-
-            position = detection.position.flatten()[:2].astype(np.float32)
-            embedding = getattr(detection, "embedding", None)
-            bbox = getattr(detection, "bbox", None)
-            det_conf = self._get_detection_confidence(detection)
-
-            # Use the unified update method (with is_reid=False for normal updates)
-            track.update_with_detection(
-                position, embedding, bbox, self._frame_count, det_conf, is_reid=False
-            )
             
-            # Only handle confirmation here (counters are updated in update_with_detection)
-            if track.hits >= self.min_consecutive_detections:
+            # Get position and ensure proper 1D float32 array for Numba compatibility
+            position = detection.position.flatten()[:2].astype(np.float32)
+            
+            # Update track state directly (avoid function call overhead)
+            track.last_detection_pos = position
+            track.last_detection_frame = self._frame_count
+            track.detection_confidence = detection.confidence
+            track.confidence_score = detection.confidence
+            
+            # Inline simple Kalman update (most common case)
+            if track.kalman_type == "simple":
+                # Direct Kalman update
+                track.kalman_state = simple_kalman_update(track.kalman_state, position)
+                
+                if track.hits > 0:
+                    # Velocity update with dt=1 (inline calculation)
+                    new_vx = position[0] - track.position[0]
+                    new_vy = position[1] - track.position[1]
+                    track.kalman_state[2] = 0.7 * new_vx + 0.3 * track.kalman_state[2]
+                    track.kalman_state[3] = 0.7 * new_vy + 0.3 * track.kalman_state[3]
+                
+                # Update position/velocity references
+                track.position = track.kalman_state[:2]
+                track.velocity = track.kalman_state[2:]
+                track.predicted_position = track.position + track.velocity
+            else:
+                # Fall back to full update for OC-SORT
+                track.update_with_detection(
+                    position, 
+                    getattr(detection, "embedding", None),
+                    getattr(detection, "bbox", None),
+                    self._frame_count, 
+                    detection.confidence
+                )
+                continue
+            
+            # Handle embedding if present and not frozen
+            if hasattr(detection, "embedding") and detection.embedding is not None:
+                if not track.embedding_frozen:
+                    track.add_embedding(detection.embedding)
+            
+            # Update bbox if present
+            if hasattr(detection, "bbox") and detection.bbox is not None:
+                track.bbox = detection.bbox
+            
+            # Update counters
+            track.hits += 1
+            track.age += 1
+            track.misses = 0
+            track.lost_frames = 0
+            
+            # Confirmation check
+            if not track.confirmed and track.hits >= self.min_consecutive_detections:
                 track.confirmed = True
 
 
@@ -2924,7 +2948,7 @@ class SwarmSortTracker:
                 det_conf = self._get_detection_confidence(detection)
 
                 best_track.update_with_detection(
-                    position, embedding, bbox, self._frame_count, det_conf, is_reid=True
+                    position, embedding, bbox, self._frame_count, det_conf
                 )
                 # Track is already in self._tracks, no need to move it
                 reid_matches.append(original_det_idx)
