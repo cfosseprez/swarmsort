@@ -164,8 +164,8 @@ class SwarmSortConfig(BaseConfig):
     kalman_type: Literal["simple", "oc"] = "simple"  # Kalman filter type: simple or OC-SORT style
     
     # Uncertainty-based cost system for smart collision handling
-    uncertainty_weight: float = 0.33  # Weight for uncertainty penalties (0 = disabled, typical 0.2-0.5)
-    local_density_radius: float = max_distance  # Radius for computing local track density
+    uncertainty_weight: float = 0.15  # Weight for uncertainty penalties (0 = disabled, typical 0.2-0.5)
+    local_density_radius: float = max_distance/2  # Radius for computing local track density
     
     # Embedding freeze (simplified density-based)
     collision_freeze_embeddings: bool = True  # Freeze embedding updates in dense areas
@@ -195,8 +195,8 @@ class SwarmSortConfig(BaseConfig):
     reid_embedding_threshold: float = 0.3  # Embedding threshold for ReID (lower more permissive)
 
     # Track initialization parameters
-    init_conf_threshold: float = 0  # Minimum confidence for track initialization (initialization filter)
-    min_consecutive_detections: int = 6  # Minimum consecutive detections to create track
+    init_conf_threshold: float = 0.  # Minimum confidence for track initialization (initialization filter)
+    min_consecutive_detections: int = 10  # Minimum consecutive detections to create track
     max_detection_gap: int = 2  # Maximum gap between detections for same pending track
     pending_detection_distance: float = max_distance  # Distance threshold for pending detection matching
 

@@ -20,7 +20,7 @@ keywords:
   - tracking-by-detection
   - kalman-filter
   - hungarian-algorithm
-version: 1.0.0
+version: 1.1.0
 date-released: '2025-09-04'
 doi: 10.5281/zenodo.17051857
 repository-code: 'https://github.com/cfosseprez/swarmsort'

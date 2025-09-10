@@ -154,10 +154,10 @@ try:
 except ImportError:
     VISUALIZATION_AVAILABLE = False
 
-__version__ = "0.1.0"
+__version__ = "1.1.0"
 __author__ = "Charles Fosseprez"
 __email__ = "charles.fosseprez.pro@gmail.com"
-__license__ = "MIT"
+__license__ = "GPL-3.0-or-later"
 
 __all__ = [
     # Core classes
