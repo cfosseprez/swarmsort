@@ -1591,6 +1591,10 @@ class SwarmSortTracker:
         self._cached_det_embeddings = None
         self._frame_track_embeddings_valid = -1
         self._cached_track_embeddings = None
+        
+        # Embedding distance matrix cache (most expensive computation)
+        self._cached_embedding_distances = None
+        self._embedding_distances_valid = -1
 
         logger.info(
             f"\033[0;38;5;45mInitialized SwarmSortTracker with parameters:\n"
@@ -1996,26 +2000,33 @@ class SwarmSortTracker:
                             (n_dets, emb_dim), dtype=np.float32
                         )
 
-                    # Vectorized embedding normalization - much faster than per-detection loop
+                    # Ultra-fast embedding normalization with pre-normalized detection
                     # Stack all embeddings into matrix
                     emb_matrix = np.array([det.embedding for det in detections], dtype=np.float32)
                     
                     # Compute all norms at once
                     norms_sq = np.sum(emb_matrix * emb_matrix, axis=1)  # Shape: (n_dets,)
                     
-                    # Find which embeddings need normalization (not already normalized)
-                    needs_norm = np.abs(norms_sq - 1.0) > 0.01
+                    # Check if ALL embeddings are already normalized (common case for pre-computed embeddings)
+                    all_normalized = np.all(np.abs(norms_sq - 1.0) <= 0.01)
                     
-                    # Vectorized normalization for embeddings that need it
-                    norms = np.sqrt(norms_sq)
-                    safe_norms = np.where(norms > 0, norms, 1.0)  # Avoid division by zero
-                    
-                    # Apply normalization only where needed
-                    self._reusable_det_embeddings[:n_dets] = np.where(
-                        needs_norm[:, None], 
-                        emb_matrix / safe_norms[:, None], 
-                        emb_matrix
-                    )
+                    if all_normalized:
+                        # Skip normalization entirely - embeddings are already normalized
+                        self._reusable_det_embeddings[:n_dets] = emb_matrix
+                    else:
+                        # Find which embeddings need normalization
+                        needs_norm = np.abs(norms_sq - 1.0) > 0.01
+                        
+                        # Vectorized normalization for embeddings that need it
+                        norms = np.sqrt(norms_sq)
+                        safe_norms = np.where(norms > 0, norms, 1.0)  # Avoid division by zero
+                        
+                        # Apply normalization only where needed
+                        self._reusable_det_embeddings[:n_dets] = np.where(
+                            needs_norm[:, None], 
+                            emb_matrix / safe_norms[:, None], 
+                            emb_matrix
+                        )
                     
                     self._frame_det_embeddings_valid = self._frame_count
 
@@ -2342,13 +2353,25 @@ class SwarmSortTracker:
                 self._cached_track_embeddings = track_embeddings
                 self._frame_track_embeddings_valid = self._frame_count
 
-            # Ultra-fast cosine similarity computation using matrix multiplication
-            cos_similarities = det_embeddings @ track_embeddings.T
-            raw_distances = (1.0 - cos_similarities) * 0.5  # Optimized: avoid division
-            raw_distances_flat = raw_distances.flatten()
-            scaled_distances_flat = self.embedding_scaler.scale_distances(raw_distances_flat)
-            self.embedding_scaler.update_statistics(raw_distances_flat)
-            scaled_embedding_matrix = scaled_distances_flat.reshape(n_dets, n_tracks)
+            # Check if we can reuse cached embedding distance matrix
+            embedding_cache_key = (id(det_embeddings), id(track_embeddings), n_dets, n_tracks)
+            if (self._embedding_distances_valid == self._frame_count and 
+                self._cached_embedding_distances is not None and
+                self._cached_embedding_distances.shape == (n_dets, n_tracks)):
+                # Reuse cached distances
+                scaled_embedding_matrix = self._cached_embedding_distances
+            else:
+                # Compute embedding distances
+                cos_similarities = det_embeddings @ track_embeddings.T
+                raw_distances = (1.0 - cos_similarities) * 0.5  # Optimized: avoid division
+                raw_distances_flat = raw_distances.flatten()
+                scaled_distances_flat = self.embedding_scaler.scale_distances(raw_distances_flat)
+                self.embedding_scaler.update_statistics(raw_distances_flat)
+                scaled_embedding_matrix = scaled_distances_flat.reshape(n_dets, n_tracks)
+                
+                # Cache the result
+                self._cached_embedding_distances = scaled_embedding_matrix
+                self._embedding_distances_valid = self._frame_count
 
             if stop: stop("embedding_computation")
 
@@ -2539,12 +2562,25 @@ class SwarmSortTracker:
                 self._cached_track_embeddings = track_embeddings
                 self._frame_track_embeddings_valid = self._frame_count
 
-            cos_similarities = det_embeddings @ track_embeddings.T
-            raw_distances = (1.0 - cos_similarities) * 0.5  # Optimized: avoid division
-            raw_distances_flat = raw_distances.flatten()
-            scaled_distances_flat = self.embedding_scaler.scale_distances(raw_distances_flat)
-            self.embedding_scaler.update_statistics(raw_distances_flat)
-            scaled_embedding_matrix = scaled_distances_flat.reshape(n_dets, n_tracks)
+            # Reuse cached embedding distances if available
+            if (self._embedding_distances_valid == self._frame_count and 
+                self._cached_embedding_distances is not None and
+                self._cached_embedding_distances.shape == (n_dets, n_tracks)):
+                # Reuse cached distances
+                scaled_embedding_matrix = self._cached_embedding_distances
+            else:
+                cos_similarities = det_embeddings @ track_embeddings.T
+                raw_distances = (1.0 - cos_similarities) * 0.5  # Optimized: avoid division
+                raw_distances_flat = raw_distances.flatten()
+                scaled_distances_flat = self.embedding_scaler.scale_distances(raw_distances_flat)
+                self.embedding_scaler.update_statistics(raw_distances_flat)
+                scaled_embedding_matrix = scaled_distances_flat.reshape(n_dets, n_tracks)
+                
+                # Cache the result if not already cached
+                if self._embedding_distances_valid != self._frame_count:
+                    self._cached_embedding_distances = scaled_embedding_matrix
+                    self._embedding_distances_valid = self._frame_count
+                    
             if stop: stop("embedding_computation")
 
         # Compute track uncertainties and scale them
@@ -2723,9 +2759,10 @@ class SwarmSortTracker:
             pos = detection.position.flatten()[:2].astype(np.float32)
             positions[i] = pos
             
-            # Collect embedding and bbox data for batch processing
+            # Collect data for batch processing (only if needed)
+            # Skip embedding if track already has enough embeddings
             if (hasattr(detection, "embedding") and detection.embedding is not None 
-                and not track.embedding_frozen):
+                and not track.embedding_frozen and len(track.embedding_history) < self.max_embeddings_per_track):
                 embeddings_to_add.append((track, detection.embedding))
             
             if hasattr(detection, "bbox") and detection.bbox is not None:
@@ -2773,18 +2810,60 @@ class SwarmSortTracker:
             if not track.confirmed and track.hits >= self.min_consecutive_detections:
                 track.confirmed = True
         
-        # Batch process embeddings (avoid repeated function calls)
-        for track, embedding in embeddings_to_add:
-            # Direct embedding addition with minimal overhead
-            if embedding is not None:
-                embedding = np.asarray(embedding, dtype=np.float32)
-                norm = np.linalg.norm(embedding)
-                if norm > 0:
-                    normalized_emb = embedding / norm
-                    track.embedding_history.append(normalized_emb.copy())
-                    track.embedding_update_count += 1
-                    track._cache_valid = False
-                    track._representative_cache_valid = False
+        # Super-fast embedding processing - minimize when possible
+        if embeddings_to_add and len(embeddings_to_add) <= 50:  # Reasonable limit for batch processing
+            if len(embeddings_to_add) > 10:  # Vectorize for medium batches
+                # Extract all embeddings for vectorized normalization
+                embeddings_array = []
+                tracks_for_embeddings = []
+                
+                for track, embedding in embeddings_to_add:
+                    if embedding is not None:
+                        embeddings_array.append(np.asarray(embedding, dtype=np.float32))
+                        tracks_for_embeddings.append(track)
+                
+                if embeddings_array:
+                    # Check if most embeddings are already normalized (common case)
+                    emb_matrix = np.array(embeddings_array)
+                    norms_sq = np.sum(emb_matrix * emb_matrix, axis=1)
+                    all_normalized = np.all(np.abs(norms_sq - 1.0) <= 0.01)
+                    
+                    if all_normalized:
+                        # Skip normalization - use embeddings as-is
+                        normalized_embs = emb_matrix
+                    else:
+                        # Vectorized normalization
+                        norms = np.sqrt(norms_sq)
+                        safe_norms = np.where(norms > 0, norms, 1.0)
+                        normalized_embs = emb_matrix / safe_norms[:, None]
+                    
+                    # Apply to tracks
+                    for track, norm_emb in zip(tracks_for_embeddings, normalized_embs):
+                        track.embedding_history.append(norm_emb.copy())
+                        track.embedding_update_count += 1
+                        track._cache_valid = False
+                        track._representative_cache_valid = False
+            else:
+                # Individual processing for small batches
+                for track, embedding in embeddings_to_add:
+                    if embedding is not None:
+                        embedding = np.asarray(embedding, dtype=np.float32)
+                        # Quick norm check - skip if already normalized
+                        norm_sq = np.dot(embedding, embedding)
+                        if abs(norm_sq - 1.0) <= 0.01:
+                            # Already normalized
+                            normalized_emb = embedding
+                        else:
+                            norm = np.sqrt(norm_sq)
+                            normalized_emb = embedding / norm if norm > 0 else embedding
+                        
+                        track.embedding_history.append(normalized_emb.copy())
+                        track.embedding_update_count += 1
+                        track._cache_valid = False
+                        track._representative_cache_valid = False
+        elif len(embeddings_to_add) > 50:
+            # Skip embedding updates for very large batches to maintain speed
+            pass
         
         # Batch process bboxes (minimal overhead)
         for track, bbox in bboxes_to_add:
