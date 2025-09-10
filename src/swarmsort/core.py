@@ -1996,15 +1996,27 @@ class SwarmSortTracker:
                             (n_dets, emb_dim), dtype=np.float32
                         )
 
-                    for i, det in enumerate(detections):
-                        emb = det.embedding
-                        # Check if already normalized (norm ≈ 1.0)
-                        norm_sq = np.dot(emb, emb)
-                        if abs(norm_sq - 1.0) > 0.01:  # Not normalized
-                            norm = np.sqrt(norm_sq)
-                            self._reusable_det_embeddings[i] = emb / norm if norm > 0 else emb
-                        else:
-                            self._reusable_det_embeddings[i] = emb
+                    # Vectorized embedding normalization - much faster than per-detection loop
+                    # Stack all embeddings into matrix
+                    emb_matrix = np.array([det.embedding for det in detections], dtype=np.float32)
+                    
+                    # Compute all norms at once
+                    norms_sq = np.sum(emb_matrix * emb_matrix, axis=1)  # Shape: (n_dets,)
+                    
+                    # Find which embeddings need normalization (not already normalized)
+                    needs_norm = np.abs(norms_sq - 1.0) > 0.01
+                    
+                    # Vectorized normalization for embeddings that need it
+                    norms = np.sqrt(norms_sq)
+                    safe_norms = np.where(norms > 0, norms, 1.0)  # Avoid division by zero
+                    
+                    # Apply normalization only where needed
+                    self._reusable_det_embeddings[:n_dets] = np.where(
+                        needs_norm[:, None], 
+                        emb_matrix / safe_norms[:, None], 
+                        emb_matrix
+                    )
+                    
                     self._frame_det_embeddings_valid = self._frame_count
 
                 det_embeddings = self._reusable_det_embeddings[:n_dets]
