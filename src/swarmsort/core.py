@@ -1973,12 +1973,13 @@ class SwarmSortTracker:
         spatial_mask = spatial_distances <= (self.max_distance**2)
 
         # Check if we need embeddings
+        # Fixed: Don't require tracks to already have embeddings - they need to start somewhere!
         do_embeddings = (
             any(spatial_mask.flatten())
             and all(  # Only if there are possible matches
                 hasattr(det, "embedding") and det.embedding is not None for det in detections
             )
-            and all(len(t.embedding_history) > 0 for t in tracks)
+            # Removed: and all(len(t.embedding_history) > 0 for t in tracks) - this prevented new tracks from getting embeddings!
         )
 
         scaled_embedding_matrix = np.zeros((n_dets, n_tracks), dtype=np.float32)
@@ -2096,16 +2097,34 @@ class SwarmSortTracker:
         else:
             uncertainty_penalties = np.zeros(n_tracks, dtype=np.float32)
 
-        # Compute cost matrix with uncertainty
-        cost_matrix = compute_cost_matrix_with_uncertainty(
-            det_positions,
-            track_kalman_positions,  # Use predicted positions
-            scaled_embedding_matrix,
-            uncertainty_penalties,
-            do_embeddings,
-            self.max_distance,
-            self.embedding_weight,
-        )
+        # FIXED: Compute cost matrix with minimum distance logic (same as spatial pre-filtering)
+        cost_matrix = np.full((n_dets, n_tracks), np.inf, dtype=np.float32)
+        
+        for i in range(n_dets):
+            for j in range(n_tracks):
+                # Compute distance to both last detection and Kalman positions
+                dx_last = det_positions[i, 0] - track_last_positions[j, 0]
+                dy_last = det_positions[i, 1] - track_last_positions[j, 1]
+                dist_to_last = np.sqrt(dx_last*dx_last + dy_last*dy_last)
+                
+                dx_kalman = det_positions[i, 0] - track_kalman_positions[j, 0]
+                dy_kalman = det_positions[i, 1] - track_kalman_positions[j, 1]
+                dist_to_kalman = np.sqrt(dx_kalman*dx_kalman + dy_kalman*dy_kalman)
+                
+                # Use minimum distance (same logic as spatial pre-filtering)
+                spatial_cost = min(dist_to_last, dist_to_kalman)
+                
+                # Add uncertainty penalty to spatial cost
+                total_cost = spatial_cost + uncertainty_penalties[j]
+                
+                # Only proceed if within max distance (after uncertainty adjustment)
+                if total_cost <= self.max_distance:
+                    # Add embedding cost if enabled
+                    if do_embeddings:
+                        embedding_cost = scaled_embedding_matrix[i, j] * self.max_distance * self.embedding_weight
+                        total_cost += embedding_cost
+                    
+                    cost_matrix[i, j] = total_cost
 
         # Hungarian assignment (same as before)
         if np.all(np.isinf(cost_matrix)):
@@ -2151,9 +2170,11 @@ class SwarmSortTracker:
         track_last_positions = np.array([t.last_detection_pos for t in tracks], dtype=np.float32)
 
         # Check embeddings
+        # Fixed: Don't require tracks to already have embeddings - they need to start somewhere!
         do_embeddings = all(
             hasattr(det, "embedding") and det.embedding is not None for det in detections
-        ) and all(len(t.embedding_history) > 0 for t in tracks)
+        )
+        # Removed: and all(len(t.embedding_history) > 0 for t in tracks) - this prevented new tracks from getting embeddings!
 
         scaled_embedding_matrix = np.zeros((n_dets, n_tracks), dtype=np.float32)
 
@@ -2321,10 +2342,11 @@ class SwarmSortTracker:
         track_kalman_positions = np.array([t.predicted_position for t in tracks], dtype=np.float32)
 
         # Check embeddings and compute scaled embedding matrix
+        # Fixed: Don't require tracks to already have embeddings - they need to start somewhere!
         do_embeddings = (
             self.do_embeddings and
-            all(hasattr(det, "embedding") and det.embedding is not None for det in detections) and
-            all(len(t.embedding_history) > 0 for t in tracks)
+            all(hasattr(det, "embedding") and det.embedding is not None for det in detections)
+            # Removed: and all(len(t.embedding_history) > 0 for t in tracks) - this prevented new tracks from getting embeddings!
         )
 
         scaled_embedding_matrix = np.zeros((n_dets, n_tracks), dtype=np.float32)
@@ -2446,31 +2468,35 @@ class SwarmSortTracker:
                     total_cost = spatial_cost + embedding_cost + uncertainty_penalties[j]
                     cost_matrix[i, j] = total_cost
         else:
-            # Choose between parallel and serial based on size
-            # Parallel has overhead that's only worth it for large matrices
-            if n_dets * n_tracks > 10000:  # Use parallel for >10k operations
-                # Note: We'd need a parallel version of compute_cost_matrix_with_uncertainty
-                # For now, use the standard version
-                cost_matrix = compute_cost_matrix_with_uncertainty(
-                    det_positions,
-                    track_kalman_positions,
-                    scaled_embedding_matrix,
-                    uncertainty_penalties,
-                    do_embeddings,
-                    self.max_distance,
-                    self.embedding_weight,
-                )
-            else:
-                # Use standard computation for smaller scenarios
-                cost_matrix = compute_cost_matrix_with_uncertainty(
-                    det_positions,
-                    track_kalman_positions,
-                    scaled_embedding_matrix,
-                    uncertainty_penalties,
-                    do_embeddings,
-                    self.max_distance,
-                    self.embedding_weight,
-                )
+            # FIXED: Use the same minimum distance logic as spatial pre-filtering
+            # Compute cost matrix with minimum distance between last detection and Kalman positions
+            cost_matrix = np.full((n_dets, n_tracks), np.inf, dtype=np.float32)
+            
+            for i in range(n_dets):
+                for j in range(n_tracks):
+                    # Compute distance to both last detection and Kalman positions
+                    dx_last = det_positions[i, 0] - track_last_positions[j, 0]
+                    dy_last = det_positions[i, 1] - track_last_positions[j, 1]
+                    dist_to_last = np.sqrt(dx_last*dx_last + dy_last*dy_last)
+                    
+                    dx_kalman = det_positions[i, 0] - track_kalman_positions[j, 0]
+                    dy_kalman = det_positions[i, 1] - track_kalman_positions[j, 1]
+                    dist_to_kalman = np.sqrt(dx_kalman*dx_kalman + dy_kalman*dy_kalman)
+                    
+                    # Use minimum distance (same logic as spatial pre-filtering)
+                    spatial_cost = min(dist_to_last, dist_to_kalman)
+                    
+                    # Add uncertainty penalty to spatial cost
+                    total_cost = spatial_cost + uncertainty_penalties[j]
+                    
+                    # Only proceed if within max distance (after uncertainty adjustment)
+                    if total_cost <= self.max_distance:
+                        # Add embedding cost if enabled
+                        if do_embeddings:
+                            embedding_cost = scaled_embedding_matrix[i, j] * self.max_distance * self.embedding_weight
+                            total_cost += embedding_cost
+                        
+                        cost_matrix[i, j] = total_cost
         if stop: stop("cost_matrix")
 
         # OPTIMIZED HYBRID ASSIGNMENT LOGIC
@@ -2561,10 +2587,11 @@ class SwarmSortTracker:
         track_kalman_positions = np.array([t.predicted_position for t in tracks], dtype=np.float32)
 
         # Fast embedding computation (same as hybrid)
+        # Fixed: Don't require tracks to already have embeddings - they need to start somewhere!
         do_embeddings = (
             self.do_embeddings and
-            all(hasattr(det, "embedding") and det.embedding is not None for det in detections) and
-            all(len(t.embedding_history) > 0 for t in tracks)
+            all(hasattr(det, "embedding") and det.embedding is not None for det in detections)
+            # Removed: and all(len(t.embedding_history) > 0 for t in tracks) - this prevented new tracks from getting embeddings!
         )
 
         scaled_embedding_matrix = np.zeros((n_dets, n_tracks), dtype=np.float32)
@@ -2634,17 +2661,35 @@ class SwarmSortTracker:
         else:
             uncertainty_penalties = np.zeros(n_tracks, dtype=np.float32)
 
-        # Compute cost matrix with uncertainty
+        # FIXED: Compute cost matrix with minimum distance logic (same as spatial pre-filtering)
         if start: start("cost_matrix")
-        cost_matrix = compute_cost_matrix_with_uncertainty(
-            det_positions,
-            track_kalman_positions,  # Use predicted positions
-            scaled_embedding_matrix,
-            uncertainty_penalties,
-            do_embeddings,
-            self.max_distance,
-            self.embedding_weight,
-        )
+        cost_matrix = np.full((n_dets, n_tracks), np.inf, dtype=np.float32)
+        
+        for i in range(n_dets):
+            for j in range(n_tracks):
+                # Compute distance to both last detection and Kalman positions
+                dx_last = det_positions[i, 0] - track_last_positions[j, 0]
+                dy_last = det_positions[i, 1] - track_last_positions[j, 1]
+                dist_to_last = np.sqrt(dx_last*dx_last + dy_last*dy_last)
+                
+                dx_kalman = det_positions[i, 0] - track_kalman_positions[j, 0]
+                dy_kalman = det_positions[i, 1] - track_kalman_positions[j, 1]
+                dist_to_kalman = np.sqrt(dx_kalman*dx_kalman + dy_kalman*dy_kalman)
+                
+                # Use minimum distance (same logic as spatial pre-filtering)
+                spatial_cost = min(dist_to_last, dist_to_kalman)
+                
+                # Add uncertainty penalty to spatial cost
+                total_cost = spatial_cost + uncertainty_penalties[j]
+                
+                # Only proceed if within max distance (after uncertainty adjustment)
+                if total_cost <= self.max_distance:
+                    # Add embedding cost if enabled
+                    if do_embeddings:
+                        embedding_cost = scaled_embedding_matrix[i, j] * self.max_distance * self.embedding_weight
+                        total_cost += embedding_cost
+                    
+                    cost_matrix[i, j] = total_cost
         if stop: stop("cost_matrix")
 
         # NUMBA-ACCELERATED greedy assignment - as fast as Hungarian!

@@ -149,69 +149,413 @@ def load_local_yaml_config(yaml_filename: str, caller_file: Optional[str] = None
 @dataclass
 class SwarmSortConfig(BaseConfig):
     """
-    Configuration for SwarmSort tracker.
+    Configuration for SwarmSort multi-object tracker.
 
-    This contains all parameters needed to configure the tracking algorithm,
-    including distance thresholds, embedding parameters, and behavior settings.
+    SwarmSort is a real-time tracking algorithm that follows multiple objects across video frames.
+    It combines motion prediction (where objects will be) with appearance matching (what objects
+    look like) to maintain consistent identity assignments even when objects temporarily disappear
+    or cross paths.
+
+    This configuration controls all aspects of the tracking behavior. Default values are tuned
+    for general tracking scenarios but should be adjusted based on your specific use case.
+
+    Quick Start Guide:
+    ------------------
+    For tracking fast-moving objects: increase max_distance
+    For crowded scenes: decrease max_distance, increase min_consecutive_detections
+    For high-quality detections: increase detection_conf_threshold
+    For appearance-based tracking: ensure do_embeddings=True, adjust embedding_weight
     """
 
-    # Core tracking parameters
-    max_distance: float = 150.0  # Maximum distance for association
-    detection_conf_threshold: float = 0  # Minimum confidence for detections (general filter)
-    max_track_age: int = 30  # Maximum frames a track can exist without detection before deletion
-    
-    # Kalman filter type
-    kalman_type: Literal["simple", "oc"] = "simple"  # Kalman filter type: simple or OC-SORT style
-    
-    # Uncertainty-based cost system for smart collision handling
-    uncertainty_weight: float = 0.33  # Weight for uncertainty penalties (0 = disabled, typical 0.2-0.5)
-    local_density_radius: float = max_distance/2  # Radius for computing local track density
-    
-    # Embedding freeze (simplified density-based)
-    collision_freeze_embeddings: bool = True  # Freeze embedding updates in dense areas
-    embedding_freeze_density: int = 1  # Freeze embeddings when ≥N tracks within radius
+    # ============================================================================
+    # CORE TRACKING PARAMETERS
+    # ============================================================================
 
-    # Embedding parameters
-    do_embeddings: bool = True  # Whether to compute and use embedding features
-    embedding_weight: float = 1  # Weight for embedding similarity in cost function
-    max_embeddings_per_track: int = 15  # Maximum embeddings stored per track
+    max_distance: float = 150.0
+    """Maximum pixel distance for matching detections to tracks.
+
+    This is THE most important parameter. It defines how far an object can move between
+    frames and still be considered the same object.
+
+    - INCREASE (200-300) for: fast-moving objects, low frame rates, zoomed-out views
+    - DECREASE (50-100) for: slow objects, high frame rates, crowded scenes, zoomed-in views
+
+    Rule of thumb: Set to the maximum pixels an object typically moves per frame.
+
+    Example: If objects move 100 pixels/frame, set to 150 to handle variations.
+    """
+
+    detection_conf_threshold: float = 0
+    """Minimum confidence score to accept a detection (0.0 to 1.0).
+
+    Filters out low-confidence detections from your detector (YOLO, etc.) before tracking.
+    This is a GLOBAL filter applied to ALL detections.
+
+    - 0.0 = Accept all detections (default - let tracker handle noise)
+    - 0.3-0.5 = Moderate filtering (good for decent detectors)
+    - 0.7-0.9 = Aggressive filtering (only very confident detections)
+
+    Note: Set based on your detector's confidence distribution. Check histogram of
+    confidence scores to pick appropriate threshold.
+    """
+
+    max_track_age: int = 30
+    """Maximum frames a track can exist without any detection before deletion.
+
+    Controls how long to keep tracking an object after it disappears (occlusion, 
+    leaving frame, detection failure).
+
+    - 10-20 frames = Quick deletion (good for fast-changing scenes)
+    - 30-50 frames = Balanced (default, handles brief occlusions)
+    - 60-120 frames = Persistent (good for long occlusions, more false positives)
+
+    At 30 FPS: 30 frames = 1 second of occlusion tolerance.
+    """
+
+    # ============================================================================
+    # MOTION PREDICTION SETTINGS
+    # ============================================================================
+
+    kalman_type: Literal["simple", "oc"] = "simple"
+    """Motion prediction algorithm type.
+
+    - "simple": Classic Kalman filter with constant velocity model
+      Pros: Smooth, predictable motion, good for linear movement
+      Cons: Overshoots on sudden stops/turns
+
+    - "oc": OC-SORT style observation-centric (no prediction during occlusion)
+      Pros: Better for erratic motion, no drift during occlusion
+      Cons: Less smooth, may lose fast-moving occluded objects
+
+    Use "simple" for vehicles/pedestrians, "oc" for animals/sports/erratic motion.
+    """
+
+    # ============================================================================
+    # UNCERTAINTY & COLLISION HANDLING
+    # ============================================================================
+
+    uncertainty_weight: float = 0.33
+    """Weight for uncertainty penalties in cost computation (0.0 to 1.0).
+
+    Makes the tracker less confident about tracks in difficult situations:
+    - Tracks that have missed recent detections
+    - Tracks in crowded areas
+    - Tracks with poor detection history
+
+    - 0.0 = Disabled (treat all tracks equally)
+    - 0.2-0.3 = Light uncertainty (small preference for reliable tracks)
+    - 0.5-0.7 = Strong uncertainty (heavily favor reliable tracks)
+
+    Helps prevent ID switches in challenging scenarios.
+    """
+
+    local_density_radius: float = max_distance/2  # max_distance/2
+    """Radius in pixels to check for nearby tracks (for density computation).
+
+    Used to detect crowded areas where ID switches are more likely.
+    When many tracks are within this radius, the tracker becomes more conservative.
+
+    Typically set to max_distance/2 or max_distance/3.
+    """
+
+    collision_freeze_embeddings: bool = True
+    """Freeze appearance updates when objects are too close together.
+
+    When enabled, prevents appearance features from being corrupted during
+    collisions or severe occlusions. The tracker "remembers" what each object
+    looked like before they got too close.
+
+    - True = Safer tracking in crowds (recommended)
+    - False = Always update appearance (may cause ID switches in crowds)
+    """
+
+    embedding_freeze_density: int = 1
+    """Number of nearby tracks to trigger embedding freeze.
+
+    When this many (or more) tracks are within local_density_radius,
+    stop updating appearance features to prevent corruption.
+
+    - 1 = Freeze when ANY other track is nearby (most conservative)
+    - 2-3 = Freeze only in moderately crowded areas
+    - 5+ = Freeze only in very dense crowds
+    """
+
+    # ============================================================================
+    # APPEARANCE MATCHING (EMBEDDINGS) SETTINGS
+    # ============================================================================
+
+    do_embeddings: bool = True
+    """Enable appearance-based matching using visual features.
+
+    When True: Uses both motion AND appearance to match objects
+    When False: Uses only motion/position (faster but less accurate)
+
+    Embeddings help when:
+    - Objects look different (clothing, color, size)
+    - Objects cross paths or occlude each other
+    - Multiple similar objects need to be distinguished
+
+    Disable only if all objects look identical or for maximum speed.
+    """
+
+    embedding_weight: float = 1.0
+    """Relative importance of appearance vs motion (0.0 to ~2.0).
+
+    Controls the balance between position-based and appearance-based matching:
+
+    - 0.0 = Position only (appearance ignored even if do_embeddings=True)
+    - 0.5 = Position is 2x more important than appearance
+    - 1.0 = Equal weight (default, balanced approach)
+    - 2.0 = Appearance is 2x more important than position
+
+    Increase for distinct-looking objects, decrease for similar-looking objects.
+    """
+
+    max_embeddings_per_track: int = 15
+    """Maximum number of appearance samples to store per track.
+
+    Each track keeps a history of appearance features to handle appearance changes
+    (rotation, lighting, partial occlusion).
+
+    - 1 = Only most recent (fast, no appearance history)
+    - 5-10 = Short history (good for stable appearance)
+    - 15-30 = Long history (handles appearance variation, uses more memory)
+
+    More samples = better appearance model but slower matching.
+    """
+
     embedding_function: str = "cupytexture"
-    embedding_matching_method: Literal[
-        "average", "weighted_average", "best_match"
-    ] = "weighted_average"
+    """Algorithm for extracting appearance features.
 
-    # Cost computation method
-    use_probabilistic_costs: bool = False  # Use probabilistic fusion vs simple costs
+    Options depend on your installation:
+    - "cupytexture": GPU-accelerated texture features (fast, good quality)
+    - "cupytexture_color": Texture + color histogram features
+    - "mega_cupytexture": Advanced features (slower, best quality)
 
-    # Assignment strategy parameters
+    GPU options require CuPy. Falls back to CPU if unavailable.
+    """
+
+    embedding_matching_method: Literal["average", "weighted_average", "best_match"] = "weighted_average"
+    """How to match current appearance against track history.
+
+    - "average": Compare against mean of all stored appearances
+      Simple, stable, but slow to adapt to changes
+
+    - "weighted_average": Recent appearances count more
+      Good balance of stability and adaptability (recommended)
+
+    - "best_match": Find best matching historical appearance
+      Handles appearance changes well but more computationally expensive
+    """
+
+    # ============================================================================
+    # ASSIGNMENT ALGORITHM SETTINGS
+    # ============================================================================
+
+    use_probabilistic_costs: bool = False
+    """Use probabilistic fusion for cost computation.
+
+    - False: Simple distance-based costs (faster, usually sufficient)
+    - True: Bayesian fusion considering uncertainties (more sophisticated)
+
+    Probabilistic costs can help in complex scenarios but add computation overhead.
+    Most users should keep this False.
+    """
+
     assignment_strategy: Literal["hungarian", "greedy", "hybrid"] = "hybrid"
-    greedy_threshold: float = max_distance/4  # Distance threshold for greedy assignment
-    greedy_confidence_boost: float = 1  # Confidence multiplier for greedy matches
-    hungarian_fallback_threshold: float = 1  # Multiplier of max_distance for Hungarian fallback
+    """Algorithm for matching detections to tracks.
 
-    # Re-identification (ReID) parameters
-    reid_enabled: bool = True  # Enable re-identification of lost tracks
-    reid_max_distance: float = max_distance*1.5  # Maximum distance for ReID
-    reid_embedding_threshold: float = 0.3  # Embedding threshold for ReID (lower more permissive)
+    - "hungarian": Globally optimal assignment (best accuracy, O(n³) complexity)
+      Use when: <50 objects, accuracy is critical
 
-    # Track initialization parameters
-    init_conf_threshold: float = 0.  # Minimum confidence for track initialization (initialization filter)
-    min_consecutive_detections: int = 3  # Minimum consecutive detections to create track
-    max_detection_gap: int = 2  # Maximum gap between detections for same pending track
-    pending_detection_distance: float = max_distance  # Distance threshold for pending detection matching
+    - "greedy": Fast local assignment (good accuracy, O(n²) complexity)  
+      Use when: >100 objects, speed is critical
 
-    # Embedding distance scaling
-    embedding_scaling_method: str = "min_robustmax"  # "robust_minmax" "min_robustmax" Method for scaling embedding distances
-    embedding_scaling_update_rate: float = 0.05  # Update rate for online scaling statistics
-    embedding_scaling_min_samples: int = 200  # Minimum samples before scaling is active
+    - "hybrid": Greedy for obvious matches, Hungarian for ambiguous (recommended)
+      Best balance of speed and accuracy for most scenarios
+    """
 
-    # Debug options
-    debug_embeddings: bool = False  # Enable embedding debugging output
-    plot_embeddings: bool = False  # Generate embedding visualization plots
-    debug_timings: bool = False  # Enable timing debug output
+    greedy_threshold: float = max_distance/5  # max_distance/4
+    """Distance threshold for confident matches in hybrid/greedy mode.
+
+    Matches closer than this distance are assigned immediately without
+    considering other possibilities. Should be much smaller than max_distance.
+
+    - max_distance/6 = Very conservative (only super obvious matches)
+    - max_distance/4 = Balanced (default)
+    - max_distance/2 = Aggressive (may cause errors in crowds)
+    """
+
+    greedy_confidence_boost: float = 1.0
+    """Confidence multiplier for greedy matches (not currently used)."""
+
+    hungarian_fallback_threshold: float = 1.0
+    """Multiplier for max_distance in Hungarian phase of hybrid assignment.
+
+    After greedy assignment, Hungarian considers matches up to
+    max_distance * hungarian_fallback_threshold.
+
+    - 1.0 = Same threshold (consistent behavior)
+    - 1.5 = More permissive in Hungarian (catches difficult matches)
+    - 0.8 = More restrictive (fewer but more confident matches)
+    """
+
+    # ============================================================================
+    # RE-IDENTIFICATION (REID) SETTINGS
+    # ============================================================================
+
+    reid_enabled: bool = True
+    """Enable re-identification of lost tracks.
+
+    ReID attempts to re-connect tracks that were lost (due to occlusion,
+    detection failure) with new detections using appearance matching.
+
+    Helps maintain consistent IDs through temporary disappearances.
+    Disable if objects never reappear or appearance is unreliable.
+    """
+
+    reid_max_distance: float = 225.0  # max_distance*1.5
+    """Maximum distance for re-identification matching.
+
+    Lost tracks can be matched to detections up to this distance away.
+    Larger than max_distance because objects may have moved far during occlusion.
+
+    - max_distance * 1.0 = Conservative (only nearby reappearances)
+    - max_distance * 1.5 = Balanced (default)
+    - max_distance * 2.0 = Aggressive (may cause false re-identifications)
+    """
+
+    reid_embedding_threshold: float = 0.5
+    """Maximum embedding distance for ReID (0.0 to 1.0, lower = stricter).
+
+    Lost tracks are only matched if appearance similarity is better than this.
+
+    - 0.1-0.2 = Very strict (only nearly identical appearance)
+    - 0.3-0.4 = Balanced (default, some appearance change allowed)
+    - 0.5-0.7 = Permissive (allows significant appearance change)
+
+    Lower values = fewer but more accurate re-identifications.
+    """
+
+    # ============================================================================
+    # TRACK INITIALIZATION SETTINGS
+    # ============================================================================
+
+    init_conf_threshold: float = 0.0
+    """Minimum confidence to start tracking an object (0.0 to 1.0).
+
+    This is a SECOND filter specifically for track creation.
+    Detections must pass BOTH detection_conf_threshold (to be processed)
+    AND init_conf_threshold (to create new tracks).
+
+    - 0.0 = Create tracks from any detection (after min_consecutive_detections)
+    - 0.3-0.5 = Only track reasonably confident detections
+    - 0.7+ = Only track very confident detections
+
+    Use higher values to reduce false positive tracks.
+    """
+
+    min_consecutive_detections: int = 3
+    """Number of consecutive detections required to confirm a track.
+
+    New tracks start as "tentative" and become "confirmed" after being
+    detected in this many consecutive frames. Prevents tracking noise/artifacts.
+
+    - 1 = Immediate tracking (fast response, more false positives)
+    - 2-3 = Quick confirmation (balanced)
+    - 5-10 = Careful confirmation (slow response, very few false positives)
+
+    Increase in noisy environments or with unreliable detectors.
+    """
+
+    max_detection_gap: int = 2
+    """Maximum frame gap allowed during track initialization.
+
+    While building confidence for a new track, detections can be missing
+    for up to this many frames without resetting the count.
+
+    - 0 = No gaps allowed (very strict)
+    - 1-2 = Allow brief gaps (default, handles detector flickering)
+    - 3-5 = Allow longer gaps (for difficult detection scenarios)
+    """
+
+    pending_detection_distance: float = max_distance  # Same as max_distance
+    """Maximum distance to associate detections during initialization.
+
+    Before a track is confirmed, detections must be within this distance
+    to be considered the same pending object.
+
+    Usually same as max_distance, but can be smaller for stricter initialization.
+    """
+
+    # ============================================================================
+    # EMBEDDING SCALING SETTINGS (ADVANCED)
+    # ============================================================================
+
+    embedding_scaling_method: str = "min_robustmax"
+    """Method for normalizing embedding distances to [0,1] range.
+
+    Raw embedding distances have arbitrary scale. These methods normalize
+    them to match the scale of spatial distances:
+
+    - "min_robustmax": Asymmetric scaling with true min and robust max
+    - "robust_minmax": Symmetric robust scaling using percentiles
+    - Others: Various statistical methods (see embedding_scaler.py)
+
+    Most users should keep the default.
+    """
+
+    embedding_scaling_update_rate: float = 0.05
+    """Learning rate for updating scaling statistics (0.0 to 1.0).
+
+    Controls how quickly the scaler adapts to changing embedding distributions.
+
+    - 0.01 = Very slow adaptation (stable but slow to adjust)
+    - 0.05 = Moderate adaptation (default)
+    - 0.1-0.2 = Fast adaptation (responsive but may be unstable)
+    """
+
+    embedding_scaling_min_samples: int = 200
+    """Minimum samples before embedding scaling is activated.
+
+    The scaler needs to see enough embedding distances to compute reliable
+    statistics. Before this, a simple fallback scaling is used.
+
+    - 100-200 = Quick activation (may be less accurate initially)
+    - 500-1000 = Careful activation (more accurate but takes longer)
+    """
+
+    # ============================================================================
+    # DEBUG SETTINGS
+    # ============================================================================
+
+    debug_embeddings: bool = False
+    """Print detailed embedding information for debugging.
+
+    Outputs embedding statistics, distances, and scaling information.
+    Useful for tuning embedding parameters but very verbose.
+    """
+
+    plot_embeddings: bool = False
+    """Generate embedding visualization plots (requires matplotlib).
+
+    Creates visual representations of embedding space and distances.
+    Helpful for understanding embedding behavior but slows tracking.
+    """
+
+    debug_timings: bool = False
+    """Print detailed timing information for performance analysis.
+
+    Shows time spent in each component of the tracking pipeline.
+    Use to identify performance bottlenecks.
+    """
 
     def validate(self) -> None:
-        """Validate configuration parameters."""
+        """Validate configuration parameters.
+
+        Checks that all parameters are within valid ranges and compatible
+        with each other. Raises ValueError if configuration is invalid.
+        """
         if self.max_distance <= 0:
             raise ValueError("max_distance must be positive")
 
