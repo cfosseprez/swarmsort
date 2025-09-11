@@ -164,7 +164,7 @@ class SwarmSortConfig(BaseConfig):
     kalman_type: Literal["simple", "oc"] = "simple"  # Kalman filter type: simple or OC-SORT style
     
     # Uncertainty-based cost system for smart collision handling
-    uncertainty_weight: float = 0.15  # Weight for uncertainty penalties (0 = disabled, typical 0.2-0.5)
+    uncertainty_weight: float = 0.33  # Weight for uncertainty penalties (0 = disabled, typical 0.2-0.5)
     local_density_radius: float = max_distance/2  # Radius for computing local track density
     
     # Embedding freeze (simplified density-based)

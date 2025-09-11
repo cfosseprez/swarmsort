@@ -1274,12 +1274,15 @@ class FastTrackState:
             is_reid_update = is_reid or (self.misses > 0)
             
             if is_reid_update:
-                # Reset Kalman state for ReID to prevent overshooting from stale velocity
-                # Simple approach: reset both position and velocity to current detection
+                # Smooth ReID update to prevent jerky motion from stale velocity
+                # Update position to current detection
                 self.kalman_state[0] = new_pos_f32[0]  # x position
                 self.kalman_state[1] = new_pos_f32[1]  # y position  
-                self.kalman_state[2] = 0.0  # x velocity - reset to zero
-                self.kalman_state[3] = 0.0  # y velocity - reset to zero
+                
+                # Smooth velocity reset using exponential decay instead of hard reset
+                velocity_decay = 0.3  # Keep 30% of old velocity to maintain some continuity
+                self.kalman_state[2] *= velocity_decay  # Reduce x velocity smoothly
+                self.kalman_state[3] *= velocity_decay  # Reduce y velocity smoothly
             else:
                 # Normal Kalman filter update
                 self.kalman_state = simple_kalman_update(self.kalman_state, new_pos_f32)
@@ -1340,9 +1343,17 @@ class FastTrackState:
             self.velocity = self.kalman_state[2:].copy()
             self.predicted_position = self.kalman_state[:2].copy()  # Store predicted position separately
         elif self.kalman_type == "oc":
-            # OC-SORT style - no prediction update, just increment counters
-            # Position stays at last detection for display
-            pass
+            # OC-SORT style - compute prediction and store it
+            if hasattr(self, 'observation_history_array') and len(self.observation_history_array) > 0:
+                pred_state = oc_sort_predict(
+                    self.observation_history_array,
+                    self.observation_frames_array,
+                    self.frame_count  # Use current frame + 1 for prediction
+                )
+                self.predicted_position = pred_state[:2].copy()
+            else:
+                # No history available, use last position
+                self.predicted_position = self.position.copy()
         
         self.age += 1
         self.misses += 1
@@ -2148,13 +2159,16 @@ class SwarmSortTracker:
 
         if do_embeddings:
             # Same as regular assignment - use cached representatives
-            det_embeddings = np.array(
-                [
-                    np.asarray(det.embedding, dtype=np.float32) / np.linalg.norm(det.embedding)
-                    for det in detections
-                ],
-                dtype=np.float32,
-            )
+            # Check if embeddings are already normalized to avoid double normalization
+            det_embeddings = []
+            for det in detections:
+                emb = np.asarray(det.embedding, dtype=np.float32)
+                norm = np.linalg.norm(emb)
+                # Only normalize if not already normalized (avoid double normalization)
+                if abs(norm - 1.0) > 0.01:  # Allow small numerical errors
+                    emb = emb / (norm + 1e-8)  # Add epsilon for stability
+                det_embeddings.append(emb)
+            det_embeddings = np.array(det_embeddings, dtype=np.float32)
 
             # Get representative embeddings with caching (reuse array from regular assignment)
             if (
@@ -2317,10 +2331,14 @@ class SwarmSortTracker:
         if do_embeddings:
             if start: start("embedding_computation")
             
-            # Use cached frame embeddings if available
+            # Use cached frame embeddings if available and valid
+            # Create hash of detection IDs to validate cache consistency
+            det_ids_hash = hash(tuple(det.id for det in detections)) if hasattr(detections[0], 'id') else hash(tuple(id(det) for det in detections))
+            
             if (self._frame_det_embeddings_valid == self._frame_count and 
                 self._cached_det_embeddings is not None and
-                self._cached_det_embeddings.shape[0] == n_dets):
+                self._cached_det_embeddings.shape[0] == n_dets and
+                hasattr(self, '_cached_det_ids_hash') and self._cached_det_ids_hash == det_ids_hash):
                 det_embeddings = self._cached_det_embeddings
             else:
                 # Compute and cache detection embeddings for this frame
@@ -2328,6 +2346,7 @@ class SwarmSortTracker:
                 for i, det in enumerate(detections):
                     det_embeddings[i] = det.embedding
                 self._cached_det_embeddings = det_embeddings
+                self._cached_det_ids_hash = det_ids_hash
                 self._frame_det_embeddings_valid = self._frame_count
 
             # Use cached track embeddings if available
@@ -2349,25 +2368,48 @@ class SwarmSortTracker:
                 self._cached_track_embeddings = track_embeddings
                 self._frame_track_embeddings_valid = self._frame_count
 
-            # Check if we can reuse cached embedding distance matrix
-            embedding_cache_key = (id(det_embeddings), id(track_embeddings), n_dets, n_tracks)
-            if (self._embedding_distances_valid == self._frame_count and 
-                self._cached_embedding_distances is not None and
-                self._cached_embedding_distances.shape == (n_dets, n_tracks)):
-                # Reuse cached distances
-                scaled_embedding_matrix = self._cached_embedding_distances
-            else:
-                # Compute embedding distances
-                cos_similarities = det_embeddings @ track_embeddings.T
-                raw_distances = (1.0 - cos_similarities) * 0.5  # Optimized: avoid division
-                raw_distances_flat = raw_distances.flatten()
-                scaled_distances_flat = self.embedding_scaler.scale_distances(raw_distances_flat)
-                self.embedding_scaler.update_statistics(raw_distances_flat)
-                scaled_embedding_matrix = scaled_distances_flat.reshape(n_dets, n_tracks)
+            # Optimize embedding computation based on sparse pairs
+            if use_sparse and len(sparse_pairs) < n_dets * n_tracks * 0.5:
+                # Sparse mode: only compute embeddings for candidate pairs
+                scaled_embedding_matrix = np.zeros((n_dets, n_tracks), dtype=np.float32)
                 
-                # Cache the result
-                self._cached_embedding_distances = scaled_embedding_matrix
-                self._embedding_distances_valid = self._frame_count
+                # Batch compute sparse pairs for efficiency
+                if len(sparse_pairs) > 0:
+                    sparse_i, sparse_j = zip(*sparse_pairs)
+                    sparse_i = np.array(sparse_i)
+                    sparse_j = np.array(sparse_j)
+                    
+                    # Vectorized sparse computation
+                    det_sparse_embs = det_embeddings[sparse_i]
+                    track_sparse_embs = track_embeddings[sparse_j]
+                    cos_sims = np.sum(det_sparse_embs * track_sparse_embs, axis=1)
+                    raw_distances = (1.0 - cos_sims) * 0.5
+                    
+                    # Scale distances using existing API
+                    scaled_distances = self.embedding_scaler.scale_distances(raw_distances)
+                    self.embedding_scaler.update_statistics(raw_distances)
+                    
+                    # Assign to sparse positions
+                    scaled_embedding_matrix[sparse_i, sparse_j] = scaled_distances
+            else:
+                # Full matrix mode: check cache first
+                if (self._embedding_distances_valid == self._frame_count and 
+                    self._cached_embedding_distances is not None and
+                    self._cached_embedding_distances.shape == (n_dets, n_tracks)):
+                    # Reuse cached distances
+                    scaled_embedding_matrix = self._cached_embedding_distances
+                else:
+                    # Compute full embedding distances
+                    cos_similarities = det_embeddings @ track_embeddings.T
+                    raw_distances = (1.0 - cos_similarities) * 0.5  # Optimized: avoid division
+                    raw_distances_flat = raw_distances.flatten()
+                    scaled_distances_flat = self.embedding_scaler.scale_distances(raw_distances_flat)
+                    self.embedding_scaler.update_statistics(raw_distances_flat)
+                    scaled_embedding_matrix = scaled_distances_flat.reshape(n_dets, n_tracks)
+                    
+                    # Cache the result
+                    self._cached_embedding_distances = scaled_embedding_matrix
+                    self._embedding_distances_valid = self._frame_count
 
             if stop: stop("embedding_computation")
 
@@ -2529,16 +2571,21 @@ class SwarmSortTracker:
         if do_embeddings:
             if start: start("embedding_computation")
             
-            # Reuse cached embeddings from previous computation if available
+            # Reuse cached embeddings from previous computation if available and valid
+            # Create hash of detection IDs to validate cache consistency
+            det_ids_hash = hash(tuple(det.id for det in detections)) if hasattr(detections[0], 'id') else hash(tuple(id(det) for det in detections))
+            
             if (self._frame_det_embeddings_valid == self._frame_count and 
                 self._cached_det_embeddings is not None and
-                self._cached_det_embeddings.shape[0] == n_dets):
+                self._cached_det_embeddings.shape[0] == n_dets and
+                hasattr(self, '_cached_det_ids_hash') and self._cached_det_ids_hash == det_ids_hash):
                 det_embeddings = self._cached_det_embeddings
             else:
                 det_embeddings = np.empty((n_dets, detections[0].embedding.shape[0]), dtype=np.float32)
                 for i, det in enumerate(detections):
                     det_embeddings[i] = det.embedding
                 self._cached_det_embeddings = det_embeddings
+                self._cached_det_ids_hash = det_ids_hash
                 self._frame_det_embeddings_valid = self._frame_count
 
             if (self._frame_track_embeddings_valid == self._frame_count and 
@@ -2878,10 +2925,10 @@ class SwarmSortTracker:
             should_freeze = nearby_counts[i] >= self.embedding_freeze_density
             
             if should_freeze and not track.embedding_frozen:
-                # Start freezing - reference existing embedding (no copy!)
+                # Start freezing - store a copy of existing embedding for safety
                 track.embedding_frozen = True
                 if len(track.embedding_history) > 0 and track.last_safe_embedding is None:
-                    track.last_safe_embedding = track.embedding_history[-1]
+                    track.last_safe_embedding = track.embedding_history[-1].copy()  # Use copy() to prevent corruption
                     
             elif not should_freeze and track.embedding_frozen:
                 # Safe to unfreeze - restore embeddings
