@@ -272,7 +272,7 @@ def plot_scalability_results(
     
     # Create figure with appropriate number of subplots
     if plot_timing_only:
-        fig, ax1 = plt.subplots(1, 1, figsize=(6, 3))
+        fig, ax1 = plt.subplots(1, 1, figsize=(4, 3))
         ax2 = None  # No second subplot
     else:
         fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 4))
@@ -353,7 +353,8 @@ def plot_scalability_results(
             fps = row["fps"]
             
             # Format the text
-            text = f"{y:.1f}ms\n{fps:.0f}fps"
+            #text = f"{y:.1f}ms\n{fps:.0f}fps"
+            text = f"{fps:.0f}fps"
             
             if use_embeddings:
                 # With embeddings: place text above points
@@ -647,4 +648,4 @@ if __name__ == "__main__":
     
     # Example for IDE usage - uncomment and modify as needed:
     # Quick test with fewer frames and objects
-    main(run=True, plot=True, objects=[10, 100, 500, 1000], frames=500, cli_mode=False)
+    main(run=True, plot=True, objects=[10, 150, 500, 1000], frames=500, cli_mode=False)

@@ -1382,8 +1382,8 @@ class FastTrackState:
         if self.last_safe_embedding is None:
             self.last_safe_embedding = embedding.copy()
 
-        # Only invalidate if deque is full
-        if len(self.embedding_history) == self.embedding_history.maxlen:
+        # Smart cache invalidation - only when it actually affects the result
+        if len(self.embedding_history) > 0:  # Only invalidate if we have existing embeddings
             self._cache_valid = False
             self._representative_cache_valid = False
 
@@ -1666,13 +1666,8 @@ class SwarmSortTracker:
             self._debug_embeddings(valid_detections)
             stop("debug_embeddings")
 
-        # Pre-normalize all embeddings once at the start
-        for det in valid_detections:
-            if hasattr(det, "embedding") and det.embedding is not None:
-                emb = np.asarray(det.embedding, dtype=np.float32)
-                norm = np.linalg.norm(emb)
-                if norm > 0:
-                    det.embedding = emb / norm  # Store normalized version
+        # NOTE: Embedding normalization is handled by vectorized computation later
+        # Removed redundant per-detection normalization to avoid double normalization
 
         # Update embedding freeze status based on local density
         start("embedding_freeze_update")
@@ -1774,19 +1769,20 @@ class SwarmSortTracker:
                 [pending.average_position for pending in self._pending_detections], dtype=np.float32
             )
 
-            # Vectorized distance computation: (n_dets, n_pending)
-            # Broadcasting: det_positions[:, None, :] - pending_positions[None, :, :]
+            # Optimized: Use squared distances to avoid sqrt until necessary
             diff = det_positions[:, None, :] - pending_positions[None, :, :]
-            distances = np.sqrt(np.sum(diff * diff, axis=2))  # Shape: (n_dets, n_pending)
-
-            # Find closest pending for each detection
-            min_distances = np.min(distances, axis=1)
-            closest_pending_indices = np.argmin(distances, axis=1)
+            distances_sq = np.sum(diff * diff, axis=2)  # Shape: (n_dets, n_pending)
+            
+            threshold_sq = self.pending_detection_distance ** 2
+            
+            # Find closest pending for each detection (using squared distances)
+            min_distances_sq = np.min(distances_sq, axis=1)
+            closest_pending_indices = np.argmin(distances_sq, axis=1)
 
             # Process each detection
             matched_pending_indices = set()
             for i, (det_idx, detection) in enumerate(init_eligible_detections):
-                if min_distances[i] < self.pending_detection_distance:
+                if min_distances_sq[i] < threshold_sq:  # Compare squared distances
                     # Found a close pending detection
                     pending_idx = closest_pending_indices[i]
 
@@ -2810,60 +2806,41 @@ class SwarmSortTracker:
             if not track.confirmed and track.hits >= self.min_consecutive_detections:
                 track.confirmed = True
         
-        # Super-fast embedding processing - minimize when possible
-        if embeddings_to_add and len(embeddings_to_add) <= 50:  # Reasonable limit for batch processing
-            if len(embeddings_to_add) > 10:  # Vectorize for medium batches
-                # Extract all embeddings for vectorized normalization
-                embeddings_array = []
-                tracks_for_embeddings = []
+        # ALWAYS vectorize embedding processing regardless of batch size
+        if embeddings_to_add:
+            # Extract all embeddings for vectorized processing
+            embeddings_array = []
+            tracks_for_embeddings = []
+            
+            for track, embedding in embeddings_to_add:
+                if embedding is not None:
+                    embeddings_array.append(np.asarray(embedding, dtype=np.float32))
+                    tracks_for_embeddings.append(track)
+            
+            if embeddings_array:
+                # ALWAYS use vectorized normalization (faster even for small batches)
+                emb_matrix = np.array(embeddings_array)
+                norms_sq = np.sum(emb_matrix * emb_matrix, axis=1)
+                all_normalized = np.all(np.abs(norms_sq - 1.0) <= 0.01)
                 
-                for track, embedding in embeddings_to_add:
-                    if embedding is not None:
-                        embeddings_array.append(np.asarray(embedding, dtype=np.float32))
-                        tracks_for_embeddings.append(track)
+                if all_normalized:
+                    # Skip normalization - use embeddings as-is
+                    normalized_embs = emb_matrix
+                else:
+                    # Vectorized normalization
+                    norms = np.sqrt(norms_sq)
+                    safe_norms = np.where(norms > 0, norms, 1.0)
+                    normalized_embs = emb_matrix / safe_norms[:, None]
                 
-                if embeddings_array:
-                    # Check if most embeddings are already normalized (common case)
-                    emb_matrix = np.array(embeddings_array)
-                    norms_sq = np.sum(emb_matrix * emb_matrix, axis=1)
-                    all_normalized = np.all(np.abs(norms_sq - 1.0) <= 0.01)
-                    
-                    if all_normalized:
-                        # Skip normalization - use embeddings as-is
-                        normalized_embs = emb_matrix
-                    else:
-                        # Vectorized normalization
-                        norms = np.sqrt(norms_sq)
-                        safe_norms = np.where(norms > 0, norms, 1.0)
-                        normalized_embs = emb_matrix / safe_norms[:, None]
-                    
-                    # Apply to tracks
-                    for track, norm_emb in zip(tracks_for_embeddings, normalized_embs):
-                        track.embedding_history.append(norm_emb.copy())
-                        track.embedding_update_count += 1
-                        track._cache_valid = False
-                        track._representative_cache_valid = False
-            else:
-                # Individual processing for small batches
-                for track, embedding in embeddings_to_add:
-                    if embedding is not None:
-                        embedding = np.asarray(embedding, dtype=np.float32)
-                        # Quick norm check - skip if already normalized
-                        norm_sq = np.dot(embedding, embedding)
-                        if abs(norm_sq - 1.0) <= 0.01:
-                            # Already normalized
-                            normalized_emb = embedding
-                        else:
-                            norm = np.sqrt(norm_sq)
-                            normalized_emb = embedding / norm if norm > 0 else embedding
-                        
-                        track.embedding_history.append(normalized_emb.copy())
-                        track.embedding_update_count += 1
-                        track._cache_valid = False
-                        track._representative_cache_valid = False
-        elif len(embeddings_to_add) > 50:
-            # Skip embedding updates for very large batches to maintain speed
-            pass
+                # Batch update all tracks at once
+                for track, norm_emb in zip(tracks_for_embeddings, normalized_embs):
+                    track.embedding_history.append(norm_emb.copy())
+                    track.embedding_update_count += 1
+                
+                # Batch invalidate caches (faster than individual)
+                for track in tracks_for_embeddings:
+                    track._cache_valid = False
+                    track._representative_cache_valid = False
         
         # Batch process bboxes (minimal overhead)
         for track, bbox in bboxes_to_add:
