@@ -1120,7 +1120,7 @@ class FastTrackState:
         self._cache_valid = False
 
     def add_embedding(self, embedding: np.ndarray):
-        """Add new embedding to history with smart invalidation based on method and freeze check"""
+        """Add new embedding to history - FIXED to avoid double normalization"""
         # Don't update embeddings during collision/occlusion
         if self.embedding_frozen:
             return
@@ -1129,7 +1129,11 @@ class FastTrackState:
             embedding = np.asarray(embedding, dtype=np.float32)
             norm = np.linalg.norm(embedding)
             if norm > 0:
-                normalized_emb = embedding / norm
+                # FIXED: Only normalize if not already normalized
+                if abs(norm - 1.0) > 0.01:  # Allow small numerical errors
+                    normalized_emb = embedding / (norm + 1e-8)
+                else:
+                    normalized_emb = embedding  # Already normalized
 
                 # Store embedding as last safe embedding before potential collision
                 # Only store if we don't already have one to avoid redundant copies
@@ -1686,28 +1690,8 @@ class SwarmSortTracker:
         stop("embedding_freeze_update")
 
         start("assignment")
-        if self.assignment_strategy == "hungarian":
-            if self.use_probabilistic_costs:
-                matches, unmatched_dets, unmatched_tracks = self._fast_assignment_probabilistic(
-                    valid_detections, timer, start, stop
-                )
-            else:
-                matches, unmatched_dets, unmatched_tracks = self._fast_assignment(
-                    valid_detections, timer, start, stop
-                )
-        elif self.assignment_strategy == "greedy":
-            matches, unmatched_dets, unmatched_tracks = self._greedy_assignment(
-                valid_detections, timer, start, stop
-            )
-        elif self.assignment_strategy == "hybrid":
-            matches, unmatched_dets, unmatched_tracks = self._hybrid_assignment(
-                valid_detections, timer, start, stop
-            )
-        else:
-            # Fallback to hybrid
-            matches, unmatched_dets, unmatched_tracks = self._hybrid_assignment(
-                valid_detections, timer, start, stop
-            )
+        # UNIFIED ASSIGNMENT - all strategies use the same cost matrix computation
+        matches, unmatched_dets, unmatched_tracks = self._unified_assignment(valid_detections)
         stop("assignment")
 
 
@@ -1923,9 +1907,19 @@ class SwarmSortTracker:
             max_embeddings=self.max_embeddings_per_track, method=self.embedding_matching_method
         )
 
-        # Initialize track with pending embedding if available
+        # FIXED: Initialize track with pending embedding if available (ensure normalization)
         if pending.embedding is not None:
-            new_track.add_embedding(pending.embedding)
+            emb = np.asarray(pending.embedding, dtype=np.float32)
+            norm = np.linalg.norm(emb)
+            if norm > 0:
+                if abs(norm - 1.0) > 0.01:
+                    normalized_emb = emb / norm
+                else:
+                    normalized_emb = emb
+                new_track.embedding_history.append(normalized_emb)
+                new_track.embedding_update_count = 1
+                new_track._cache_valid = False
+                new_track._representative_cache_valid = False
 
         # Update with detection
         new_track.update_with_detection(
@@ -2121,7 +2115,7 @@ class SwarmSortTracker:
                 if total_cost <= self.max_distance:
                     # Add embedding cost if enabled
                     if do_embeddings:
-                        embedding_cost = scaled_embedding_matrix[i, j] * self.max_distance * self.embedding_weight
+                        embedding_cost = scaled_embedding_matrix[i, j] * self.embedding_weight * self.max_distance
                         total_cost += embedding_cost
                     
                     cost_matrix[i, j] = total_cost
@@ -2185,10 +2179,13 @@ class SwarmSortTracker:
             for det in detections:
                 emb = np.asarray(det.embedding, dtype=np.float32)
                 norm = np.linalg.norm(emb)
-                # Only normalize if not already normalized (avoid double normalization)
-                if abs(norm - 1.0) > 0.01:  # Allow small numerical errors
-                    emb = emb / (norm + 1e-8)  # Add epsilon for stability
-                det_embeddings.append(emb)
+                # FIXED: Only normalize if not already normalized
+                if norm > 0:
+                    if abs(norm - 1.0) > 0.01:  # Not normalized
+                        emb = emb / (norm + 1e-8)
+                    det_embeddings.append(emb)
+                else:
+                    det_embeddings.append(np.zeros_like(emb))  # Handle zero embeddings
             det_embeddings = np.array(det_embeddings, dtype=np.float32)
 
             # Get representative embeddings with caching (reuse array from regular assignment)
@@ -2316,6 +2313,215 @@ class SwarmSortTracker:
             return None, None
             
         return sparse_pairs, track_grid
+    
+    def _unified_assignment(self, detections):
+        """
+        UNIFIED assignment method following the old version logic.
+        Computes cost matrix ONCE using Numba functions, then applies the selected strategy.
+        """
+        n_dets = len(detections)
+        n_tracks = len(self._tracks)
+
+        if n_tracks == 0:
+            return [], list(range(n_dets)), []
+
+        tracks = list(self._tracks.values())
+
+        # Step 1: Extract positions
+        det_positions = np.array(
+            [det.position.flatten()[:2] for det in detections], dtype=np.float32
+        )
+        track_last_positions = np.array([t.last_detection_pos for t in tracks], dtype=np.float32)
+        track_kalman_positions = np.array([t.predicted_position for t in tracks], dtype=np.float32)
+
+        # Step 2: Prepare embeddings if enabled
+        do_embeddings = (
+            self.do_embeddings
+            and all(hasattr(det, "embedding") and det.embedding is not None for det in detections)
+        )
+
+        scaled_embedding_matrix = np.zeros((n_dets, n_tracks), dtype=np.float32)
+
+        if do_embeddings:
+            # Normalize detection embeddings ONCE (avoid double normalization)
+            det_embeddings = np.empty((n_dets, detections[0].embedding.shape[0]), dtype=np.float32)
+            for i, det in enumerate(detections):
+                emb = np.asarray(det.embedding, dtype=np.float32)
+                norm = np.linalg.norm(emb)
+                if norm > 0:
+                    # Only normalize if not already normalized
+                    if abs(norm - 1.0) > 0.01:
+                        det_embeddings[i] = emb / norm
+                    else:
+                        det_embeddings[i] = emb  # Already normalized
+                else:
+                    det_embeddings[i] = np.zeros_like(emb)
+
+            # Get track embeddings (simplified - no complex caching)
+            track_embeddings = np.empty((n_tracks, det_embeddings.shape[1]), dtype=np.float32)
+            for i, track in enumerate(tracks):
+                if len(track.embedding_history) > 0:
+                    # Use most recent embedding (already normalized when added)
+                    track_embeddings[i] = track.embedding_history[-1]
+                else:
+                    # No embeddings yet
+                    track_embeddings[i] = np.zeros(det_embeddings.shape[1], dtype=np.float32)
+
+            # Compute embedding distances using optimized Numba function
+            raw_distances = compute_embedding_distances_optimized(det_embeddings, track_embeddings)
+            
+            # Apply scaling
+            raw_distances_flat = raw_distances.flatten()
+            scaled_distances_flat = self.embedding_scaler.scale_distances(raw_distances_flat)
+            self.embedding_scaler.update_statistics(raw_distances_flat)
+            scaled_embedding_matrix = scaled_distances_flat.reshape(n_dets, n_tracks)
+
+        # Step 3: Compute uncertainties if enabled
+        if self.uncertainty_weight > 0.0:
+            track_uncertainties = self._compute_track_uncertainties_batch(tracks)
+            uncertainty_penalties = track_uncertainties * self.uncertainty_weight * self.max_distance
+        else:
+            uncertainty_penalties = np.zeros(n_tracks, dtype=np.float32)
+
+        # Step 4: Compute cost matrix using Numba functions
+        if self.use_probabilistic_costs:
+            # Probabilistic cost computation
+            track_frames_since = np.array(
+                [self._frame_count - track.last_detection_frame for track in tracks], dtype=np.float32
+            )
+            cost_matrix = compute_probabilistic_cost_matrix_vectorized(
+                det_positions,
+                track_kalman_positions,
+                track_last_positions,
+                track_frames_since,
+                scaled_embedding_matrix,
+                0.5,  # embedding_median
+                do_embeddings,
+                self.max_distance,
+                self.embedding_weight,
+            )
+        else:
+            # Standard cost computation using unified formula
+            # Use the vectorized version for better performance
+            if do_embeddings:
+                cost_matrix = compute_cost_matrix_vectorized(
+                    det_positions,
+                    track_last_positions,
+                    track_kalman_positions,
+                    det_embeddings,
+                    track_embeddings,
+                    do_embeddings,
+                    self.max_distance,
+                    self.embedding_weight,
+                )
+            else:
+                # Simple spatial cost without embeddings
+                cost_matrix = np.full((n_dets, n_tracks), np.inf, dtype=np.float32)
+                for i in range(n_dets):
+                    for j in range(n_tracks):
+                        # Distance to last detection
+                        dx_last = det_positions[i, 0] - track_last_positions[j, 0]
+                        dy_last = det_positions[i, 1] - track_last_positions[j, 1]
+                        dist_to_last = np.sqrt(dx_last * dx_last + dy_last * dy_last)
+                        
+                        # Distance to Kalman prediction
+                        dx_kalman = det_positions[i, 0] - track_kalman_positions[j, 0]
+                        dy_kalman = det_positions[i, 1] - track_kalman_positions[j, 1]
+                        dist_to_kalman = np.sqrt(dx_kalman * dx_kalman + dy_kalman * dy_kalman)
+                        
+                        # Use minimum distance
+                        spatial_cost = min(dist_to_last, dist_to_kalman)
+                        
+                        if spatial_cost <= self.max_distance:
+                            cost_matrix[i, j] = spatial_cost
+            
+            # Add uncertainty penalties
+            if self.uncertainty_weight > 0.0:
+                for j in range(n_tracks):
+                    cost_matrix[:, j] += uncertainty_penalties[j]
+
+        # Step 5: Apply assignment strategy
+        # Check for empty cost matrix
+        if np.all(np.isinf(cost_matrix)):
+            return [], list(range(n_dets)), list(range(n_tracks))
+
+        # Cap costs for numerical stability
+        cost_matrix[cost_matrix > self.max_distance] = self.max_distance * 2
+
+        # Now apply the selected strategy (only this part differs)
+        if self.assignment_strategy == "greedy":
+            # Pure greedy assignment
+            matches = []
+            matched_dets = set()
+            matched_tracks = set()
+
+            # Find all valid assignments and sort by cost
+            valid_assignments = []
+            for i in range(n_dets):
+                for j in range(n_tracks):
+                    if cost_matrix[i, j] <= self.max_distance:
+                        valid_assignments.append((cost_matrix[i, j], i, j))
+            
+            valid_assignments.sort(key=lambda x: x[0])
+            
+            # Greedily assign best matches
+            for cost, d_idx, t_idx in valid_assignments:
+                if d_idx not in matched_dets and t_idx not in matched_tracks:
+                    matches.append((d_idx, t_idx))
+                    matched_dets.add(d_idx)
+                    matched_tracks.add(t_idx)
+
+        elif self.assignment_strategy == "hybrid":
+            # Hybrid: greedy for confident matches, Hungarian for the rest
+            matches = []
+            matched_dets = set()
+            matched_tracks = set()
+
+            # First pass: greedy for low-cost matches
+            for i in range(n_dets):
+                for j in range(n_tracks):
+                    if cost_matrix[i, j] <= self.greedy_threshold:
+                        if i not in matched_dets and j not in matched_tracks:
+                            matches.append((i, j))
+                            matched_dets.add(i)
+                            matched_tracks.add(j)
+
+            # Second pass: Hungarian for remaining
+            remaining_dets = [i for i in range(n_dets) if i not in matched_dets]
+            remaining_tracks = [j for j in range(n_tracks) if j not in matched_tracks]
+
+            if remaining_dets and remaining_tracks:
+                sub_matrix = cost_matrix[np.ix_(remaining_dets, remaining_tracks)]
+                try:
+                    sub_det_indices, sub_track_indices = linear_sum_assignment(sub_matrix)
+                    for sub_d, sub_t in zip(sub_det_indices, sub_track_indices):
+                        if sub_matrix[sub_d, sub_t] <= self.max_distance:
+                            matches.append((remaining_dets[sub_d], remaining_tracks[sub_t]))
+                            matched_dets.add(remaining_dets[sub_d])
+                            matched_tracks.add(remaining_tracks[sub_t])
+                except ValueError:
+                    pass
+
+        else:  # hungarian (default)
+            # Standard Hungarian assignment
+            try:
+                det_indices, track_indices = linear_sum_assignment(cost_matrix)
+                matches = []
+                for d_idx, t_idx in zip(det_indices, track_indices):
+                    if cost_matrix[d_idx, t_idx] <= self.max_distance:
+                        matches.append((d_idx, t_idx))
+                matched_dets = {m[0] for m in matches}
+                matched_tracks = {m[1] for m in matches}
+            except ValueError:
+                matches = []
+                matched_dets = set()
+                matched_tracks = set()
+
+        # Find unmatched
+        unmatched_dets = [i for i in range(n_dets) if i not in matched_dets]
+        unmatched_tracks = [i for i in range(n_tracks) if i not in matched_tracks]
+
+        return matches, unmatched_dets, unmatched_tracks
     
     def _hybrid_assignment(self, detections, timer=None, start=None, stop=None):
         """
@@ -2493,7 +2699,7 @@ class SwarmSortTracker:
                     if total_cost <= self.max_distance:
                         # Add embedding cost if enabled
                         if do_embeddings:
-                            embedding_cost = scaled_embedding_matrix[i, j] * self.max_distance * self.embedding_weight
+                            embedding_cost = scaled_embedding_matrix[i, j] * self.embedding_weight * self.max_distance
                             total_cost += embedding_cost
                         
                         cost_matrix[i, j] = total_cost
@@ -2686,7 +2892,7 @@ class SwarmSortTracker:
                 if total_cost <= self.max_distance:
                     # Add embedding cost if enabled
                     if do_embeddings:
-                        embedding_cost = scaled_embedding_matrix[i, j] * self.max_distance * self.embedding_weight
+                        embedding_cost = scaled_embedding_matrix[i, j] * self.embedding_weight * self.max_distance
                         total_cost += embedding_cost
                     
                     cost_matrix[i, j] = total_cost
