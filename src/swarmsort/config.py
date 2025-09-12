@@ -362,7 +362,7 @@ class SwarmSortConfig(BaseConfig):
     Most users should keep this False.
     """
 
-    assignment_strategy: Literal["hungarian", "greedy", "hybrid"] = "hungarian"
+    assignment_strategy: Literal["hungarian", "greedy", "hybrid"] = "hybrid"
     """Algorithm for matching detections to tracks.
 
     - "hungarian": Globally optimal assignment (best accuracy, O(n³) complexity)

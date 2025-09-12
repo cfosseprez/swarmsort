@@ -982,6 +982,54 @@ def compute_cost_matrix_with_uncertainty(
     return cost_matrix
 
 
+@nb.njit(fastmath=True, cache=True)
+def compute_cost_matrix_with_min_distance(
+    det_positions: np.ndarray,
+    track_last_positions: np.ndarray,
+    track_kalman_positions: np.ndarray,
+    scaled_embedding_matrix: np.ndarray,
+    track_uncertainties: np.ndarray,  # Already scaled by uncertainty_weight * max_distance
+    do_embeddings: bool,
+    max_distance: float,
+    embedding_weight: float,
+) -> np.ndarray:
+    """
+    Compute cost matrix with minimum distance (like old version's compute_cost_matrix_vectorized).
+    Uses minimum of distance to last detection and Kalman prediction.
+    """
+    n_dets, n_tracks = det_positions.shape[0], track_last_positions.shape[0]
+    cost_matrix = np.full((n_dets, n_tracks), np.inf, dtype=np.float32)
+    
+    for i in range(n_dets):
+        for j in range(n_tracks):
+            # Distance to last detection
+            dx_last = det_positions[i, 0] - track_last_positions[j, 0]
+            dy_last = det_positions[i, 1] - track_last_positions[j, 1]
+            dist_to_last = np.sqrt(dx_last * dx_last + dy_last * dy_last)
+            
+            # Distance to Kalman prediction
+            dx_kalman = det_positions[i, 0] - track_kalman_positions[j, 0]
+            dy_kalman = det_positions[i, 1] - track_kalman_positions[j, 1]
+            dist_to_kalman = np.sqrt(dx_kalman * dx_kalman + dy_kalman * dy_kalman)
+            
+            # Use minimum distance (key logic from old version)
+            spatial_cost = min(dist_to_last, dist_to_kalman)
+            
+            # Add uncertainty penalty to spatial cost
+            spatial_cost = spatial_cost + track_uncertainties[j]
+            
+            # Only proceed if within max distance (after uncertainty adjustment)
+            if spatial_cost <= max_distance:
+                # Add embedding cost if enabled (CONSISTENT FORMULA)
+                if do_embeddings:
+                    embedding_cost = scaled_embedding_matrix[i, j] * embedding_weight * max_distance
+                    spatial_cost += embedding_cost
+                
+                cost_matrix[i, j] = spatial_cost
+    
+    return cost_matrix
+
+
 # ============================================================================
 # COLLISION OPTIMIZATION FUNCTIONS  
 # ============================================================================
@@ -1690,8 +1738,19 @@ class SwarmSortTracker:
         stop("embedding_freeze_update")
 
         start("assignment")
-        # UNIFIED ASSIGNMENT - all strategies use the same cost matrix computation
-        matches, unmatched_dets, unmatched_tracks = self._unified_assignment(valid_detections)
+        # OLD: This was calling a single assignment function, ignoring the config.
+        # matches, unmatched_dets, unmatched_tracks = self._unified_assignment(valid_detections)
+
+        # NEW: Select assignment strategy based on config.
+        # This makes the tracker's behavior configurable as intended.
+        if self.assignment_strategy == "greedy":
+            assignment_fn = self._greedy_assignment
+        elif self.assignment_strategy == "hybrid":
+            assignment_fn = self._hybrid_assignment
+        else:  # Default to "hungarian"
+            assignment_fn = self._fast_assignment
+
+        matches, unmatched_dets, unmatched_tracks = assignment_fn(valid_detections, timer=timer, start=start, stop=stop)
         stop("assignment")
 
 
@@ -1942,15 +2001,14 @@ class SwarmSortTracker:
 
         self._next_id += 1
 
-    def _fast_assignment(self, detections, timer=None, start=None, stop=None):
-        """OPTIMIZED assignment with spatial filtering"""
+    def _compute_cost_matrix(self, detections, tracks, start=None, stop=None):
+        """
+        Centralized cost matrix computation.
+        This function computes the cost matrix based on the configured cost function
+        (probabilistic or standard) and handles embedding calculations.
+        """
         n_dets = len(detections)
         n_tracks = len(self._tracks)
-
-        if n_tracks == 0:
-            return [], list(range(n_dets)), []
-
-        tracks = list(self._tracks.values())
 
         # Extract positions
         det_positions = np.array(
@@ -1959,21 +2017,12 @@ class SwarmSortTracker:
         track_last_positions = np.array([t.last_detection_pos for t in tracks], dtype=np.float32)
         track_kalman_positions = np.array([t.predicted_position for t in tracks], dtype=np.float32)
 
-        # Quick spatial pre-filter
-        spatial_distances = np.minimum(
-            np.sum((det_positions[:, None, :] - track_last_positions[None, :, :]) ** 2, axis=2),
-            np.sum((det_positions[:, None, :] - track_kalman_positions[None, :, :]) ** 2, axis=2),
-        )
-        spatial_mask = spatial_distances <= (self.max_distance**2)
-
         # Check if we need embeddings
-        # Fixed: Don't require tracks to already have embeddings - they need to start somewhere!
         do_embeddings = (
-            any(spatial_mask.flatten())
-            and all(  # Only if there are possible matches
+            self.do_embeddings and
+            all(
                 hasattr(det, "embedding") and det.embedding is not None for det in detections
             )
-            # Removed: and all(len(t.embedding_history) > 0 for t in tracks) - this prevented new tracks from getting embeddings!
         )
 
         scaled_embedding_matrix = np.zeros((n_dets, n_tracks), dtype=np.float32)
@@ -1982,106 +2031,30 @@ class SwarmSortTracker:
             if start:
                 start("embedding_computation")
 
-            # Only compute embeddings for spatially feasible pairs
-            feasible_pairs = np.where(spatial_mask)
+            # This logic is now unified from the old `_unified_assignment` method
+            det_embeddings = np.empty((n_dets, detections[0].embedding.shape[0]), dtype=np.float32)
+            for i, det in enumerate(detections):
+                emb = np.asarray(det.embedding, dtype=np.float32)
+                norm = np.linalg.norm(emb)
+                if norm > 0 and abs(norm - 1.0) > 0.01:
+                    det_embeddings[i] = emb / norm
+                else:
+                    det_embeddings[i] = emb
 
-            if len(feasible_pairs[0]) > 0:
-                # Get embeddings (reuse normalized ones from frame cache)
-                if self._frame_det_embeddings_valid != self._frame_count:
-                    # Normalize once per frame
-                    emb_dim = (
-                        len(detections[0].embedding)
-                        if hasattr(detections[0].embedding, "__len__")
-                        else detections[0].embedding.shape[0]
-                    )
-                    if (
-                        self._reusable_det_embeddings is None
-                        or self._reusable_det_embeddings.shape[0] < n_dets
-                    ):
-                        self._reusable_det_embeddings = np.empty(
-                            (n_dets, emb_dim), dtype=np.float32
-                        )
+            track_embeddings = np.empty((n_tracks, det_embeddings.shape[1]), dtype=np.float32)
+            for i, track in enumerate(tracks):
+                if len(track.embedding_history) > 0:
+                    track_embeddings[i] = track.embedding_history[-1]
+                else:
+                    track_embeddings[i] = np.zeros(det_embeddings.shape[1], dtype=np.float32)
 
-                    # Ultra-fast embedding normalization with pre-normalized detection
-                    # Stack all embeddings into matrix
-                    emb_matrix = np.array([det.embedding for det in detections], dtype=np.float32)
-                    
-                    # Compute all norms at once
-                    norms_sq = np.sum(emb_matrix * emb_matrix, axis=1)  # Shape: (n_dets,)
-                    
-                    # Check if ALL embeddings are already normalized (common case for pre-computed embeddings)
-                    all_normalized = np.all(np.abs(norms_sq - 1.0) <= 0.01)
-                    
-                    if all_normalized:
-                        # Skip normalization entirely - embeddings are already normalized
-                        self._reusable_det_embeddings[:n_dets] = emb_matrix
-                    else:
-                        # Find which embeddings need normalization
-                        needs_norm = np.abs(norms_sq - 1.0) > 0.01
-                        
-                        # Vectorized normalization for embeddings that need it
-                        norms = np.sqrt(norms_sq)
-                        safe_norms = np.where(norms > 0, norms, 1.0)  # Avoid division by zero
-                        
-                        # Apply normalization only where needed
-                        self._reusable_det_embeddings[:n_dets] = np.where(
-                            needs_norm[:, None], 
-                            emb_matrix / safe_norms[:, None], 
-                            emb_matrix
-                        )
-                    
-                    self._frame_det_embeddings_valid = self._frame_count
+            raw_distances = compute_embedding_distances_optimized(det_embeddings, track_embeddings)
+            raw_distances_flat = raw_distances.flatten()
+            scaled_distances_flat = self.embedding_scaler.scale_distances(raw_distances_flat)
+            self.embedding_scaler.update_statistics(raw_distances_flat)
+            scaled_embedding_matrix = scaled_distances_flat.reshape(n_dets, n_tracks)
 
-                det_embeddings = self._reusable_det_embeddings[:n_dets]
-
-                # Get track embeddings (use cached representatives)
-                track_embeddings = np.empty((n_tracks, det_embeddings.shape[1]), dtype=np.float32)
-                for i, track in enumerate(tracks):
-                    if (
-                        track._representative_cache_valid
-                        and track._cached_representative_embedding is not None
-                    ):
-                        track_embeddings[i] = track._cached_representative_embedding
-                    else:
-                        # Simple fallback - most recent embedding
-                        if len(track.embedding_history) > 0:
-                            track_embeddings[i] = track.embedding_history[-1]
-                        else:
-                            track_embeddings[i] = np.zeros(
-                                det_embeddings.shape[1], dtype=np.float32
-                            )
-
-                # Compute cosine similarities: (n_dets, n_tracks) = (n_dets, emb_dim) @ (emb_dim, n_tracks)
-                cos_similarities = det_embeddings @ track_embeddings.T
-
-                # Convert to distances
-                raw_distances = (1.0 - cos_similarities) / 2.0
-
-                # Apply scaling in batch
-                raw_distances_flat = raw_distances.flatten()
-                scaled_distances_flat = self.embedding_scaler.scale_distances(raw_distances_flat)
-                self.embedding_scaler.update_statistics(raw_distances_flat)
-                scaled_embedding_matrix = scaled_distances_flat.reshape(n_dets, n_tracks)
-
-                # Optional: Apply spatial mask to zero out impossible matches
-                # This saves computation in the cost matrix step
-                spatial_distances_sq = np.minimum(
-                    np.sum(
-                        (det_positions[:, None, :] - track_last_positions[None, :, :]) ** 2, axis=2
-                    ),
-                    np.sum(
-                        (det_positions[:, None, :] - track_kalman_positions[None, :, :]) ** 2,
-                        axis=2,
-                    ),
-                )
-                far_mask = spatial_distances_sq > (self.max_distance * 1.5) ** 2
-                scaled_embedding_matrix[far_mask] = 1.0  # Max distance for impossible matches
-
-                if stop:
-                    stop("embedding_computation")
-
-            if stop:
-                stop("embedding_computation")
+            if stop: stop("embedding_computation")
 
         # Compute track uncertainties and scale them
         if self.uncertainty_weight > 0.0:
@@ -2091,41 +2064,51 @@ class SwarmSortTracker:
         else:
             uncertainty_penalties = np.zeros(n_tracks, dtype=np.float32)
 
-        # FIXED: Compute cost matrix with minimum distance logic (same as spatial pre-filtering)
-        cost_matrix = np.full((n_dets, n_tracks), np.inf, dtype=np.float32)
-        
-        for i in range(n_dets):
-            for j in range(n_tracks):
-                # Compute distance to both last detection and Kalman positions
-                dx_last = det_positions[i, 0] - track_last_positions[j, 0]
-                dy_last = det_positions[i, 1] - track_last_positions[j, 1]
-                dist_to_last = np.sqrt(dx_last*dx_last + dy_last*dy_last)
-                
-                dx_kalman = det_positions[i, 0] - track_kalman_positions[j, 0]
-                dy_kalman = det_positions[i, 1] - track_kalman_positions[j, 1]
-                dist_to_kalman = np.sqrt(dx_kalman*dx_kalman + dy_kalman*dy_kalman)
-                
-                # Use minimum distance (same logic as spatial pre-filtering)
-                spatial_cost = min(dist_to_last, dist_to_kalman)
-                
-                # Add uncertainty penalty to spatial cost
-                total_cost = spatial_cost + uncertainty_penalties[j]
-                
-                # Only proceed if within max distance (after uncertainty adjustment)
-                if total_cost <= self.max_distance:
-                    # Add embedding cost if enabled
-                    if do_embeddings:
-                        embedding_cost = scaled_embedding_matrix[i, j] * self.embedding_weight * self.max_distance
-                        total_cost += embedding_cost
-                    
-                    cost_matrix[i, j] = total_cost
+        # Compute final cost matrix using the appropriate Numba function
+        if self.use_probabilistic_costs:
+            track_frames_since = np.array([self._frame_count - t.last_detection_frame for t in tracks], dtype=np.float32)
+            cost_matrix = compute_probabilistic_cost_matrix_vectorized(
+                det_positions,
+                track_kalman_positions,
+                track_last_positions,
+                track_frames_since,
+                scaled_embedding_matrix,
+                0.5,  # embedding_median placeholder
+                do_embeddings,
+                self.max_distance,
+                self.embedding_weight,
+            )
+        else:
+            cost_matrix = compute_cost_matrix_with_min_distance(
+                det_positions,
+                track_last_positions,
+                track_kalman_positions,
+                scaled_embedding_matrix,
+                uncertainty_penalties,
+                do_embeddings,
+                self.max_distance,
+                self.embedding_weight,
+            )
+        return cost_matrix
 
-        # Hungarian assignment (same as before)
+    def _fast_assignment(self, detections, timer=None, start=None, stop=None):
+        """OPTIMIZED Hungarian assignment."""
+        n_dets = len(detections)
+        n_tracks = len(self._tracks)
+
+        if n_tracks == 0:
+            return [], list(range(n_dets)), []
+
+        tracks = list(self._tracks.values())
+
+        cost_matrix = self._compute_cost_matrix(detections, tracks, start, stop)
+
         if np.all(np.isinf(cost_matrix)):
             return [], list(range(n_dets)), list(range(n_tracks))
 
         cost_matrix[cost_matrix > self.max_distance] = self.max_distance * 2
 
+        if start: start("hungarian_assignment")
         try:
             det_indices, track_indices = linear_sum_assignment(cost_matrix)
         except ValueError:
@@ -2143,6 +2126,7 @@ class SwarmSortTracker:
 
         unmatched_dets = [i for i in range(n_dets) if i not in matched_dets]
         unmatched_tracks = [i for i in range(n_tracks) if i not in matched_tracks]
+        if stop: stop("hungarian_assignment")
 
         return matches, unmatched_dets, unmatched_tracks
 
@@ -2314,215 +2298,6 @@ class SwarmSortTracker:
             
         return sparse_pairs, track_grid
     
-    def _unified_assignment(self, detections):
-        """
-        UNIFIED assignment method following the old version logic.
-        Computes cost matrix ONCE using Numba functions, then applies the selected strategy.
-        """
-        n_dets = len(detections)
-        n_tracks = len(self._tracks)
-
-        if n_tracks == 0:
-            return [], list(range(n_dets)), []
-
-        tracks = list(self._tracks.values())
-
-        # Step 1: Extract positions
-        det_positions = np.array(
-            [det.position.flatten()[:2] for det in detections], dtype=np.float32
-        )
-        track_last_positions = np.array([t.last_detection_pos for t in tracks], dtype=np.float32)
-        track_kalman_positions = np.array([t.predicted_position for t in tracks], dtype=np.float32)
-
-        # Step 2: Prepare embeddings if enabled
-        do_embeddings = (
-            self.do_embeddings
-            and all(hasattr(det, "embedding") and det.embedding is not None for det in detections)
-        )
-
-        scaled_embedding_matrix = np.zeros((n_dets, n_tracks), dtype=np.float32)
-
-        if do_embeddings:
-            # Normalize detection embeddings ONCE (avoid double normalization)
-            det_embeddings = np.empty((n_dets, detections[0].embedding.shape[0]), dtype=np.float32)
-            for i, det in enumerate(detections):
-                emb = np.asarray(det.embedding, dtype=np.float32)
-                norm = np.linalg.norm(emb)
-                if norm > 0:
-                    # Only normalize if not already normalized
-                    if abs(norm - 1.0) > 0.01:
-                        det_embeddings[i] = emb / norm
-                    else:
-                        det_embeddings[i] = emb  # Already normalized
-                else:
-                    det_embeddings[i] = np.zeros_like(emb)
-
-            # Get track embeddings (simplified - no complex caching)
-            track_embeddings = np.empty((n_tracks, det_embeddings.shape[1]), dtype=np.float32)
-            for i, track in enumerate(tracks):
-                if len(track.embedding_history) > 0:
-                    # Use most recent embedding (already normalized when added)
-                    track_embeddings[i] = track.embedding_history[-1]
-                else:
-                    # No embeddings yet
-                    track_embeddings[i] = np.zeros(det_embeddings.shape[1], dtype=np.float32)
-
-            # Compute embedding distances using optimized Numba function
-            raw_distances = compute_embedding_distances_optimized(det_embeddings, track_embeddings)
-            
-            # Apply scaling
-            raw_distances_flat = raw_distances.flatten()
-            scaled_distances_flat = self.embedding_scaler.scale_distances(raw_distances_flat)
-            self.embedding_scaler.update_statistics(raw_distances_flat)
-            scaled_embedding_matrix = scaled_distances_flat.reshape(n_dets, n_tracks)
-
-        # Step 3: Compute uncertainties if enabled
-        if self.uncertainty_weight > 0.0:
-            track_uncertainties = self._compute_track_uncertainties_batch(tracks)
-            uncertainty_penalties = track_uncertainties * self.uncertainty_weight * self.max_distance
-        else:
-            uncertainty_penalties = np.zeros(n_tracks, dtype=np.float32)
-
-        # Step 4: Compute cost matrix using Numba functions
-        if self.use_probabilistic_costs:
-            # Probabilistic cost computation
-            track_frames_since = np.array(
-                [self._frame_count - track.last_detection_frame for track in tracks], dtype=np.float32
-            )
-            cost_matrix = compute_probabilistic_cost_matrix_vectorized(
-                det_positions,
-                track_kalman_positions,
-                track_last_positions,
-                track_frames_since,
-                scaled_embedding_matrix,
-                0.5,  # embedding_median
-                do_embeddings,
-                self.max_distance,
-                self.embedding_weight,
-            )
-        else:
-            # Standard cost computation using unified formula
-            # Use the vectorized version for better performance
-            if do_embeddings:
-                cost_matrix = compute_cost_matrix_vectorized(
-                    det_positions,
-                    track_last_positions,
-                    track_kalman_positions,
-                    det_embeddings,
-                    track_embeddings,
-                    do_embeddings,
-                    self.max_distance,
-                    self.embedding_weight,
-                )
-            else:
-                # Simple spatial cost without embeddings
-                cost_matrix = np.full((n_dets, n_tracks), np.inf, dtype=np.float32)
-                for i in range(n_dets):
-                    for j in range(n_tracks):
-                        # Distance to last detection
-                        dx_last = det_positions[i, 0] - track_last_positions[j, 0]
-                        dy_last = det_positions[i, 1] - track_last_positions[j, 1]
-                        dist_to_last = np.sqrt(dx_last * dx_last + dy_last * dy_last)
-                        
-                        # Distance to Kalman prediction
-                        dx_kalman = det_positions[i, 0] - track_kalman_positions[j, 0]
-                        dy_kalman = det_positions[i, 1] - track_kalman_positions[j, 1]
-                        dist_to_kalman = np.sqrt(dx_kalman * dx_kalman + dy_kalman * dy_kalman)
-                        
-                        # Use minimum distance
-                        spatial_cost = min(dist_to_last, dist_to_kalman)
-                        
-                        if spatial_cost <= self.max_distance:
-                            cost_matrix[i, j] = spatial_cost
-            
-            # Add uncertainty penalties
-            if self.uncertainty_weight > 0.0:
-                for j in range(n_tracks):
-                    cost_matrix[:, j] += uncertainty_penalties[j]
-
-        # Step 5: Apply assignment strategy
-        # Check for empty cost matrix
-        if np.all(np.isinf(cost_matrix)):
-            return [], list(range(n_dets)), list(range(n_tracks))
-
-        # Cap costs for numerical stability
-        cost_matrix[cost_matrix > self.max_distance] = self.max_distance * 2
-
-        # Now apply the selected strategy (only this part differs)
-        if self.assignment_strategy == "greedy":
-            # Pure greedy assignment
-            matches = []
-            matched_dets = set()
-            matched_tracks = set()
-
-            # Find all valid assignments and sort by cost
-            valid_assignments = []
-            for i in range(n_dets):
-                for j in range(n_tracks):
-                    if cost_matrix[i, j] <= self.max_distance:
-                        valid_assignments.append((cost_matrix[i, j], i, j))
-            
-            valid_assignments.sort(key=lambda x: x[0])
-            
-            # Greedily assign best matches
-            for cost, d_idx, t_idx in valid_assignments:
-                if d_idx not in matched_dets and t_idx not in matched_tracks:
-                    matches.append((d_idx, t_idx))
-                    matched_dets.add(d_idx)
-                    matched_tracks.add(t_idx)
-
-        elif self.assignment_strategy == "hybrid":
-            # Hybrid: greedy for confident matches, Hungarian for the rest
-            matches = []
-            matched_dets = set()
-            matched_tracks = set()
-
-            # First pass: greedy for low-cost matches
-            for i in range(n_dets):
-                for j in range(n_tracks):
-                    if cost_matrix[i, j] <= self.greedy_threshold:
-                        if i not in matched_dets and j not in matched_tracks:
-                            matches.append((i, j))
-                            matched_dets.add(i)
-                            matched_tracks.add(j)
-
-            # Second pass: Hungarian for remaining
-            remaining_dets = [i for i in range(n_dets) if i not in matched_dets]
-            remaining_tracks = [j for j in range(n_tracks) if j not in matched_tracks]
-
-            if remaining_dets and remaining_tracks:
-                sub_matrix = cost_matrix[np.ix_(remaining_dets, remaining_tracks)]
-                try:
-                    sub_det_indices, sub_track_indices = linear_sum_assignment(sub_matrix)
-                    for sub_d, sub_t in zip(sub_det_indices, sub_track_indices):
-                        if sub_matrix[sub_d, sub_t] <= self.max_distance:
-                            matches.append((remaining_dets[sub_d], remaining_tracks[sub_t]))
-                            matched_dets.add(remaining_dets[sub_d])
-                            matched_tracks.add(remaining_tracks[sub_t])
-                except ValueError:
-                    pass
-
-        else:  # hungarian (default)
-            # Standard Hungarian assignment
-            try:
-                det_indices, track_indices = linear_sum_assignment(cost_matrix)
-                matches = []
-                for d_idx, t_idx in zip(det_indices, track_indices):
-                    if cost_matrix[d_idx, t_idx] <= self.max_distance:
-                        matches.append((d_idx, t_idx))
-                matched_dets = {m[0] for m in matches}
-                matched_tracks = {m[1] for m in matches}
-            except ValueError:
-                matches = []
-                matched_dets = set()
-                matched_tracks = set()
-
-        # Find unmatched
-        unmatched_dets = [i for i in range(n_dets) if i not in matched_dets]
-        unmatched_tracks = [i for i in range(n_tracks) if i not in matched_tracks]
-
-        return matches, unmatched_dets, unmatched_tracks
-    
     def _hybrid_assignment(self, detections, timer=None, start=None, stop=None):
         """
         OPTIMIZED Hybrid assignment: Greedy for confident matches, Hungarian for the rest.
@@ -2535,181 +2310,13 @@ class SwarmSortTracker:
             return [], list(range(n_dets)), []
 
         tracks = list(self._tracks.values())
-        
-        # Try spatial indexing for large-scale scenarios
-        sparse_pairs, track_grid = self._compute_sparse_cost_matrix(
-            None, tracks, detections, self.max_distance * 1.5
-        )
-        use_sparse = sparse_pairs is not None
 
-        # Extract positions (same as existing methods)
-        det_positions = np.array([det.position.flatten()[:2] for det in detections], dtype=np.float32)
-        track_last_positions = np.array([t.last_detection_pos for t in tracks], dtype=np.float32)
-        track_kalman_positions = np.array([t.predicted_position for t in tracks], dtype=np.float32)
-
-        # Check embeddings and compute scaled embedding matrix
-        # Fixed: Don't require tracks to already have embeddings - they need to start somewhere!
-        do_embeddings = (
-            self.do_embeddings and
-            all(hasattr(det, "embedding") and det.embedding is not None for det in detections)
-            # Removed: and all(len(t.embedding_history) > 0 for t in tracks) - this prevented new tracks from getting embeddings!
-        )
-
-        scaled_embedding_matrix = np.zeros((n_dets, n_tracks), dtype=np.float32)
-        if do_embeddings:
-            if start: start("embedding_computation")
-            
-            # Use cached frame embeddings if available and valid
-            # Create hash of detection IDs to validate cache consistency
-            det_ids_hash = hash(tuple(det.id for det in detections)) if hasattr(detections[0], 'id') else hash(tuple(id(det) for det in detections))
-            
-            if (self._frame_det_embeddings_valid == self._frame_count and 
-                self._cached_det_embeddings is not None and
-                self._cached_det_embeddings.shape[0] == n_dets and
-                hasattr(self, '_cached_det_ids_hash') and self._cached_det_ids_hash == det_ids_hash):
-                det_embeddings = self._cached_det_embeddings
-            else:
-                # Compute and cache detection embeddings for this frame
-                det_embeddings = np.empty((n_dets, detections[0].embedding.shape[0]), dtype=np.float32)
-                for i, det in enumerate(detections):
-                    det_embeddings[i] = det.embedding
-                self._cached_det_embeddings = det_embeddings
-                self._cached_det_ids_hash = det_ids_hash
-                self._frame_det_embeddings_valid = self._frame_count
-
-            # Use cached track embeddings if available
-            if (self._frame_track_embeddings_valid == self._frame_count and 
-                self._cached_track_embeddings is not None and
-                self._cached_track_embeddings.shape[0] == n_tracks):
-                track_embeddings = self._cached_track_embeddings
-            else:
-                # Compute and cache track embeddings
-                track_embeddings = np.empty((n_tracks, det_embeddings.shape[1]), dtype=np.float32)
-                for i, track in enumerate(tracks):
-                    if (track._representative_cache_valid and
-                        track._cached_representative_embedding is not None):
-                        track_embeddings[i] = track._cached_representative_embedding
-                    elif len(track.embedding_history) > 0:
-                        track_embeddings[i] = track.embedding_history[-1]
-                    else:
-                        track_embeddings[i] = np.zeros(det_embeddings.shape[1], dtype=np.float32)
-                self._cached_track_embeddings = track_embeddings
-                self._frame_track_embeddings_valid = self._frame_count
-
-            # Optimize embedding computation based on sparse pairs
-            if use_sparse and len(sparse_pairs) < n_dets * n_tracks * 0.5:
-                # Sparse mode: only compute embeddings for candidate pairs
-                scaled_embedding_matrix = np.zeros((n_dets, n_tracks), dtype=np.float32)
-                
-                # Batch compute sparse pairs for efficiency
-                if len(sparse_pairs) > 0:
-                    sparse_i, sparse_j = zip(*sparse_pairs)
-                    sparse_i = np.array(sparse_i)
-                    sparse_j = np.array(sparse_j)
-                    
-                    # Vectorized sparse computation
-                    det_sparse_embs = det_embeddings[sparse_i]
-                    track_sparse_embs = track_embeddings[sparse_j]
-                    cos_sims = np.sum(det_sparse_embs * track_sparse_embs, axis=1)
-                    raw_distances = (1.0 - cos_sims) * 0.5
-                    
-                    # Scale distances using existing API
-                    scaled_distances = self.embedding_scaler.scale_distances(raw_distances)
-                    self.embedding_scaler.update_statistics(raw_distances)
-                    
-                    # Assign to sparse positions
-                    scaled_embedding_matrix[sparse_i, sparse_j] = scaled_distances
-            else:
-                # Full matrix mode: check cache first
-                if (self._embedding_distances_valid == self._frame_count and 
-                    self._cached_embedding_distances is not None and
-                    self._cached_embedding_distances.shape == (n_dets, n_tracks)):
-                    # Reuse cached distances
-                    scaled_embedding_matrix = self._cached_embedding_distances
-                else:
-                    # Compute full embedding distances
-                    cos_similarities = det_embeddings @ track_embeddings.T
-                    raw_distances = (1.0 - cos_similarities) * 0.5  # Optimized: avoid division
-                    raw_distances_flat = raw_distances.flatten()
-                    scaled_distances_flat = self.embedding_scaler.scale_distances(raw_distances_flat)
-                    self.embedding_scaler.update_statistics(raw_distances_flat)
-                    scaled_embedding_matrix = scaled_distances_flat.reshape(n_dets, n_tracks)
-                    
-                    # Cache the result
-                    self._cached_embedding_distances = scaled_embedding_matrix
-                    self._embedding_distances_valid = self._frame_count
-
-            if stop: stop("embedding_computation")
-
-        # Compute track uncertainties and scale them
-        if self.uncertainty_weight > 0.0:
-            track_uncertainties = self._compute_track_uncertainties_batch(tracks)
-            # Scale by uncertainty_weight and max_distance
-            uncertainty_penalties = track_uncertainties * self.uncertainty_weight * self.max_distance
-        else:
-            uncertainty_penalties = np.zeros(n_tracks, dtype=np.float32)
-
-        # Compute cost matrix with uncertainty
-        if start: start("cost_matrix")
-        
-        # For large-scale scenarios with sparse pairs, compute only necessary elements
-        if use_sparse and len(sparse_pairs) < n_dets * n_tracks * 0.5:
-            # Initialize with infinity
-            cost_matrix = np.full((n_dets, n_tracks), np.inf, dtype=np.float32)
-            
-            # Compute costs only for candidate pairs
-            for i, j in sparse_pairs:
-                # Spatial cost
-                dx = det_positions[i, 0] - track_kalman_positions[j, 0]
-                dy = det_positions[i, 1] - track_kalman_positions[j, 1]
-                spatial_cost = np.sqrt(dx * dx + dy * dy)
-                
-                if spatial_cost <= self.max_distance:
-                    # Add embedding cost if enabled
-                    embedding_cost = 0.0
-                    if do_embeddings:
-                        embedding_cost = scaled_embedding_matrix[i, j] * self.embedding_weight * self.max_distance
-                    
-                    # Add uncertainty penalty
-                    total_cost = spatial_cost + embedding_cost + uncertainty_penalties[j]
-                    cost_matrix[i, j] = total_cost
-        else:
-            # FIXED: Use the same minimum distance logic as spatial pre-filtering
-            # Compute cost matrix with minimum distance between last detection and Kalman positions
-            cost_matrix = np.full((n_dets, n_tracks), np.inf, dtype=np.float32)
-            
-            for i in range(n_dets):
-                for j in range(n_tracks):
-                    # Compute distance to both last detection and Kalman positions
-                    dx_last = det_positions[i, 0] - track_last_positions[j, 0]
-                    dy_last = det_positions[i, 1] - track_last_positions[j, 1]
-                    dist_to_last = np.sqrt(dx_last*dx_last + dy_last*dy_last)
-                    
-                    dx_kalman = det_positions[i, 0] - track_kalman_positions[j, 0]
-                    dy_kalman = det_positions[i, 1] - track_kalman_positions[j, 1]
-                    dist_to_kalman = np.sqrt(dx_kalman*dx_kalman + dy_kalman*dy_kalman)
-                    
-                    # Use minimum distance (same logic as spatial pre-filtering)
-                    spatial_cost = min(dist_to_last, dist_to_kalman)
-                    
-                    # Add uncertainty penalty to spatial cost
-                    total_cost = spatial_cost + uncertainty_penalties[j]
-                    
-                    # Only proceed if within max distance (after uncertainty adjustment)
-                    if total_cost <= self.max_distance:
-                        # Add embedding cost if enabled
-                        if do_embeddings:
-                            embedding_cost = scaled_embedding_matrix[i, j] * self.embedding_weight * self.max_distance
-                            total_cost += embedding_cost
-                        
-                        cost_matrix[i, j] = total_cost
-        if stop: stop("cost_matrix")
+        cost_matrix = self._compute_cost_matrix(detections, tracks, start, stop)
 
         # OPTIMIZED HYBRID ASSIGNMENT LOGIC
         if start: start("hybrid_assignment")
 
         # Phase 1: NUMBA-accelerated greedy assignment for confident matches
-        # Use numba-compiled greedy with greedy threshold
         greedy_matches_array, remaining_dets_array, remaining_tracks_array = numba_greedy_assignment(
             cost_matrix, self.greedy_threshold
         )
@@ -2723,17 +2330,13 @@ class SwarmSortTracker:
         remaining_tracks = [int(x) for x in remaining_tracks_array]
 
         hungarian_matches = []
-        # OPTIMIZATION: Skip Hungarian for large-scale scenarios
-        if len(remaining_dets) > 100 or len(remaining_tracks) > 100:
-            # For large numbers, Hungarian O(n³) is too slow - skip it
-            pass
-        elif remaining_dets and remaining_tracks:
+        if remaining_dets and remaining_tracks:
             # Create reduced cost matrix
             reduced_cost_matrix = np.full((len(remaining_dets), len(remaining_tracks)),
                                         np.inf, dtype=np.float32)
 
             fallback_threshold = self.max_distance * self.hungarian_fallback_threshold
-
+            
             for i, det_idx in enumerate(remaining_dets):
                 for j, track_idx in enumerate(remaining_tracks):
                     original_cost = cost_matrix[det_idx, track_idx]
@@ -2776,132 +2379,20 @@ class SwarmSortTracker:
         return all_matches, unmatched_dets, unmatched_tracks
 
     def _greedy_assignment(self, detections, timer=None, start=None, stop=None):
-        """
-        OPTIMIZED Pure greedy assignment with full logic but faster implementation.
-        """
+        """OPTIMIZED Pure greedy assignment."""
         n_dets = len(detections)
         n_tracks = len(self._tracks)
 
         if n_tracks == 0:
             return [], list(range(n_dets)), []
-
+        
         tracks = list(self._tracks.values())
 
-        # Same setup as hybrid but with pure greedy logic
-        det_positions = np.array([det.position.flatten()[:2] for det in detections], dtype=np.float32)
-        track_last_positions = np.array([t.last_detection_pos for t in tracks], dtype=np.float32)
-        track_kalman_positions = np.array([t.predicted_position for t in tracks], dtype=np.float32)
-
-        # Fast embedding computation (same as hybrid)
-        # Fixed: Don't require tracks to already have embeddings - they need to start somewhere!
-        do_embeddings = (
-            self.do_embeddings and
-            all(hasattr(det, "embedding") and det.embedding is not None for det in detections)
-            # Removed: and all(len(t.embedding_history) > 0 for t in tracks) - this prevented new tracks from getting embeddings!
-        )
-
-        scaled_embedding_matrix = np.zeros((n_dets, n_tracks), dtype=np.float32)
-        if do_embeddings:
-            if start: start("embedding_computation")
-            
-            # Reuse cached embeddings from previous computation if available and valid
-            # Create hash of detection IDs to validate cache consistency
-            det_ids_hash = hash(tuple(det.id for det in detections)) if hasattr(detections[0], 'id') else hash(tuple(id(det) for det in detections))
-            
-            if (self._frame_det_embeddings_valid == self._frame_count and 
-                self._cached_det_embeddings is not None and
-                self._cached_det_embeddings.shape[0] == n_dets and
-                hasattr(self, '_cached_det_ids_hash') and self._cached_det_ids_hash == det_ids_hash):
-                det_embeddings = self._cached_det_embeddings
-            else:
-                det_embeddings = np.empty((n_dets, detections[0].embedding.shape[0]), dtype=np.float32)
-                for i, det in enumerate(detections):
-                    det_embeddings[i] = det.embedding
-                self._cached_det_embeddings = det_embeddings
-                self._cached_det_ids_hash = det_ids_hash
-                self._frame_det_embeddings_valid = self._frame_count
-
-            if (self._frame_track_embeddings_valid == self._frame_count and 
-                self._cached_track_embeddings is not None and
-                self._cached_track_embeddings.shape[0] == n_tracks):
-                track_embeddings = self._cached_track_embeddings
-            else:
-                track_embeddings = np.empty((n_tracks, det_embeddings.shape[1]), dtype=np.float32)
-                for i, track in enumerate(tracks):
-                    if (track._representative_cache_valid and
-                        track._cached_representative_embedding is not None):
-                        track_embeddings[i] = track._cached_representative_embedding
-                    elif len(track.embedding_history) > 0:
-                        track_embeddings[i] = track.embedding_history[-1]
-                    else:
-                        track_embeddings[i] = np.zeros(det_embeddings.shape[1], dtype=np.float32)
-                self._cached_track_embeddings = track_embeddings
-                self._frame_track_embeddings_valid = self._frame_count
-
-            # Reuse cached embedding distances if available
-            if (self._embedding_distances_valid == self._frame_count and 
-                self._cached_embedding_distances is not None and
-                self._cached_embedding_distances.shape == (n_dets, n_tracks)):
-                # Reuse cached distances
-                scaled_embedding_matrix = self._cached_embedding_distances
-            else:
-                cos_similarities = det_embeddings @ track_embeddings.T
-                raw_distances = (1.0 - cos_similarities) * 0.5  # Optimized: avoid division
-                raw_distances_flat = raw_distances.flatten()
-                scaled_distances_flat = self.embedding_scaler.scale_distances(raw_distances_flat)
-                self.embedding_scaler.update_statistics(raw_distances_flat)
-                scaled_embedding_matrix = scaled_distances_flat.reshape(n_dets, n_tracks)
-                
-                # Cache the result if not already cached
-                if self._embedding_distances_valid != self._frame_count:
-                    self._cached_embedding_distances = scaled_embedding_matrix
-                    self._embedding_distances_valid = self._frame_count
-                    
-            if stop: stop("embedding_computation")
-
-        # Compute track uncertainties and scale them
-        if self.uncertainty_weight > 0.0:
-            track_uncertainties = self._compute_track_uncertainties_batch(tracks)
-            # Scale by uncertainty_weight and max_distance
-            uncertainty_penalties = track_uncertainties * self.uncertainty_weight * self.max_distance
-        else:
-            uncertainty_penalties = np.zeros(n_tracks, dtype=np.float32)
-
-        # FIXED: Compute cost matrix with minimum distance logic (same as spatial pre-filtering)
-        if start: start("cost_matrix")
-        cost_matrix = np.full((n_dets, n_tracks), np.inf, dtype=np.float32)
-        
-        for i in range(n_dets):
-            for j in range(n_tracks):
-                # Compute distance to both last detection and Kalman positions
-                dx_last = det_positions[i, 0] - track_last_positions[j, 0]
-                dy_last = det_positions[i, 1] - track_last_positions[j, 1]
-                dist_to_last = np.sqrt(dx_last*dx_last + dy_last*dy_last)
-                
-                dx_kalman = det_positions[i, 0] - track_kalman_positions[j, 0]
-                dy_kalman = det_positions[i, 1] - track_kalman_positions[j, 1]
-                dist_to_kalman = np.sqrt(dx_kalman*dx_kalman + dy_kalman*dy_kalman)
-                
-                # Use minimum distance (same logic as spatial pre-filtering)
-                spatial_cost = min(dist_to_last, dist_to_kalman)
-                
-                # Add uncertainty penalty to spatial cost
-                total_cost = spatial_cost + uncertainty_penalties[j]
-                
-                # Only proceed if within max distance (after uncertainty adjustment)
-                if total_cost <= self.max_distance:
-                    # Add embedding cost if enabled
-                    if do_embeddings:
-                        embedding_cost = scaled_embedding_matrix[i, j] * self.embedding_weight * self.max_distance
-                        total_cost += embedding_cost
-                    
-                    cost_matrix[i, j] = total_cost
-        if stop: stop("cost_matrix")
+        cost_matrix = self._compute_cost_matrix(detections, tracks, start, stop)
 
         # NUMBA-ACCELERATED greedy assignment - as fast as Hungarian!
         if start: start("greedy_assignment")
 
-        # Use numba-compiled greedy assignment
         matches_array, unmatched_dets_array, unmatched_tracks_array = numba_greedy_assignment(
             cost_matrix, self.max_distance
         )
