@@ -352,6 +352,9 @@ class SwarmSortConfig(BaseConfig):
     # ASSIGNMENT ALGORITHM SETTINGS
     # ============================================================================
 
+    sparse_computation_threshold: int = 300
+    """Use the many ovject optimized sparse computation"""
+
     use_probabilistic_costs: bool = False
     """Use probabilistic fusion for cost computation.
 

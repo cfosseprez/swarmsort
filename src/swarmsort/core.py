@@ -1594,6 +1594,9 @@ class SwarmSortTracker:
         self.greedy_confidence_boost = getattr(self.config, "greedy_confidence_boost", 0.8)
         self.hungarian_fallback_threshold = getattr(self.config, "hungarian_fallback_threshold", 1.5)
         
+        # Sparse computation parameters for large-scale scenarios
+        self.sparse_computation_threshold = getattr(self.config, "sparse_computation_threshold", 300)
+
         # Kalman type
         self.kalman_type = getattr(self.config, "kalman_type", "simple")
         
@@ -1738,18 +1741,21 @@ class SwarmSortTracker:
         stop("embedding_freeze_update")
 
         start("assignment")
-        # OLD: This was calling a single assignment function, ignoring the config.
-        # matches, unmatched_dets, unmatched_tracks = self._unified_assignment(valid_detections)
-
-        # NEW: Select assignment strategy based on config.
-        # This makes the tracker's behavior configurable as intended.
-        if self.assignment_strategy == "greedy":
-            assignment_fn = self._greedy_assignment
-        elif self.assignment_strategy == "hybrid":
-            assignment_fn = self._hybrid_assignment
-        else:  # Default to "hungarian"
-            assignment_fn = self._fast_assignment
-
+        # CORRECTED LOGIC: First, decide on the cost model (probabilistic or standard).
+        # Then, apply the chosen assignment strategy.
+        if self.use_probabilistic_costs:
+            # The probabilistic model has its own integrated assignment logic.
+            # It's a specialized path.
+            assignment_fn = self._fast_assignment_probabilistic
+        else:
+            # For the standard cost model, select the assignment strategy.
+            if self.assignment_strategy == "greedy":
+                assignment_fn = self._greedy_assignment
+            elif self.assignment_strategy == "hybrid":
+                assignment_fn = self._hybrid_assignment
+            else:  # Default to "hungarian"
+                assignment_fn = self._fast_assignment
+        
         matches, unmatched_dets, unmatched_tracks = assignment_fn(valid_detections, timer=timer, start=start, stop=stop)
         stop("assignment")
 
@@ -2008,7 +2014,7 @@ class SwarmSortTracker:
         (probabilistic or standard) and handles embedding calculations.
         """
         n_dets = len(detections)
-        n_tracks = len(self._tracks)
+        n_tracks = len(tracks)
 
         # Extract positions
         det_positions = np.array(
@@ -2065,30 +2071,17 @@ class SwarmSortTracker:
             uncertainty_penalties = np.zeros(n_tracks, dtype=np.float32)
 
         # Compute final cost matrix using the appropriate Numba function
-        if self.use_probabilistic_costs:
-            track_frames_since = np.array([self._frame_count - t.last_detection_frame for t in tracks], dtype=np.float32)
-            cost_matrix = compute_probabilistic_cost_matrix_vectorized(
-                det_positions,
-                track_kalman_positions,
-                track_last_positions,
-                track_frames_since,
-                scaled_embedding_matrix,
-                0.5,  # embedding_median placeholder
-                do_embeddings,
-                self.max_distance,
-                self.embedding_weight,
-            )
-        else:
-            cost_matrix = compute_cost_matrix_with_min_distance(
-                det_positions,
-                track_last_positions,
-                track_kalman_positions,
-                scaled_embedding_matrix,
-                uncertainty_penalties,
-                do_embeddings,
-                self.max_distance,
-                self.embedding_weight,
-            )
+        # This function is now ONLY for the standard (non-probabilistic) cost model.
+        cost_matrix = compute_cost_matrix_with_min_distance(
+            det_positions,
+            track_last_positions,
+            track_kalman_positions,
+            scaled_embedding_matrix,
+            uncertainty_penalties,
+            do_embeddings,
+            self.max_distance,
+            self.embedding_weight,
+        )
         return cost_matrix
 
     def _fast_assignment(self, detections, timer=None, start=None, stop=None):
