@@ -5,7 +5,7 @@
 [![GPL-3.0 License](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://github.com/cfosseprez/swarmsort/blob/main/LICENSE)
 [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.17051857.svg)](https://doi.org/10.5281/zenodo.17051857)
 
-![logo](https://raw.githubusercontent.com/cfosseprez/swarmsort/main/docs/_static/readme_assets/logo-swarmsort-horizontal.jpg)
+![logo](https://raw.githubusercontent.com/cfosseprez/swarmsort/main/docs/_static/readme_assets/logo.jpg)
 
 
 
