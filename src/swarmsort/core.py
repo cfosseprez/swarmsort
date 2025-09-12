@@ -2064,9 +2064,15 @@ class SwarmSortTracker:
 
         # Compute track uncertainties and scale them
         if self.uncertainty_weight > 0.0:
+            start("uncertainty_computation")
             track_uncertainties = self._compute_track_uncertainties_batch(tracks)
-            # Scale by uncertainty_weight and max_distance
-            uncertainty_penalties = track_uncertainties * self.uncertainty_weight * self.max_distance
+            
+            # Center uncertainty around zero: low uncertainty reduces cost, high uncertainty increases it.
+            # The original uncertainty is in [0, 1]. Centering it makes it [-0.5, 0.5].
+            centered_uncertainties = track_uncertainties - 0.5
+            
+            uncertainty_penalties = centered_uncertainties * self.uncertainty_weight * self.max_distance
+            if stop: stop("uncertainty_computation")
         else:
             uncertainty_penalties = np.zeros(n_tracks, dtype=np.float32)
 
