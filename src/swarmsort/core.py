@@ -108,6 +108,7 @@ class PendingDetection:
     bbox: np.ndarray = field(
         default_factory=lambda: np.zeros(4, dtype=np.float32)
     )  # [x1, y1, x2, y2]
+    class_id: Optional[int] = None
     confidence: float = 1.0
     first_seen_frame: int = 0
     last_seen_frame: int = 0
@@ -1071,6 +1072,7 @@ class FastTrackState:
     """Enhanced track state with N-embedding history and kalman_type support"""
 
     id: int
+    class_id: Optional[int] = None
 
     position: np.ndarray = field(default_factory=lambda: np.zeros(2, dtype=np.float32))
     velocity: np.ndarray = field(default_factory=lambda: np.zeros(2, dtype=np.float32))
@@ -1188,25 +1190,12 @@ class FastTrackState:
                 if self.last_safe_embedding is None:
                     self.last_safe_embedding = normalized_emb.copy()
 
-                # Method-specific cache invalidation logic
-                should_invalidate = True
-                if self.embedding_method == "best_match":
-                    # For best_match, only invalidate if similarity check shows significant change
-                    if (len(self.embedding_history) > 0
-                            and self._cached_representative_embedding is not None):
-                        similarity = np.dot(normalized_emb, self._cached_representative_embedding)
-                        should_invalidate = similarity < 0.85  # Only invalidate for significant change
-                elif self.embedding_method in ["weighted_average", "average"]:
-                    # For weighted_average/average, always invalidate since recent embeddings matter most
-                    should_invalidate = True
-
                 self.embedding_history.append(normalized_emb.copy())
                 self.embedding_update_count += 1
 
-                # Smart cache invalidation based on method
-                if should_invalidate:
-                    self._cache_valid = False
-                    self._representative_cache_valid = False
+                # Always invalidate cache on new embedding
+                self._cache_valid = False
+                self._representative_cache_valid = False
 
                 # Update avg_embedding for backward compatibility
                 self._update_avg_embedding()
@@ -1583,6 +1572,7 @@ class SwarmSortTracker:
         self.max_track_age = self.config.max_track_age
         self.detection_conf_threshold = self.config.detection_conf_threshold
         self.do_embeddings = self.config.do_embeddings
+        self.use_class_id_matching = getattr(self.config, "use_class_id_matching", False)
 
         # Embedding history configuration
         self.max_embeddings_per_track = self.config.max_embeddings_per_track

@@ -365,7 +365,7 @@ class SwarmSortConfig(BaseConfig):
     Most users should keep this False.
     """
 
-    assignment_strategy: Literal["hungarian", "greedy", "hybrid"] = "hybrid"
+    assignment_strategy: Literal["hungarian", "greedy", "hybrid"] = "hungarian"
     """Algorithm for matching detections to tracks.
 
     - "hungarian": Globally optimal assignment (best accuracy, O(n³) complexity)
@@ -458,7 +458,7 @@ class SwarmSortConfig(BaseConfig):
     Use higher values to reduce false positive tracks.
     """
 
-    min_consecutive_detections: int = 3
+    min_consecutive_detections: int = 6
     """Number of consecutive detections required to confirm a track.
 
     New tracks start as "tentative" and become "confirmed" after being
@@ -471,7 +471,7 @@ class SwarmSortConfig(BaseConfig):
     Increase in noisy environments or with unreliable detectors.
     """
 
-    max_detection_gap: int = 2
+    max_detection_gap: int = 1
     """Maximum frame gap allowed during track initialization.
 
     While building confidence for a new track, detections can be missing
@@ -546,7 +546,7 @@ class SwarmSortConfig(BaseConfig):
     Helpful for understanding embedding behavior but slows tracking.
     """
 
-    debug_timings: bool = True
+    debug_timings: bool = False
     """Print detailed timing information for performance analysis.
 
     Shows time spent in each component of the tracking pipeline.
