@@ -128,7 +128,7 @@ class PendingDetection:
 
 @nb.njit(fastmath=True, cache=True)
 def cosine_similarity_normalized(emb1: np.ndarray, emb2: np.ndarray) -> float:
-    """Fast cosine similarity normalized to [0, 1] - ORIGINAL"""
+    """Fast cosine similarity normalized to [0, 1]"""
     norm1 = np.sqrt(np.sum(emb1 * emb1))
     norm2 = np.sqrt(np.sum(emb2 * emb2))
 
@@ -2856,47 +2856,64 @@ class SwarmSortTracker:
             [track.last_detection_pos for _, track in valid_reid_tracks], dtype=np.float32
         )
 
-        # Normalize detection embeddings
-        det_embeddings = np.array(
-            [
-                np.asarray(det.embedding, dtype=np.float32) / np.linalg.norm(det.embedding)
-                for _, det in unmatched_dets_with_emb
-            ],
-            dtype=np.float32,
-        )
+        # Normalize detection embeddings (check if already normalized)
+        det_embeddings = np.empty((n_dets, unmatched_dets_with_emb[0][1].embedding.shape[0]), dtype=np.float32)
+        for i, (_, det) in enumerate(unmatched_dets_with_emb):
+            emb = np.asarray(det.embedding, dtype=np.float32)
+            norm = np.linalg.norm(emb)
+            if norm > 0 and abs(norm - 1.0) > 0.01:
+                det_embeddings[i] = emb / norm
+            else:
+                det_embeddings[i] = emb
 
         end_setup = time.perf_counter() if self.debug_timings else None
 
-        # Use representative embeddings for ReID - but avoid per-track computation
+        # Collect ALL track embeddings for multi-history matching (same as main cost matrix)
         start_repr = time.perf_counter() if self.debug_timings else None
-        track_embeddings = []
-        for _, track in valid_reid_tracks:
-            # For ReID, use cached representative or fallback to most recent
-            if (
-                track._representative_cache_valid
-                and track._cached_representative_embedding is not None
-            ):
-                track_embeddings.append(track._cached_representative_embedding)
-            elif len(track.embedding_history) > 0:
-                # Use most recent embedding instead of computing best match for each track
-                track_embeddings.append(track.embedding_history[-1])
-            else:
-                track_embeddings.append(np.zeros(det_embeddings.shape[1], dtype=np.float32))
+        track_embeddings_list = []
+        track_embedding_counts = []
 
-        track_embeddings = np.array(track_embeddings, dtype=np.float32)
+        for _, track in valid_reid_tracks:
+            if len(track.embedding_history) > 0:
+                # Collect ALL embeddings for this track
+                track_embs = np.array(list(track.embedding_history), dtype=np.float32)
+                track_embeddings_list.append(track_embs)
+                track_embedding_counts.append(len(track.embedding_history))
+            else:
+                # Empty track gets a single zero embedding
+                track_embeddings_list.append(np.zeros((1, det_embeddings.shape[1]), dtype=np.float32))
+                track_embedding_counts.append(0)
+
+        # Flatten all track embeddings for efficient Numba processing
+        if track_embeddings_list:
+            track_embeddings_flat = np.vstack(track_embeddings_list)
+        else:
+            track_embeddings_flat = np.zeros((0, det_embeddings.shape[1]), dtype=np.float32)
+        track_counts = np.array(track_embedding_counts, dtype=np.int32)
         end_repr = time.perf_counter() if self.debug_timings else None
 
-        # Use vectorized distance computation (bypass numba for small matrices)
+        # Convert method string to int for Numba
+        method_map = {
+            "last": 0,
+            "average": 1,
+            "weighted_average": 2,
+            "best_match": 3
+        }
+        # For ReID, use best_match by default (finds most similar historical appearance)
+        # but can use same method as main tracking
+        reid_method = method_map.get(
+            getattr(self.config, 'reid_embedding_method', 'best_match'),
+            3  # default to best_match for ReID
+        )
+
+        # Use the proper multi-history distance computation
         start_distances = time.perf_counter() if self.debug_timings else None
-        if (
-            n_dets * n_tracks < 50
-        ):  # For small matrices, use pure NumPy (faster than numba overhead)
-            cos_similarities = det_embeddings @ track_embeddings.T
-            raw_distances_matrix = (1.0 - cos_similarities) / 2.0
-        else:
-            raw_distances_matrix = compute_embedding_distances_optimized(
-                det_embeddings, track_embeddings
-            )
+        raw_distances_matrix = compute_embedding_distances_with_method(
+            det_embeddings,
+            track_embeddings_flat,
+            track_counts,
+            reid_method
+        )
         end_distances = time.perf_counter() if self.debug_timings else None
 
         start_scaling = time.perf_counter() if self.debug_timings else None
