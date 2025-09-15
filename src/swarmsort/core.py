@@ -173,6 +173,103 @@ def compute_embedding_distances_optimized(det_embeddings, track_embeddings):
 
 
 @nb.njit(fastmath=True, cache=True)
+def compute_embedding_distances_with_method(
+    det_embeddings: np.ndarray,
+    track_embeddings_flat: np.ndarray,
+    track_counts: np.ndarray,
+    method: int  # 0=last, 1=average, 2=weighted_average, 3=best_match
+) -> np.ndarray:
+    """
+    Compute embedding distances using specified method.
+
+    Args:
+        det_embeddings: (n_dets, emb_dim)
+        track_embeddings_flat: Flattened array of all track embeddings
+        track_counts: Number of embeddings per track
+        method: 0=last, 1=average, 2=weighted_average, 3=best_match
+    """
+    n_dets = det_embeddings.shape[0]
+    n_tracks = len(track_counts)
+    emb_dim = det_embeddings.shape[1]
+
+    distances = np.empty((n_dets, n_tracks), dtype=np.float32)
+
+    track_start = 0
+    for t in range(n_tracks):
+        count = track_counts[t]
+        if count == 0:
+            # No embeddings - max distance
+            for d in range(n_dets):
+                distances[d, t] = 1.0
+            continue
+
+        track_end = track_start + count
+        track_embs = track_embeddings_flat[track_start:track_end]
+
+        for d in range(n_dets):
+            det_emb = det_embeddings[d]
+
+            if method == 0:  # last
+                # Use only the most recent embedding
+                track_emb = track_embs[-1]
+                dot_product = 0.0
+                for k in range(emb_dim):
+                    dot_product += det_emb[k] * track_emb[k]
+                distances[d, t] = (1.0 - dot_product) / 2.0
+
+            elif method == 1:  # average
+                # Simple average of all embeddings
+                avg_emb = np.zeros(emb_dim, dtype=np.float32)
+                for i in range(count):
+                    for k in range(emb_dim):
+                        avg_emb[k] += track_embs[i, k]
+                for k in range(emb_dim):
+                    avg_emb[k] /= count
+
+                dot_product = 0.0
+                for k in range(emb_dim):
+                    dot_product += det_emb[k] * avg_emb[k]
+                distances[d, t] = (1.0 - dot_product) / 2.0
+
+            elif method == 2:  # weighted_average
+                # Exponentially weighted average (recent = higher weight)
+                weighted_emb = np.zeros(emb_dim, dtype=np.float32)
+                weight_sum = 0.0
+
+                for i in range(count):
+                    # Exponential weight: older = less weight
+                    weight = np.exp(-2.0 * (count - i - 1) / max(count, 1))
+                    weight_sum += weight
+                    for k in range(emb_dim):
+                        weighted_emb[k] += weight * track_embs[i, k]
+
+                for k in range(emb_dim):
+                    weighted_emb[k] /= weight_sum
+
+                dot_product = 0.0
+                for k in range(emb_dim):
+                    dot_product += det_emb[k] * weighted_emb[k]
+                distances[d, t] = (1.0 - dot_product) / 2.0
+
+            else:  # method == 3, best_match
+                # Find the historical embedding with minimum distance
+                min_dist = 2.0  # Max possible cosine distance
+                for i in range(count):
+                    track_emb = track_embs[i]
+                    dot_product = 0.0
+                    for k in range(emb_dim):
+                        dot_product += det_emb[k] * track_emb[k]
+                    dist = (1.0 - dot_product) / 2.0
+                    if dist < min_dist:
+                        min_dist = dist
+                distances[d, t] = min_dist
+
+        track_start = track_end
+
+    return distances
+
+
+@nb.njit(fastmath=True, cache=True)
 def fast_gaussian_fusion(
         mu_k: np.ndarray, cov_k: np.ndarray, mu_d: np.ndarray, cov_d: np.ndarray
 ):
@@ -1599,8 +1696,7 @@ class SwarmSortTracker:
         self.embedding_freeze_density = getattr(self.config, "embedding_freeze_density", 2)
         
         # Embedding freeze optimization - only check every N frames
-        self._freeze_check_interval = 3  # Check every 3 frames for better performance
-        self._freeze_frame_count = 0
+        # Removed freeze throttling - collision detection must run every frame for safety
 
 
         # ReID parameters
@@ -2027,7 +2123,7 @@ class SwarmSortTracker:
             if start:
                 start("embedding_computation")
 
-            # This logic is now unified from the old `_unified_assignment` method
+            # Normalize detection embeddings
             det_embeddings = np.empty((n_dets, detections[0].embedding.shape[0]), dtype=np.float32)
             for i, det in enumerate(detections):
                 emb = np.asarray(det.embedding, dtype=np.float32)
@@ -2037,14 +2133,46 @@ class SwarmSortTracker:
                 else:
                     det_embeddings[i] = emb
 
-            track_embeddings = np.empty((n_tracks, det_embeddings.shape[1]), dtype=np.float32)
-            for i, track in enumerate(tracks):
-                if len(track.embedding_history) > 0:
-                    track_embeddings[i] = track.embedding_history[-1]
-                else:
-                    track_embeddings[i] = np.zeros(det_embeddings.shape[1], dtype=np.float32)
+            # Collect ALL track embeddings for multi-history matching
+            track_embeddings_list = []
+            track_embedding_counts = []
 
-            raw_distances = compute_embedding_distances_optimized(det_embeddings, track_embeddings)
+            for track in tracks:
+                if len(track.embedding_history) > 0:
+                    # Collect ALL embeddings for this track
+                    track_embs = np.array(list(track.embedding_history), dtype=np.float32)
+                    track_embeddings_list.append(track_embs)
+                    track_embedding_counts.append(len(track.embedding_history))
+                else:
+                    # Empty track gets a single zero embedding
+                    track_embeddings_list.append(np.zeros((1, det_embeddings.shape[1]), dtype=np.float32))
+                    track_embedding_counts.append(0)
+
+            # Flatten all track embeddings for efficient Numba processing
+            if track_embeddings_list:
+                track_embeddings_flat = np.vstack(track_embeddings_list)
+            else:
+                track_embeddings_flat = np.zeros((0, det_embeddings.shape[1]), dtype=np.float32)
+            track_counts = np.array(track_embedding_counts, dtype=np.int32)
+
+            # Convert method string to int for Numba
+            method_map = {
+                "last": 0,
+                "average": 1,
+                "weighted_average": 2,
+                "best_match": 3
+            }
+            method_int = method_map.get(self.embedding_matching_method, 2)  # default to weighted_average
+
+            # Compute distances using the specified method
+            raw_distances = compute_embedding_distances_with_method(
+                det_embeddings,
+                track_embeddings_flat,
+                track_counts,
+                method_int
+            )
+
+            # Scale distances as before
             raw_distances_flat = raw_distances.flatten()
             scaled_distances_flat = self.embedding_scaler.scale_distances(raw_distances_flat)
             self.embedding_scaler.update_statistics(raw_distances_flat)
@@ -2146,56 +2274,56 @@ class SwarmSortTracker:
         scaled_embedding_matrix = np.zeros((n_dets, n_tracks), dtype=np.float32)
 
         if do_embeddings:
-            # Same as regular assignment - use cached representatives
-            # Check if embeddings are already normalized to avoid double normalization
-            det_embeddings = []
-            for det in detections:
+            # Normalize detection embeddings (same as in _compute_cost_matrix)
+            det_embeddings = np.empty((n_dets, detections[0].embedding.shape[0]), dtype=np.float32)
+            for i, det in enumerate(detections):
                 emb = np.asarray(det.embedding, dtype=np.float32)
                 norm = np.linalg.norm(emb)
-                # FIXED: Only normalize if not already normalized
-                if norm > 0:
-                    if abs(norm - 1.0) > 0.01:  # Not normalized
-                        emb = emb / (norm + 1e-8)
-                    det_embeddings.append(emb)
+                if norm > 0 and abs(norm - 1.0) > 0.01:
+                    det_embeddings[i] = emb / norm
                 else:
-                    det_embeddings.append(np.zeros_like(emb))  # Handle zero embeddings
-            det_embeddings = np.array(det_embeddings, dtype=np.float32)
+                    det_embeddings[i] = emb
 
-            # Get representative embeddings with caching (reuse array from regular assignment)
-            if (
-                self._reusable_track_embeddings is None
-                or self._reusable_track_embeddings.shape[0] < n_tracks
-                or n_tracks > self._max_tracks_seen
-            ):
-                emb_dim = det_embeddings.shape[1] if det_embeddings.size > 0 else 128  # fallback
-                self._reusable_track_embeddings = np.empty(
-                    (max(n_tracks, self._max_tracks_seen + 10), emb_dim), dtype=np.float32
-                )
-                self._max_tracks_seen = max(n_tracks, self._max_tracks_seen)
+            # Collect ALL track embeddings for multi-history matching (same as _compute_cost_matrix)
+            track_embeddings_list = []
+            track_embedding_counts = []
 
-            for i, track in enumerate(tracks):
-                # Only recompute if cache is invalid
-                if not track._representative_cache_valid:
-                    repr_emb = track.get_representative_embedding_for_assignment(det_embeddings)
-                    if repr_emb is not None:
-                        self._reusable_track_embeddings[i] = repr_emb
-                    else:
-                        self._reusable_track_embeddings[i] = np.zeros(emb_dim, dtype=np.float32)
+            for track in tracks:
+                if len(track.embedding_history) > 0:
+                    # Collect ALL embeddings for this track
+                    track_embs = np.array(list(track.embedding_history), dtype=np.float32)
+                    track_embeddings_list.append(track_embs)
+                    track_embedding_counts.append(len(track.embedding_history))
                 else:
-                    # Use cached embedding directly
-                    cached_emb = track._cached_representative_embedding
-                    if cached_emb is not None:
-                        self._reusable_track_embeddings[i] = cached_emb
-                    else:
-                        self._reusable_track_embeddings[i] = np.zeros(emb_dim, dtype=np.float32)
+                    # Empty track gets a single zero embedding
+                    track_embeddings_list.append(np.zeros((1, det_embeddings.shape[1]), dtype=np.float32))
+                    track_embedding_counts.append(0)
 
-            track_embeddings = self._reusable_track_embeddings[:n_tracks]
+            # Flatten all track embeddings for efficient Numba processing
+            if track_embeddings_list:
+                track_embeddings_flat = np.vstack(track_embeddings_list)
+            else:
+                track_embeddings_flat = np.zeros((0, det_embeddings.shape[1]), dtype=np.float32)
+            track_counts = np.array(track_embedding_counts, dtype=np.int32)
 
-            # Use faster distance computation
-            raw_distances_matrix = compute_embedding_distances_optimized(
-                det_embeddings, track_embeddings
+            # Convert method string to int for Numba
+            method_map = {
+                "last": 0,
+                "average": 1,
+                "weighted_average": 2,
+                "best_match": 3
+            }
+            method_int = method_map.get(self.embedding_matching_method, 2)  # default to weighted_average
+
+            # Compute distances using the specified method
+            raw_distances_matrix = compute_embedding_distances_with_method(
+                det_embeddings,
+                track_embeddings_flat,
+                track_counts,
+                method_int
             )
 
+            # Scale distances as before
             raw_distances_flat = raw_distances_matrix.flatten()
             scaled_distances_flat = self.embedding_scaler.scale_distances(raw_distances_flat)
             self.embedding_scaler.update_statistics(raw_distances_flat)
@@ -2629,12 +2757,10 @@ class SwarmSortTracker:
         """OPTIMIZED vectorized density-based embedding freeze status"""
         if not self.collision_freeze_embeddings or len(self._tracks) < 2:
             return
-        
-        # Only check freeze status every N frames for performance
-        self._freeze_frame_count += 1
-        if self._freeze_frame_count % self._freeze_check_interval != 0:
-            return
-        
+
+        # REMOVED throttling - collision detection must run every frame for safety
+        # This is critical for preventing ID swaps during close encounters
+
         tracks = list(self._tracks.values())
         n_tracks = len(tracks)
         
