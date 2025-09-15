@@ -182,11 +182,19 @@ def compute_embedding_distances_with_method(
     """
     Compute embedding distances using specified method.
 
+    IMPORTANT: This computes distances to ALL historical embeddings first,
+    then combines those distances (NOT averaging embeddings then computing distance).
+    This preserves the geometric relationships in embedding space.
+
     Args:
-        det_embeddings: (n_dets, emb_dim)
+        det_embeddings: (n_dets, emb_dim) normalized detection embeddings
         track_embeddings_flat: Flattened array of all track embeddings
         track_counts: Number of embeddings per track
-        method: 0=last, 1=average, 2=weighted_average, 3=best_match
+        method:
+            0 = last: Use only most recent embedding
+            1 = average: Average of all distances
+            2 = weighted_average: Weighted average of distances (recent = higher weight)
+            3 = best_match: Minimum distance across all embeddings
     """
     n_dets = det_embeddings.shape[0]
     n_tracks = len(track_counts)
@@ -217,39 +225,41 @@ def compute_embedding_distances_with_method(
                     dot_product += det_emb[k] * track_emb[k]
                 distances[d, t] = (1.0 - dot_product) / 2.0
 
-            elif method == 1:  # average
-                # Simple average of all embeddings
-                avg_emb = np.zeros(emb_dim, dtype=np.float32)
+            elif method == 1:  # average of DISTANCES, not embeddings
+                # Compute distance to each embedding, then average the distances
+                avg_dist = 0.0
                 for i in range(count):
+                    track_emb = track_embs[i]
+
+                    dot_product = 0.0
                     for k in range(emb_dim):
-                        avg_emb[k] += track_embs[i, k]
-                for k in range(emb_dim):
-                    avg_emb[k] /= count
+                        dot_product += det_emb[k] * track_emb[k]
 
-                dot_product = 0.0
-                for k in range(emb_dim):
-                    dot_product += det_emb[k] * avg_emb[k]
-                distances[d, t] = (1.0 - dot_product) / 2.0
+                    dist = (1.0 - dot_product) / 2.0
+                    avg_dist += dist
 
-            elif method == 2:  # weighted_average
-                # Exponentially weighted average (recent = higher weight)
-                weighted_emb = np.zeros(emb_dim, dtype=np.float32)
+                distances[d, t] = avg_dist / count
+
+            elif method == 2:  # weighted_average of DISTANCES, not embeddings
+                # Compute weighted average of distances (recent = higher weight)
+                weighted_dist = 0.0
                 weight_sum = 0.0
 
                 for i in range(count):
-                    # Exponential weight: older = less weight
-                    weight = np.exp(-2.0 * (count - i - 1) / max(count, 1))
-                    weight_sum += weight
+                    track_emb = track_embs[i]
+
+                    # Weight increases with i (more recent = higher weight)
+                    weight = np.exp((i - count + 1) * 0.5)  # Exponential decay from oldest
+
+                    dot_product = 0.0
                     for k in range(emb_dim):
-                        weighted_emb[k] += weight * track_embs[i, k]
+                        dot_product += det_emb[k] * track_emb[k]
 
-                for k in range(emb_dim):
-                    weighted_emb[k] /= weight_sum
+                    dist = (1.0 - dot_product) / 2.0
+                    weighted_dist += dist * weight
+                    weight_sum += weight
 
-                dot_product = 0.0
-                for k in range(emb_dim):
-                    dot_product += det_emb[k] * weighted_emb[k]
-                distances[d, t] = (1.0 - dot_product) / 2.0
+                distances[d, t] = weighted_dist / weight_sum
 
             else:  # method == 3, best_match
                 # Find the historical embedding with minimum distance
@@ -1315,53 +1325,6 @@ class FastTrackState:
             else:  # best_match
                 self.avg_embedding = self.embedding_history[-1].copy()
 
-    def get_representative_embedding_for_assignment(
-            self, det_embeddings: Optional[np.ndarray] = None
-    ) -> Optional[np.ndarray]:
-        """Get the best representative embedding for assignment, with caching"""
-        if len(self.embedding_history) == 0:
-            return None
-
-        if not self._representative_cache_valid:
-            if len(self.embedding_history) == 1:
-                self._cached_representative_embedding = self.embedding_history[0].copy()
-            elif self.embedding_method == "average":
-                self._cached_representative_embedding = np.mean(
-                    list(self.embedding_history), axis=0
-                )
-            elif self.embedding_method == "weighted_average":
-                weights = np.exp(np.linspace(-1, 0, len(self.embedding_history)))
-                weights /= weights.sum()
-                self._cached_representative_embedding = np.average(
-                    list(self.embedding_history), axis=0, weights=weights
-                )
-            else:  # best_match
-                if det_embeddings is not None and len(det_embeddings) > 0:
-                    # Find best match to current detections (same as multi-embedding logic)
-                    best_avg_sim = -1.0
-                    best_emb = None
-                    for track_emb in self.embedding_history:
-                        try:
-                            avg_sim = np.mean(det_embeddings @ track_emb)
-                            if avg_sim > best_avg_sim:
-                                best_avg_sim = avg_sim
-                                best_emb = track_emb
-                        except:
-                            # Fallback if shapes don't match
-                            best_emb = track_emb
-                            break
-                    self._cached_representative_embedding = (
-                        best_emb.copy()
-                        if best_emb is not None
-                        else self.embedding_history[-1].copy()
-                    )
-                else:
-                    # Fallback to most recent
-                    self._cached_representative_embedding = self.embedding_history[-1].copy()
-
-            self._representative_cache_valid = True
-
-        return self._cached_representative_embedding
 
     def get_embedding_stats(self) -> dict:
         """Get statistics about stored embeddings"""
@@ -1703,6 +1666,7 @@ class SwarmSortTracker:
         self.reid_enabled = self.config.reid_enabled
         self.reid_max_distance = self.config.reid_max_distance
         self.reid_embedding_threshold = self.config.reid_embedding_threshold
+        self.reid_min_frames_lost = getattr(self.config, 'reid_min_frames_lost', 2)  # Default to 2 frames
 
         # INITIALIZATION PARAMETERS
         self.min_consecutive_detections = self.config.min_consecutive_detections
@@ -2864,7 +2828,7 @@ class SwarmSortTracker:
         valid_reid_tracks = []
         for track_id, track in self._tracks.items():
             if (
-                track.misses > 0
+                track.misses >= self.reid_min_frames_lost  # Changed from > 0 to >= reid_min_frames_lost
                 and track.confirmed
                 and len(track.embedding_history) > 0
                 and track.misses <= self.max_track_age // 2  # Only try ReID in first half of track lifetime

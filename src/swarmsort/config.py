@@ -440,6 +440,18 @@ class SwarmSortConfig(BaseConfig):
     Lower values = fewer but more accurate re-identifications.
     """
 
+    reid_min_frames_lost: int = 2
+    """Minimum frames a track must be lost before attempting ReID.
+
+    Prevents immediate re-identification that can cause ID swaps.
+    Allows the tracker to wait and see if the object reappears naturally.
+
+    - 0 = Immediate ReID (may cause ID swaps)
+    - 1 = Wait one frame (minimal delay)
+    - 2-3 = Wait a few frames (recommended, prevents most ID swaps)
+    - 5+ = Conservative delay (very safe but may miss quick reappearances)
+    """
+
     # ============================================================================
     # TRACK INITIALIZATION SETTINGS
     # ============================================================================
