@@ -280,6 +280,29 @@ class SwarmSortConfig(BaseConfig):
     - 5+ = Freeze only in very dense crowds
     """
 
+    deduplication_distance: float = 10.0
+    """Minimum distance between detections to be considered separate objects.
+
+    Detections closer than this are merged to prevent duplicate tracks.
+    Should be set based on your object size and detector characteristics.
+
+    - 5-10 pixels = Tight deduplication for small objects
+    - 10-20 pixels = Standard deduplication (default)
+    - 20-50 pixels = Loose deduplication for large objects
+    """
+
+    collision_safety_distance: float = 30.0
+    """Distance at which to consider objects in collision for embedding freezing.
+
+    When objects are closer than this, their embeddings stop updating to prevent
+    appearance confusion during occlusion. This is typically larger than
+    deduplication_distance but smaller than max_distance.
+
+    - 20-30 pixels = Early freeze for safety
+    - 30-50 pixels = Standard collision distance
+    - 50+ pixels = Late freeze, allows more updates
+    """
+
     # ============================================================================
     # APPEARANCE MATCHING (EMBEDDINGS) SETTINGS
     # ============================================================================

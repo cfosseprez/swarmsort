@@ -1241,6 +1241,13 @@ class FastTrackState:
         self.last_detection_pos = self.position.copy()
         self.predicted_position = self.position.copy()
 
+        # Initialize OC-SORT arrays properly if needed
+        if self.kalman_type == "oc":
+            if self.observation_history_array.shape[0] == 0:
+                self.observation_history_array = np.zeros((0, 2), dtype=np.float32)
+            if self.observation_frames_array.shape[0] == 0:
+                self.observation_frames_array = np.zeros(0, dtype=np.int32)
+
     def get_observation_prediction(self, current_frame: int, max_history: int = 5) -> np.ndarray:
         """Get observation-based prediction using recent detection history"""
         if len(self.observation_history) < 2:
@@ -1373,17 +1380,27 @@ class FastTrackState:
         if self.kalman_type == "simple":
             # Check if this is a ReID update (track was lost and now found again)
             is_reid_update = is_reid or (self.misses > 0)
-            
+
             if is_reid_update:
-                # Smooth ReID update to prevent jerky motion from stale velocity
-                # Update position to current detection
+                # CRITICAL FIX: Reset the ENTIRE Kalman state for ReID
+                # The predicted position is stale after being lost
+
+                # Reset position to detection
                 self.kalman_state[0] = new_pos_f32[0]  # x position
-                self.kalman_state[1] = new_pos_f32[1]  # y position  
-                
-                # Smooth velocity reset using exponential decay instead of hard reset
-                velocity_decay = 0.3  # Keep 30% of old velocity to maintain some continuity
-                self.kalman_state[2] *= velocity_decay  # Reduce x velocity smoothly
-                self.kalman_state[3] *= velocity_decay  # Reduce y velocity smoothly
+                self.kalman_state[1] = new_pos_f32[1]  # y position
+
+                # Reset velocity to zero - don't trust old velocity after loss
+                self.kalman_state[2] = 0.0
+                self.kalman_state[3] = 0.0
+
+                # Update position immediately
+                self.position = new_pos_f32.copy()
+                self.velocity = np.zeros(2, dtype=np.float32)
+
+                # IMPORTANT: Reset predicted position to current position
+                # This prevents the jump from stale extrapolation
+                self.predicted_position = new_pos_f32.copy()
+
             else:
                 # Normal Kalman filter update
                 self.kalman_state = simple_kalman_update(self.kalman_state, new_pos_f32)
@@ -1394,30 +1411,37 @@ class FastTrackState:
                     self.kalman_state[2] = 0.7 * new_velocity[0] + 0.3 * self.kalman_state[2]
                     self.kalman_state[3] = 0.7 * new_velocity[1] + 0.3 * self.kalman_state[3]
 
-            self.position = self.kalman_state[:2]
-            self.velocity = self.kalman_state[2:]
-            self.predicted_position = self.kalman_state[:2] + self.kalman_state[2:]
+                self.position = self.kalman_state[:2]
+                self.velocity = self.kalman_state[2:]
+                self.predicted_position = self.kalman_state[:2] + self.kalman_state[2:]
             
         elif self.kalman_type == "oc":
             # OC-SORT style update
-            self.observation_history_array, self.observation_frames_array = oc_sort_update(
-                self.observation_history_array,
-                self.observation_frames_array,
-                new_pos_f32,
-                current_frame,
-                max_history=30
-            )
-            
+            if is_reid:
+                # For ReID, reset observation history to prevent stale velocity
+                self.observation_history_array = np.array([new_pos_f32], dtype=np.float32)
+                self.observation_frames_array = np.array([current_frame], dtype=np.int32)
+                self.velocity = np.zeros(2, dtype=np.float32)
+                self.predicted_position = new_pos_f32.copy()
+            else:
+                self.observation_history_array, self.observation_frames_array = oc_sort_update(
+                    self.observation_history_array,
+                    self.observation_frames_array,
+                    new_pos_f32,
+                    current_frame,
+                    max_history=30
+                )
+
             # Update current state
             self.position = new_pos_f32
-            
+
             # Compute velocity from observations
             if len(self.observation_frames_array) >= 2:
                 dt = self.observation_frames_array[-1] - self.observation_frames_array[-2]
                 if dt > 0:
-                    self.velocity[0] = (self.observation_history_array[-1, 0] - 
+                    self.velocity[0] = (self.observation_history_array[-1, 0] -
                                        self.observation_history_array[-2, 0]) / dt
-                    self.velocity[1] = (self.observation_history_array[-1, 1] - 
+                    self.velocity[1] = (self.observation_history_array[-1, 1] -
                                        self.observation_history_array[-2, 1]) / dt
 
         # Add embedding to history
@@ -1435,8 +1459,12 @@ class FastTrackState:
 
         # Note: confirmation is now handled by the tracker to respect config
 
-    def predict_only(self):
-        """Prediction step - behavior depends on kalman_type"""
+    def predict_only(self, current_frame: int = None):
+        """Prediction step - behavior depends on kalman_type
+
+        Args:
+            current_frame: Current frame number (required for OC-SORT)
+        """
         if self.kalman_type == "simple":
             # Simple Kalman prediction step - keeps position at last detection
             self.kalman_state = simple_kalman_predict(self.kalman_state)
@@ -1446,10 +1474,14 @@ class FastTrackState:
         elif self.kalman_type == "oc":
             # OC-SORT style - compute prediction and store it
             if hasattr(self, 'observation_history_array') and len(self.observation_history_array) > 0:
+                # Use provided frame or estimate from observation history
+                frame_to_use = current_frame if current_frame is not None else (
+                    self.observation_frames_array[-1] + 1 if len(self.observation_frames_array) > 0 else 0
+                )
                 pred_state = oc_sort_predict(
                     self.observation_history_array,
                     self.observation_frames_array,
-                    self.frame_count  # Use current frame + 1 for prediction
+                    frame_to_use
                 )
                 self.predicted_position = pred_state[:2].copy()
             else:
@@ -1707,6 +1739,10 @@ class SwarmSortTracker:
         self._cached_det_embeddings = None
         self._frame_track_embeddings_valid = -1
         self._cached_track_embeddings = None
+
+        # For combined deduplication and collision detection
+        self._last_detection_distances = None
+        self._last_detection_positions = None
         
         # Embedding distance matrix cache (most expensive computation)
         self._cached_embedding_distances = None
@@ -1776,6 +1812,78 @@ class SwarmSortTracker:
 
         if not valid_detections:
             return self._handle_empty_frame()
+
+        # OPTIMIZED: Combined deduplication and collision detection prep
+        # Only run if deduplication is enabled and there are multiple detections
+        dedup_distance = getattr(self.config, 'deduplication_distance', 0.0)
+
+        if dedup_distance > 0 and len(valid_detections) > 1:
+            start("dedup_and_collision_prep")
+
+            # Extract positions once using vectorized operations
+            positions = np.array([det.position.flatten()[:2] for det in valid_detections], dtype=np.float32)
+            n_dets = len(valid_detections)
+
+            # Vectorized pairwise distance computation using broadcasting
+            # This is MUCH faster than nested loops
+            pos_expanded_i = positions[:, np.newaxis, :]  # Shape: (n, 1, 2)
+            pos_expanded_j = positions[np.newaxis, :, :]  # Shape: (1, n, 2)
+            dist_matrix = np.linalg.norm(pos_expanded_i - pos_expanded_j, axis=2).astype(np.float32)
+
+            # Fast deduplication using NumPy operations
+            # Find pairs that are too close
+            close_pairs = (dist_matrix < dedup_distance) & (dist_matrix > 0)
+
+            # If there are close pairs, merge them
+            if np.any(close_pairs):
+                # Use connected components to find groups to merge
+                merged_indices = np.arange(n_dets)
+                for i in range(n_dets):
+                    if close_pairs[i].any():
+                        # Find all detections close to this one
+                        close_to_i = np.where(close_pairs[i])[0]
+                        # Merge by updating indices
+                        min_idx = min(i, *close_to_i)
+                        merged_indices[i] = min_idx
+                        for j in close_to_i:
+                            merged_indices[j] = min_idx
+
+                # Group detections by merged index
+                unique_groups = np.unique(merged_indices)
+                merged_detections = []
+
+                for group_id in unique_groups:
+                    group_mask = merged_indices == group_id
+                    group_indices = np.where(group_mask)[0]
+
+                    if len(group_indices) == 1:
+                        # No merge needed
+                        merged_detections.append(valid_detections[group_indices[0]])
+                    else:
+                        # Merge multiple detections
+                        avg_pos = np.mean(positions[group_mask], axis=0)
+
+                        # Find detection with highest confidence in group
+                        best_idx = max(group_indices, key=lambda idx: valid_detections[idx].confidence)
+                        max_conf = valid_detections[best_idx].confidence
+
+                        # Create merged detection, keeping best embedding
+                        merged_det = Detection(
+                            position=avg_pos,
+                            confidence=max_conf,
+                            bbox=valid_detections[best_idx].bbox if hasattr(valid_detections[best_idx], 'bbox') else None,
+                            embedding=valid_detections[best_idx].embedding if hasattr(valid_detections[best_idx], 'embedding') else None,
+                            class_id=valid_detections[best_idx].class_id if hasattr(valid_detections[best_idx], 'class_id') else None
+                        )
+                        merged_detections.append(merged_det)
+
+                valid_detections = merged_detections
+
+            # Store distance info for collision detection
+            self._last_detection_distances = dist_matrix
+            self._last_detection_positions = positions
+
+            stop("dedup_and_collision_prep")
 
         if self.debug_embeddings and self._frame_count % 10 == 0:
             start("debug_embeddings")
@@ -2065,6 +2173,10 @@ class SwarmSortTracker:
         """
         n_dets = len(detections)
         n_tracks = len(tracks)
+
+        # Handle empty cases
+        if n_dets == 0 or n_tracks == 0:
+            return np.full((n_dets, n_tracks), np.inf, dtype=np.float32)
 
         # Extract positions
         det_positions = np.array(
@@ -2808,7 +2920,7 @@ class SwarmSortTracker:
             if track_idx < len(tracks):
                 track = tracks[track_idx]
                 # Predict position using Kalman filter and increment misses
-                track.predict_only()
+                track.predict_only(self._frame_count)
 
     def _attempt_reid(self, detections, unmatched_det_indices):
         """ReID with proper multi-embedding support"""
@@ -3021,7 +3133,7 @@ class SwarmSortTracker:
     def _handle_empty_frame(self):
         """Handle empty frame"""
         for track in self._tracks.values():
-            track.predict_only()
+            track.predict_only(self._frame_count)
         self._update_pending_detections()
         self._cleanup_tracks()
         return self._get_results()
