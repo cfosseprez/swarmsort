@@ -105,6 +105,11 @@ class PendingDetection:
     bbox: Optional[np.ndarray] = field(default_factory=lambda: np.zeros(4, dtype=np.float32))
     average_position: Optional[np.ndarray] = None
 
+    # New attribute to track consecutive hits without gaps
+    # This is more robust than just incrementing consecutive_frames
+    # as it handles the max_detection_gap logic.
+    consecutive_hits: int = 1
+
     def __post_init__(self):
         if self.average_position is None:
             self.average_position = self.position.copy()

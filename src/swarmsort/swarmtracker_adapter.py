@@ -264,7 +264,7 @@ def create_swarmsort_tracker(runtime_config=None, yaml_config_location=None):
         embedding_type = config_dict.get('embedding_function', 'cupytexture')
         
         # Validate and adjust embedding type for GPU availability
-        if not use_gpu and embedding_type in ['cupytexture', 'mega_cupytexture', 'cupytexture_color']:
+        if not use_gpu and embedding_type in ['cupytexture', 'cupytexture_mega', 'cupytexture_color']:
             logger.warning(f"GPU not available, switching from {embedding_type} to histogram")
             embedding_type = 'histogram'
         elif use_gpu and embedding_type == 'histogram':

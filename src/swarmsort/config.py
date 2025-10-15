@@ -171,7 +171,7 @@ class SwarmSortConfig(BaseConfig):
     # CORE TRACKING PARAMETERS
     # ============================================================================
 
-    max_distance: float = 150.0
+    max_distance: float = 80.0
     """Maximum pixel distance for matching detections to tracks.
 
     This is THE most important parameter. It defines how far an object can move between
@@ -249,7 +249,7 @@ class SwarmSortConfig(BaseConfig):
     Helps prevent ID switches in challenging scenarios.
     """
 
-    local_density_radius: float = max_distance/2  # max_distance/2
+    local_density_radius: float = -1.0  # Default: max_distance / 2
     """Radius in pixels to check for nearby tracks (for density computation).
 
     Used to detect crowded areas where ID switches are more likely.
@@ -257,6 +257,7 @@ class SwarmSortConfig(BaseConfig):
 
     Typically set to max_distance/2 or max_distance/3.
     """
+    # Note: -1.0 means auto-compute from max_distance in __post_init__
 
     collision_freeze_embeddings: bool = True
     """Freeze appearance updates when objects are too close together.
@@ -353,7 +354,7 @@ class SwarmSortConfig(BaseConfig):
     Options depend on your installation:
     - "cupytexture": GPU-accelerated texture features (fast, good quality)
     - "cupytexture_color": Texture + color histogram features
-    - "mega_cupytexture": Advanced features (slower, best quality)
+    - "cupytexture_mega": Advanced features (slower, best quality)
 
     GPU options require CuPy. Falls back to CPU if unavailable.
     """
@@ -401,7 +402,7 @@ class SwarmSortConfig(BaseConfig):
       Best balance of speed and accuracy for most scenarios
     """
 
-    greedy_threshold: float = max_distance/5  # max_distance/4
+    greedy_threshold: float = -1.0  # Default: max_distance / 5
     """Distance threshold for confident matches in hybrid/greedy mode.
 
     Matches closer than this distance are assigned immediately without
@@ -411,6 +412,7 @@ class SwarmSortConfig(BaseConfig):
     - max_distance/4 = Balanced (default)
     - max_distance/2 = Aggressive (may cause errors in crowds)
     """
+    # Note: -1.0 means auto-compute from max_distance in __post_init__
 
     greedy_confidence_boost: float = 1.0
     """Confidence multiplier for greedy matches (not currently used)."""
@@ -440,7 +442,7 @@ class SwarmSortConfig(BaseConfig):
     Disable if objects never reappear or appearance is unreliable.
     """
 
-    reid_max_distance: float = 225.0  # max_distance*1.5
+    reid_max_distance: float = -1.0  # Default: max_distance * 1.5
     """Maximum distance for re-identification matching.
 
     Lost tracks can be matched to detections up to this distance away.
@@ -450,6 +452,7 @@ class SwarmSortConfig(BaseConfig):
     - max_distance * 1.5 = Balanced (default)
     - max_distance * 2.0 = Aggressive (may cause false re-identifications)
     """
+    # Note: -1.0 means auto-compute from max_distance in __post_init__
 
     reid_embedding_threshold: float = 0.5
     """Maximum embedding distance for ReID (0.0 to 1.0, lower = stricter).
@@ -517,7 +520,7 @@ class SwarmSortConfig(BaseConfig):
     - 3-5 = Allow longer gaps (for difficult detection scenarios)
     """
 
-    pending_detection_distance: float = max_distance  # Same as max_distance
+    pending_detection_distance: float = -1.0  # Default: max_distance
     """Maximum distance to associate detections during initialization.
 
     Before a track is confirmed, detections must be within this distance
@@ -525,6 +528,7 @@ class SwarmSortConfig(BaseConfig):
 
     Usually same as max_distance, but can be smaller for stricter initialization.
     """
+    # Note: -1.0 means auto-compute from max_distance in __post_init__
 
     # ============================================================================
     # EMBEDDING SCALING SETTINGS (ADVANCED)
@@ -588,6 +592,22 @@ class SwarmSortConfig(BaseConfig):
     Use to identify performance bottlenecks.
     """
 
+    def __post_init__(self):
+        """
+        Automatically compute dependent parameters if they are not set.
+        This ensures that if `max_distance` is changed, related parameters
+        are updated accordingly.
+        """
+        if self.local_density_radius == -1.0:
+            self.local_density_radius = self.max_distance / 2
+        if self.greedy_threshold == -1.0:
+            self.greedy_threshold = self.max_distance / 5
+        if self.reid_max_distance == -1.0:
+            self.reid_max_distance = self.max_distance * 1.5
+        if self.pending_detection_distance == -1.0:
+            self.pending_detection_distance = self.max_distance
+
+
     def validate(self) -> None:
         """Validate configuration parameters.
 
@@ -621,7 +641,7 @@ class SwarmSortConfig(BaseConfig):
 
 def load_config(config_path: Optional[str] = None) -> SwarmSortConfig:
     """
-    Load SwarmSort configuration.
+    Load SwarmSort configuration from a yaml file.
 
     Args:
         config_path: Path to YAML configuration file. If None, uses defaults.

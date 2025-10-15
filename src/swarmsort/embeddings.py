@@ -3,7 +3,7 @@
 # ----------------------------------------------------------------------------------------------------------------------
 """
 GPU-accelerated embedding extractors for SwarmSort standalone package.
-Provides cupytexture and mega_cupytexture embeddings with automatic CPU fallback.
+Provides cupytexture and cupytexture_mega embeddings with automatic CPU fallback.
 """
 
 import numpy as np
@@ -1548,7 +1548,7 @@ def compute_embedding_distances_batch(emb: np.ndarray, embs: List[np.ndarray]) -
 AVAILABLE_EMBEDDINGS = {
     "cupytexture": CupyTextureEmbedding,
     "cupytexture_color": CupyTextureColorEmbedding,
-    "mega_cupytexture": MegaCupyTextureEmbedding,
+    "cupytexture_mega": MegaCupyTextureEmbedding,
 }
 
 
