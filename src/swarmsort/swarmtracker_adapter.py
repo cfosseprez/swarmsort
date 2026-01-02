@@ -296,8 +296,8 @@ def create_swarmsort_tracker(runtime_config=None, yaml_config_location=None):
             max_detection_gap=int(config_dict.get('max_detection_gap', 2)),
             pending_detection_distance=float(config_dict.get('pending_detection_distance', 80.0)),
             use_probabilistic_costs=bool(config_dict.get('use_probabilistic_costs', False)),
-            # Add embedding function configuration
-            embedding_function=config_dict.get('embedding_function', 'cupytexture'),
+            # Don't set embedding_function here - SwarmTracker provides embeddings via detection pipeline
+            # embedding_function=config_dict.get('embedding_function', 'cupytexture'),
         )
         
         logger.debug(f"Created SwarmSortConfig: {swarmsort_config}")

@@ -521,8 +521,59 @@ def extract_mega_features_batch_jit(patches: np.ndarray, features_out: np.ndarra
 
 
 @nb.njit(fastmath=True)
+def cosine_distance_jit(emb1: np.ndarray, emb2: np.ndarray) -> float:
+    """
+    JIT-optimized cosine distance computation.
+
+    Cosine distance = 1 - cosine_similarity
+    Returns value in [0, 1] where 0 = identical, 1 = opposite.
+
+    This is the standard distance metric for L2-normalized embeddings.
+    """
+    emb1_f64 = emb1.astype(np.float64)
+    emb2_f64 = emb2.astype(np.float64)
+
+    # Dot product
+    dot = 0.0
+    norm1_sq = 0.0
+    norm2_sq = 0.0
+
+    for i in range(len(emb1_f64)):
+        dot += emb1_f64[i] * emb2_f64[i]
+        norm1_sq += emb1_f64[i] * emb1_f64[i]
+        norm2_sq += emb2_f64[i] * emb2_f64[i]
+
+    norm1 = np.sqrt(norm1_sq)
+    norm2 = np.sqrt(norm2_sq)
+
+    if norm1 < 1e-8 or norm2 < 1e-8:
+        # If either vector is zero, check if both are zero
+        if norm1 < 1e-8 and norm2 < 1e-8:
+            return 0.0  # Both zero vectors considered identical
+        return 1.0  # One zero, one non-zero = maximally different
+
+    cosine_sim = dot / (norm1 * norm2)
+    # Clamp to [-1, 1] to handle numerical errors
+    cosine_sim = max(-1.0, min(1.0, cosine_sim))
+
+    # Convert to distance in [0, 1]
+    # cosine_sim = 1 -> distance = 0 (identical)
+    # cosine_sim = -1 -> distance = 1 (opposite)
+    distance = (1.0 - cosine_sim) / 2.0
+    return distance
+
+
+@nb.njit(fastmath=True)
 def correlation_distance_jit(emb1: np.ndarray, emb2: np.ndarray) -> float:
-    """JIT-optimized correlation distance computation."""
+    """
+    JIT-optimized correlation (Pearson) distance computation.
+
+    Correlation distance = (1 - Pearson_correlation) / 2
+    Returns value in [0, 1] where 0 = identical pattern, 1 = opposite pattern.
+
+    More robust to offset differences than cosine, but may discard
+    useful mean information from well-normalized embeddings.
+    """
     emb1_f64 = emb1.astype(np.float64)
     emb2_f64 = emb2.astype(np.float64)
 
@@ -545,6 +596,10 @@ def correlation_distance_jit(emb1: np.ndarray, emb2: np.ndarray) -> float:
     correlation = numerator / np.sqrt(var1 * var2)
     distance = (1.0 - correlation) / 2.0
     return max(0.0, min(1.0, distance))
+
+
+# Default distance metric
+DEFAULT_DISTANCE_METRIC = "cosine"
 
 
 class CupyTextureEmbedding(EmbeddingExtractor):
@@ -1510,8 +1565,24 @@ class MegaCupyTextureEmbedding(EmbeddingExtractor):
         return self._dim
 
 
-def compute_embedding_distance(emb1: np.ndarray, emb2: np.ndarray) -> float:
-    """Compute correlation-based distance between embeddings."""
+def compute_embedding_distance(
+    emb1: np.ndarray,
+    emb2: np.ndarray,
+    metric: str = "cosine"
+) -> float:
+    """
+    Compute distance between two embeddings.
+
+    Args:
+        emb1: First embedding vector
+        emb2: Second embedding vector
+        metric: Distance metric to use
+            - "cosine" (default): Cosine distance, standard for L2-normalized embeddings
+            - "correlation": Pearson correlation distance, robust to offsets
+
+    Returns:
+        Distance in [0, 1] where 0 = identical, 1 = maximally different
+    """
     if emb1 is None or emb2 is None:
         return float("inf")
     if emb1.shape != emb2.shape:
@@ -1521,27 +1592,439 @@ def compute_embedding_distance(emb1: np.ndarray, emb2: np.ndarray) -> float:
         return float("inf")
 
     try:
-        return correlation_distance_jit(emb1, emb2)
+        if metric == "cosine":
+            return cosine_distance_jit(emb1, emb2)
+        elif metric == "correlation":
+            return correlation_distance_jit(emb1, emb2)
+        else:
+            logger.warning(f"Unknown metric '{metric}', using cosine")
+            return cosine_distance_jit(emb1, emb2)
     except Exception as e:
         logger.error(f"Error in embedding distance computation: {e}")
         return float("inf")
 
 
-def compute_embedding_distances_batch(emb: np.ndarray, embs: List[np.ndarray]) -> np.ndarray:
-    """Compute distances from one embedding to multiple embeddings."""
+def compute_embedding_distances_batch(
+    emb: np.ndarray,
+    embs: List[np.ndarray],
+    metric: str = "cosine"
+) -> np.ndarray:
+    """
+    Compute distances from one embedding to multiple embeddings.
+
+    Args:
+        emb: Query embedding vector
+        embs: List of embedding vectors to compare against
+        metric: Distance metric ("cosine" or "correlation")
+
+    Returns:
+        Array of distances
+    """
     if emb is None or not embs:
         return np.array([])
 
     distances = np.full(len(embs), float("inf"))
 
+    # Select distance function
+    if metric == "cosine":
+        dist_fn = cosine_distance_jit
+    elif metric == "correlation":
+        dist_fn = correlation_distance_jit
+    else:
+        logger.warning(f"Unknown metric '{metric}', using cosine")
+        dist_fn = cosine_distance_jit
+
     for i, emb2 in enumerate(embs):
         if emb2 is not None and emb.shape == emb2.shape and emb.size > 0:
             try:
-                distances[i] = correlation_distance_jit(emb, emb2)
+                distances[i] = dist_fn(emb, emb2)
             except Exception as e:
                 logger.error(f"Error in batch distance computation for item {i}: {e}")
 
     return distances
+
+
+class CupyShapeEmbedding(EmbeddingExtractor):
+    """
+    Shape-focused embedding optimized for microscopy organism tracking.
+
+    Key design principles (from embedding_recommendation.md):
+    - NO RESIZE: Processes original patch resolution to preserve fine details
+    - SHAPE-FOCUSED: Prioritizes contour/boundary features over texture
+    - ROTATION-INVARIANT: Handles organisms at any angle
+
+    Feature composition (96 dimensions):
+    - HOG features (36 dims): Histogram of Oriented Gradients for local shape
+    - Fourier descriptors (16 dims): Contour shape in frequency domain
+    - Radial signature (32 dims): Distance from centroid to boundary
+    - Hu moments (7 dims): Classic rotation/scale invariant moments
+    - Shape stats (5 dims): Area, perimeter, circularity, aspect ratio, solidity
+
+    This embedding is specifically designed for grayscale microscopy images
+    where organisms have similar internal textures but distinct boundary shapes.
+    """
+
+    def __init__(self, use_gpu: bool = True, hog_cells: int = 3, hog_bins: int = 9):
+        super().__init__(use_tensor=False)
+        self._dim = 96  # 36 HOG + 16 Fourier + 32 radial + 7 Hu + 5 shape stats
+        self.use_gpu = use_gpu and CUPY_AVAILABLE
+        self.hog_cells = hog_cells  # Grid of cells for HOG
+        self.hog_bins = hog_bins    # Orientation bins
+
+        if self.use_gpu:
+            logger.info(f"CupyShapeEmbedding initialized with GPU. Dim={self._dim}")
+        else:
+            logger.info(f"CupyShapeEmbedding initialized (CPU). Dim={self._dim}")
+
+    def _prepare_patch(self, frame: np.ndarray, bbox: np.ndarray) -> Optional[np.ndarray]:
+        """Extract patch WITHOUT resizing to preserve fine morphological details."""
+        x1, y1, x2, y2 = map(int, bbox[:4])
+        h_frame, w_frame = frame.shape[:2]
+        x1, y1 = max(0, x1), max(0, y1)
+        x2, y2 = min(w_frame, x2), min(h_frame, y2)
+
+        if x1 >= x2 or y1 >= y2:
+            return None
+
+        roi = frame[y1:y2, x1:x2]
+        if roi.size == 0:
+            return None
+
+        # NO RESIZE - return original patch
+        return roi
+
+    def _compute_hog_features(self, gray: np.ndarray) -> np.ndarray:
+        """
+        Compute HOG (Histogram of Oriented Gradients) features.
+
+        Adaptive cell size based on patch dimensions.
+        Returns 36 features (hog_cells x hog_cells x hog_bins normalized).
+        """
+        H, W = gray.shape
+        n_cells = self.hog_cells
+        n_bins = self.hog_bins
+
+        # Compute gradients
+        grad_x = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3)
+        grad_y = cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=3)
+
+        # Magnitude and orientation
+        magnitude = np.sqrt(grad_x**2 + grad_y**2)
+        orientation = np.arctan2(grad_y, grad_x)  # -pi to pi
+        orientation = (orientation + np.pi) * (n_bins / (2 * np.pi))  # 0 to n_bins
+        orientation = orientation.astype(np.int32) % n_bins
+
+        # Adaptive cell size
+        cell_h = max(1, H // n_cells)
+        cell_w = max(1, W // n_cells)
+
+        hog_features = np.zeros((n_cells, n_cells, n_bins), dtype=np.float32)
+
+        for cy in range(n_cells):
+            for cx in range(n_cells):
+                y_start = cy * cell_h
+                y_end = min((cy + 1) * cell_h, H)
+                x_start = cx * cell_w
+                x_end = min((cx + 1) * cell_w, W)
+
+                cell_mag = magnitude[y_start:y_end, x_start:x_end]
+                cell_ori = orientation[y_start:y_end, x_start:x_end]
+
+                # Build histogram weighted by magnitude
+                for b in range(n_bins):
+                    mask = cell_ori == b
+                    hog_features[cy, cx, b] = np.sum(cell_mag[mask])
+
+        # L2 normalize per block (2x2 cells)
+        hog_normalized = np.zeros_like(hog_features)
+        for by in range(n_cells - 1):
+            for bx in range(n_cells - 1):
+                block = hog_features[by:by+2, bx:bx+2, :].flatten()
+                norm = np.linalg.norm(block) + 1e-6
+                block_normalized = block / norm
+                # Distribute back (simplified - just use the normalization factor)
+                hog_normalized[by:by+2, bx:bx+2, :] /= (norm / (4 * n_bins) + 1e-6)
+
+        # Flatten to 36 features (or pad/truncate)
+        flat = hog_features.flatten()
+        result = np.zeros(36, dtype=np.float32)
+        n_copy = min(len(flat), 36)
+        result[:n_copy] = flat[:n_copy]
+
+        # Normalize final vector
+        norm = np.linalg.norm(result) + 1e-6
+        return result / norm
+
+    def _extract_contour(self, gray: np.ndarray) -> Optional[np.ndarray]:
+        """Extract the largest contour from grayscale image."""
+        # Adaptive thresholding for better contour extraction
+        if gray.max() - gray.min() < 10:
+            return None
+
+        # Normalize to 0-255
+        gray_norm = ((gray - gray.min()) / (gray.max() - gray.min() + 1e-6) * 255).astype(np.uint8)
+
+        # Try Otsu thresholding
+        _, binary = cv2.threshold(gray_norm, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+
+        # Find contours
+        contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+
+        if not contours:
+            # Try inverted
+            _, binary_inv = cv2.threshold(gray_norm, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+            contours, _ = cv2.findContours(binary_inv, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+
+        if not contours:
+            return None
+
+        # Return largest contour
+        largest = max(contours, key=cv2.contourArea)
+        return largest.squeeze()
+
+    def _compute_fourier_descriptors(self, contour: np.ndarray, n_descriptors: int = 16) -> np.ndarray:
+        """
+        Compute Fourier descriptors of contour for rotation/scale invariant shape.
+
+        Steps:
+        1. Sample N points uniformly along contour
+        2. Represent as complex numbers z[k] = x[k] + i*y[k]
+        3. Compute FFT
+        4. Normalize for scale/rotation invariance
+        5. Return magnitude of harmonics 2 to n_descriptors+1
+        """
+        result = np.zeros(n_descriptors, dtype=np.float32)
+
+        if contour is None or len(contour) < 4:
+            return result
+
+        # Ensure 2D
+        if len(contour.shape) == 1:
+            return result
+        if contour.shape[1] != 2:
+            if len(contour.shape) == 3:
+                contour = contour.reshape(-1, 2)
+            else:
+                return result
+
+        # Sample 64 points uniformly
+        n_sample = 64
+        n_points = len(contour)
+        if n_points < n_sample:
+            # Upsample by repeating
+            indices = np.linspace(0, n_points - 1, n_sample).astype(int)
+        else:
+            indices = np.linspace(0, n_points - 1, n_sample).astype(int)
+
+        sampled = contour[indices].astype(np.float64)
+
+        # Represent as complex numbers
+        z = sampled[:, 0] + 1j * sampled[:, 1]
+
+        # Compute FFT
+        Z = np.fft.fft(z)
+
+        # Normalize by Z[1] for scale invariance (if non-zero)
+        if np.abs(Z[1]) > 1e-6:
+            Z = Z / Z[1]
+
+        # Take magnitude for rotation invariance
+        # Skip DC (Z[0]) and first harmonic (Z[1], now = 1)
+        # Use harmonics 2 to n_descriptors+1
+        for i in range(n_descriptors):
+            idx = i + 2
+            if idx < len(Z):
+                result[i] = np.abs(Z[idx])
+
+        # Normalize
+        norm = np.linalg.norm(result) + 1e-6
+        return (result / norm).astype(np.float32)
+
+    def _compute_radial_signature(self, gray: np.ndarray, contour: np.ndarray, n_angles: int = 32) -> np.ndarray:
+        """
+        Compute radial signature: distance from centroid to contour at N angles.
+
+        This captures global shape variation and is rotation-invariant when
+        normalized by mean distance.
+        """
+        result = np.zeros(n_angles, dtype=np.float32)
+
+        if contour is None or len(contour) < 4:
+            return result
+
+        # Ensure 2D contour
+        if len(contour.shape) != 2 or contour.shape[1] != 2:
+            return result
+
+        # Compute centroid
+        M = cv2.moments(gray)
+        if M['m00'] < 1e-6:
+            cx, cy = gray.shape[1] / 2, gray.shape[0] / 2
+        else:
+            cx = M['m10'] / M['m00']
+            cy = M['m01'] / M['m00']
+
+        # Cast rays at uniform angles
+        angles = np.linspace(0, 2 * np.pi, n_angles, endpoint=False)
+
+        for i, angle in enumerate(angles):
+            # Ray direction
+            dx, dy = np.cos(angle), np.sin(angle)
+
+            # Find intersection with contour (closest point along ray direction)
+            # Use signed distance along ray
+            contour_centered = contour - np.array([cx, cy])
+
+            # Project contour points onto ray
+            projections = contour_centered[:, 0] * dx + contour_centered[:, 1] * dy
+
+            # Only consider points in positive ray direction
+            positive_mask = projections > 0
+            if not np.any(positive_mask):
+                continue
+
+            # Find closest point in ray direction
+            positive_projections = projections[positive_mask]
+            positive_contour = contour_centered[positive_mask]
+
+            # Distance from ray (perpendicular)
+            perp_dist = np.abs(positive_contour[:, 0] * (-dy) + positive_contour[:, 1] * dx)
+
+            # Find point closest to ray
+            closest_idx = np.argmin(perp_dist)
+            result[i] = positive_projections[closest_idx]
+
+        # Normalize by mean distance for scale invariance
+        mean_dist = np.mean(result[result > 0]) if np.any(result > 0) else 1.0
+        result = result / (mean_dist + 1e-6)
+
+        return result
+
+    def _compute_hu_moments(self, gray: np.ndarray) -> np.ndarray:
+        """
+        Compute 7 Hu moments (rotation, scale, translation invariant).
+        Log-transformed for numerical stability.
+        """
+        moments = cv2.moments(gray)
+        hu = cv2.HuMoments(moments).flatten()
+
+        # Log transform with sign preservation
+        hu_log = np.zeros(7, dtype=np.float32)
+        for i in range(7):
+            if hu[i] != 0:
+                hu_log[i] = -np.sign(hu[i]) * np.log10(np.abs(hu[i]) + 1e-10)
+
+        return hu_log
+
+    def _compute_shape_stats(self, gray: np.ndarray, contour: np.ndarray) -> np.ndarray:
+        """
+        Compute basic shape statistics:
+        - Area, Perimeter, Circularity, Aspect ratio, Solidity
+        """
+        result = np.zeros(5, dtype=np.float32)
+
+        if contour is None or len(contour) < 4:
+            return result
+
+        # Ensure proper contour format for OpenCV
+        if len(contour.shape) == 2:
+            contour_cv = contour.reshape(-1, 1, 2).astype(np.int32)
+        else:
+            contour_cv = contour.astype(np.int32)
+
+        area = cv2.contourArea(contour_cv)
+        perimeter = cv2.arcLength(contour_cv, closed=True)
+
+        # Circularity: 4*pi*area / perimeter^2 (1.0 for perfect circle)
+        circularity = (4 * np.pi * area) / (perimeter**2 + 1e-6) if perimeter > 0 else 0
+
+        # Bounding rect aspect ratio
+        x, y, w, h = cv2.boundingRect(contour_cv)
+        aspect_ratio = float(w) / (h + 1e-6)
+
+        # Solidity: area / convex hull area
+        hull = cv2.convexHull(contour_cv)
+        hull_area = cv2.contourArea(hull)
+        solidity = area / (hull_area + 1e-6) if hull_area > 0 else 0
+
+        # Normalize
+        result[0] = np.sqrt(area) / 100.0  # Normalized area
+        result[1] = perimeter / 500.0       # Normalized perimeter
+        result[2] = circularity
+        result[3] = min(aspect_ratio, 1.0 / (aspect_ratio + 1e-6))  # Make symmetric
+        result[4] = solidity
+
+        return result
+
+    def extract(self, frame: np.ndarray, bbox: np.ndarray) -> np.ndarray:
+        """Extract shape-focused embedding for a single patch."""
+        patch = self._prepare_patch(frame, bbox)
+        if patch is None:
+            return np.zeros(self._dim, dtype=np.float32)
+
+        return self._extract_features_single(patch)
+
+    def _extract_features_single(self, patch: np.ndarray) -> np.ndarray:
+        """Extract all shape features from a single patch."""
+        features = np.zeros(self._dim, dtype=np.float32)
+        idx = 0
+
+        # Convert to grayscale
+        if len(patch.shape) == 3:
+            gray = cv2.cvtColor(patch, cv2.COLOR_BGR2GRAY).astype(np.float32)
+        else:
+            gray = patch.astype(np.float32)
+
+        # Extract contour (used by multiple feature types)
+        contour = self._extract_contour(gray)
+
+        # 1. HOG features (36 dims)
+        hog = self._compute_hog_features(gray)
+        features[idx:idx+36] = hog
+        idx += 36
+
+        # 2. Fourier descriptors (16 dims)
+        fourier = self._compute_fourier_descriptors(contour, n_descriptors=16)
+        features[idx:idx+16] = fourier
+        idx += 16
+
+        # 3. Radial signature (32 dims)
+        radial = self._compute_radial_signature(gray, contour, n_angles=32)
+        features[idx:idx+32] = radial
+        idx += 32
+
+        # 4. Hu moments (7 dims)
+        hu = self._compute_hu_moments(gray)
+        features[idx:idx+7] = hu
+        idx += 7
+
+        # 5. Shape stats (5 dims)
+        shape_stats = self._compute_shape_stats(gray, contour)
+        features[idx:idx+5] = shape_stats
+        idx += 5
+
+        # Final L2 normalization
+        norm = np.linalg.norm(features) + 1e-6
+        return features / norm
+
+    def extract_batch(self, frame: np.ndarray, bboxes: np.ndarray) -> List[np.ndarray]:
+        """Extract batch of shape embeddings."""
+        if len(bboxes) == 0:
+            return []
+
+        results = []
+        for bbox in bboxes:
+            patch = self._prepare_patch(frame, bbox)
+            if patch is None:
+                results.append(np.zeros(self._dim, dtype=np.float32))
+            else:
+                results.append(self._extract_features_single(patch))
+
+        return results
+
+    @property
+    def embedding_dim(self) -> int:
+        return self._dim
 
 
 # Available embedding extractors
@@ -1549,6 +2032,7 @@ AVAILABLE_EMBEDDINGS = {
     "cupytexture": CupyTextureEmbedding,
     "cupytexture_color": CupyTextureColorEmbedding,
     "cupytexture_mega": MegaCupyTextureEmbedding,
+    "cupyshape": CupyShapeEmbedding,
 }
 
 
