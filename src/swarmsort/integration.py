@@ -93,6 +93,108 @@ def convert_swarmtracker_detection(swarmtracker_det) -> StandaloneDetection:
     )
 
 
+def convert_any_detection(detection) -> StandaloneDetection:
+    """
+    Universal detection converter that handles various detection formats.
+
+    This function provides a single entry point for converting detections from
+    any format to the SwarmSort StandaloneDetection format. It handles:
+    - SwarmSort Detection objects (passthrough)
+    - SwarmTracker detection objects
+    - Objects with position/bbox and confidence attributes
+    - Dictionaries with 'position'/'bbox' and 'confidence' keys
+
+    Args:
+        detection: Detection in any supported format
+
+    Returns:
+        StandaloneDetection: Converted detection compatible with SwarmSort
+
+    Raises:
+        ValueError: If position cannot be extracted from the detection
+
+    Example:
+        >>> # Works with dict
+        >>> det = convert_any_detection({'position': [100, 200], 'confidence': 0.9})
+        >>> # Works with objects
+        >>> det = convert_any_detection(some_detector_output)
+    """
+    # If already a SwarmSort Detection, return as-is
+    if isinstance(detection, StandaloneDetection):
+        return detection
+
+    # Try swarmtracker conversion if it looks like a swarmtracker detection
+    swarmtracker_cls = get_swarmtracker_detection_class()
+    if swarmtracker_cls is not None and isinstance(detection, swarmtracker_cls):
+        return convert_swarmtracker_detection(detection)
+
+    # Extract position (required)
+    position = None
+    bbox = None
+
+    # Try to get position from various attribute names
+    if hasattr(detection, 'position') and detection.position is not None:
+        position = np.asarray(detection.position, dtype=np.float32)
+    elif hasattr(detection, 'pos') and detection.pos is not None:
+        position = np.asarray(detection.pos, dtype=np.float32)
+    elif hasattr(detection, 'bbox') and detection.bbox is not None:
+        bbox = np.asarray(detection.bbox, dtype=np.float32)
+        # Compute center from bbox [x1, y1, x2, y2]
+        position = np.array([(bbox[0] + bbox[2]) / 2, (bbox[1] + bbox[3]) / 2], dtype=np.float32)
+    elif hasattr(detection, 'xyxy') and detection.xyxy is not None:
+        bbox = np.asarray(detection.xyxy, dtype=np.float32)
+        position = np.array([(bbox[0] + bbox[2]) / 2, (bbox[1] + bbox[3]) / 2], dtype=np.float32)
+    elif isinstance(detection, dict):
+        if 'position' in detection and detection['position'] is not None:
+            position = np.asarray(detection['position'], dtype=np.float32)
+        elif 'pos' in detection and detection['pos'] is not None:
+            position = np.asarray(detection['pos'], dtype=np.float32)
+        elif 'bbox' in detection and detection['bbox'] is not None:
+            bbox = np.asarray(detection['bbox'], dtype=np.float32)
+            position = np.array([(bbox[0] + bbox[2]) / 2, (bbox[1] + bbox[3]) / 2], dtype=np.float32)
+        elif 'xyxy' in detection and detection['xyxy'] is not None:
+            bbox = np.asarray(detection['xyxy'], dtype=np.float32)
+            position = np.array([(bbox[0] + bbox[2]) / 2, (bbox[1] + bbox[3]) / 2], dtype=np.float32)
+
+    if position is None:
+        raise ValueError(f"Cannot extract position from detection of type {type(detection)}")
+
+    # Extract optional fields with fallbacks
+    if isinstance(detection, dict):
+        confidence = detection.get('confidence', detection.get('conf', 1.0))
+        if bbox is None:
+            bbox = detection.get('bbox', detection.get('xyxy'))
+        embedding = detection.get('embedding', detection.get('feature'))
+        class_id = detection.get('class_id', detection.get('cls'))
+        det_id = detection.get('id')
+    else:
+        confidence = getattr(detection, 'confidence', getattr(detection, 'conf', 1.0))
+        if bbox is None:
+            bbox = getattr(detection, 'bbox', getattr(detection, 'xyxy', None))
+        embedding = getattr(detection, 'embedding', getattr(detection, 'feature', None))
+        class_id = getattr(detection, 'class_id', getattr(detection, 'cls', None))
+        det_id = getattr(detection, 'id', None)
+
+    # Ensure proper types
+    if bbox is not None:
+        bbox = np.asarray(bbox, dtype=np.float32)
+    if embedding is not None:
+        embedding = np.asarray(embedding, dtype=np.float32)
+    if confidence is not None:
+        confidence = float(confidence)
+    else:
+        confidence = 1.0
+
+    return StandaloneDetection(
+        position=position,
+        confidence=confidence,
+        bbox=bbox,
+        embedding=embedding,
+        class_id=class_id,
+        id=det_id,
+    )
+
+
 def convert_to_swarmtracker_tracked_object(standalone_obj: StandaloneTrackedObject):
     """
     Convert a standalone TrackedObject to swarmtracker format.
@@ -290,8 +392,25 @@ def load_swarmtracker_config(config_path: str) -> SwarmSortConfig:
         return SwarmSortConfig.from_yaml(config_path)
 
 
-# Convenient aliases for different use cases
-SwarmSort = AdaptiveSwarmSortTracker  # Main entry point
+# =============================================================================
+# PUBLIC ALIASES
+# =============================================================================
+#
+# SwarmSort is the recommended alias for external packages and integration.
+# It wraps AdaptiveSwarmSortTracker which auto-detects:
+#   - Whether running within the swarmtracker pipeline
+#   - Input format (Detection objects, numpy arrays, dict-like objects)
+#   - Output format (adapts to caller's expected format)
+#
+# Usage:
+#   from swarmsort import SwarmSort
+#   tracker = SwarmSort(config)  # Auto-adapts to environment
+#
+# For direct control without adaptation, use SwarmSortTracker:
+#   from swarmsort import SwarmSortTracker
+#   tracker = SwarmSortTracker(config)  # Always uses standalone format
+#
+SwarmSort = AdaptiveSwarmSortTracker
 
 
 # Define StandaloneSwarmSort lazily to avoid import issues

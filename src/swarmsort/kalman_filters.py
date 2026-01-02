@@ -8,9 +8,15 @@ and state estimation.
 Functions:
     simple_kalman_update: Simple Kalman filter update step
     simple_kalman_predict: Simple Kalman filter prediction step
+    simple_kalman_predict_with_damping: Predict with configurable damping
     oc_sort_predict: OC-SORT style prediction using observation history
     oc_sort_update: OC-SORT style update for observation history
     compute_oc_sort_cost_matrix: OC-SORT style cost matrix computation
+
+Constants:
+    DEFAULT_VELOCITY_DAMPING: Default velocity damping factor (0.95)
+    DEFAULT_UPDATE_ALPHA: Default measurement weight in update (0.7)
+    DEFAULT_VELOCITY_WEIGHT: Default velocity consistency weight (0.2)
 """
 
 # ============================================================================
@@ -20,40 +26,76 @@ import numpy as np
 import numba as nb
 from typing import Tuple
 
+# ============================================================================
+# DEFAULT CONSTANTS
+# These values are used when config parameters are not provided.
+# For production use, prefer passing values from SwarmSortConfig.
+# ============================================================================
+DEFAULT_VELOCITY_DAMPING: float = 0.95
+"""Default velocity damping factor applied during prediction."""
+
+DEFAULT_UPDATE_ALPHA: float = 0.7
+"""Default measurement weight in Kalman update (alpha blend factor)."""
+
+DEFAULT_VELOCITY_BETA: float = 0.3
+"""Default velocity correction gain in alpha-beta filter.
+Lower values = smoother velocity, higher = more responsive."""
+
+DEFAULT_VELOCITY_WEIGHT: float = 0.2
+"""Default weight for velocity consistency in OC-SORT cost computation."""
+
 
 # ============================================================================
 # SIMPLE KALMAN FILTER FUNCTIONS
 # ============================================================================
 
-def simple_kalman_update(x_pred: np.ndarray, z: np.ndarray, is_reid: bool = False) -> np.ndarray:
+def simple_kalman_update(
+    x_pred: np.ndarray,
+    z: np.ndarray,
+    is_reid: bool = False,
+    alpha: float = DEFAULT_UPDATE_ALPHA,
+    beta: float = DEFAULT_VELOCITY_BETA
+) -> np.ndarray:
     """
-    Simplified Kalman update with proper type handling.
+    Alpha-beta filter update with velocity correction.
+
+    This implements a proper alpha-beta filter where:
+    - Alpha controls position smoothing (higher = trust measurement more)
+    - Beta controls velocity correction from innovation (higher = more responsive)
 
     Args:
         x_pred: Predicted state [x, y, vx, vy]
         z: Measurement [x, y]
         is_reid: Whether this update is for re-identification (resets velocity)
+        alpha: Position measurement weight (0-1). Default: 0.7
+        beta: Velocity correction gain (0-1). Default: 0.3
 
     Returns:
-        Updated state vector
+        Updated state vector [x, y, vx, vy]
     """
-    alpha = 0.7
     x_updated = np.zeros(4, dtype=np.float32)
 
-    # Ensure we're getting scalars by using .item() or flatten
+    # Ensure we're getting scalars
     z0 = z[0] if z.ndim == 1 else z.flat[0]
     z1 = z[1] if z.ndim == 1 else z.flat[1]
 
-    x_updated[0] = alpha * z0 + (1 - alpha) * x_pred[0]
-    x_updated[1] = alpha * z1 + (1 - alpha) * x_pred[1]
+    # Compute innovation (measurement residual)
+    innovation_x = z0 - x_pred[0]
+    innovation_y = z1 - x_pred[1]
+
+    # Update position: blend prediction with measurement
+    x_updated[0] = x_pred[0] + alpha * innovation_x
+    x_updated[1] = x_pred[1] + alpha * innovation_y
 
     if is_reid:
         # Reset velocity on re-identification
         x_updated[2] = 0.0
         x_updated[3] = 0.0
     else:
-        x_updated[2] = x_pred[2]
-        x_updated[3] = x_pred[3]
+        # Update velocity using innovation (alpha-beta filter)
+        # This corrects velocity based on prediction error
+        x_updated[2] = x_pred[2] + beta * innovation_x
+        x_updated[3] = x_pred[3] + beta * innovation_y
 
     return x_updated
 
@@ -61,7 +103,10 @@ def simple_kalman_update(x_pred: np.ndarray, z: np.ndarray, is_reid: bool = Fals
 @nb.njit(fastmath=True, cache=True)
 def simple_kalman_predict(x: np.ndarray) -> np.ndarray:
     """
-    Simplified Kalman prediction.
+    Simplified Kalman prediction with default damping.
+
+    Uses DEFAULT_VELOCITY_DAMPING (0.95) for velocity decay.
+    For configurable damping, use simple_kalman_predict_with_damping().
 
     Args:
         x: Current state [x, y, vx, vy]
@@ -72,8 +117,29 @@ def simple_kalman_predict(x: np.ndarray) -> np.ndarray:
     x_pred = np.zeros(4, dtype=np.float32)
     x_pred[0] = x[0] + x[2]
     x_pred[1] = x[1] + x[3]
+    # Note: 0.95 is DEFAULT_VELOCITY_DAMPING, hardcoded for Numba compatibility
     x_pred[2] = x[2] * 0.95
     x_pred[3] = x[3] * 0.95
+    return x_pred
+
+
+@nb.njit(fastmath=True, cache=True)
+def simple_kalman_predict_with_damping(x: np.ndarray, damping: float) -> np.ndarray:
+    """
+    Simplified Kalman prediction with configurable damping.
+
+    Args:
+        x: Current state [x, y, vx, vy]
+        damping: Velocity damping factor (0-1). Use config.kalman_velocity_damping.
+
+    Returns:
+        Predicted state vector
+    """
+    x_pred = np.zeros(4, dtype=np.float32)
+    x_pred[0] = x[0] + x[2]
+    x_pred[1] = x[1] + x[3]
+    x_pred[2] = x[2] * damping
+    x_pred[3] = x[3] * damping
     return x_pred
 
 

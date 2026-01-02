@@ -8,29 +8,51 @@ object tracking applications.
 Key Features:
     - Real-time multi-object tracking with motion prediction via Kalman filtering
     - GPU-accelerated embedding extraction using CuPy (optional)
-    - Advanced distance scaling with 11 different normalization methods  
+    - Advanced distance scaling with 11 different normalization methods
     - Hungarian algorithm for optimal detection-to-track assignment
     - Re-identification (ReID) capabilities for recovering lost tracks
     - Probabilistic and non-probabilistic cost computation methods
     - Comprehensive configuration system with sensible defaults
     - Extensive test suite with 200+ tests for reliability
 
+Class Aliases:
+    SwarmSort: Convenience alias for AdaptiveSwarmSortTracker.
+               Use this when you want automatic input/output format detection.
+               Recommended for integration with other packages.
+               Auto-detects: swarmtracker pipeline, input format, output format.
+
+    SwarmSortTracker: Core tracker class for standalone use.
+                      Use this when you control the input format directly.
+                      Always uses Detection objects and TrackedObject outputs.
+
+Usage Guide:
+    # For most users - use SwarmSortTracker directly:
+    from swarmsort import SwarmSortTracker, Detection
+    tracker = SwarmSortTracker(config)
+    detections = [Detection(position=..., confidence=...)]
+    tracked_objects = tracker.update(detections)
+
+    # For integration with other packages (auto-adapts formats):
+    from swarmsort import SwarmSort
+    tracker = SwarmSort(config)
+    # Accepts various input formats, adapts output to caller's expectations
+
 Installation:
     # Clone from repository
     git clone https://github.com/cfosseprez/swarmsort.git
     cd swarmsort
     poetry install
-    
+
     # Development installation with testing tools
     poetry install --with dev
 
 Basic Usage:
     import numpy as np
     from swarmsort import SwarmSortTracker, Detection
-    
+
     # Initialize tracker with default settings
     tracker = SwarmSortTracker()
-    
+
     # Create detections for current frame
     detections = [
         Detection(
@@ -38,14 +60,14 @@ Basic Usage:
             confidence=0.9
         ),
         Detection(
-            position=np.array([300.0, 200.0], dtype=np.float32), 
+            position=np.array([300.0, 200.0], dtype=np.float32),
             confidence=0.8
         )
     ]
-    
+
     # Update tracker and get current tracked objects
     tracked_objects = tracker.update(detections)
-    
+
     # Process results
     for obj in tracked_objects:
         print(f"Track ID: {obj.id}, Position: {obj.position}")
@@ -53,10 +75,10 @@ Basic Usage:
 
 Advanced Configuration:
     from swarmsort import SwarmSortTracker, SwarmSortConfig
-    
+
     # Configure tracker for embedding-based tracking
     config = SwarmSortConfig(
-        use_embeddings=True,
+        do_embeddings=True,
         embedding_weight=0.4,
         reid_enabled=True,
         max_distance=100.0
@@ -65,7 +87,7 @@ Advanced Configuration:
 
 GPU Acceleration:
     from swarmsort import is_gpu_available, SwarmSortTracker
-    
+
     if is_gpu_available():
         print("GPU acceleration available for embeddings")
         # GPU will be used automatically for embedding operations
@@ -78,7 +100,7 @@ GPU Acceleration:
 # Core tracking functionality
 from .core import SwarmSortTracker
 from .data_classes import Detection, TrackedObject
-from .config import SwarmSortConfig
+from .config import SwarmSortConfig, validate_config, load_config
 from .embedding_scaler import EmbeddingDistanceScaler
 
 # Embedding functionality
@@ -166,6 +188,9 @@ __all__ = [
     "TrackedObject",
     "SwarmSortConfig",
     "EmbeddingDistanceScaler",
+    # Configuration utilities
+    "validate_config",
+    "load_config",
     # Embedding classes
     "CupyTextureEmbedding",
     "CupyTextureColorEmbedding",

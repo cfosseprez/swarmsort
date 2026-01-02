@@ -119,6 +119,9 @@ class FastTrackState:
     embedding_history: deque = field(default_factory=lambda: deque(maxlen=5))
     embedding_method: Literal["average", "best_match", "weighted_average", "last"] = "average"
 
+    # Embedding match score history (cosine similarity from recent matches)
+    embedding_score_history: deque = field(default_factory=lambda: deque(maxlen=5))
+
     # Cache for average embedding
     _cached_avg_embedding: Optional[np.ndarray] = None
     _cache_valid: bool = False
@@ -181,10 +184,18 @@ class FastTrackState:
             self,
             max_embeddings: int = 5,
             method: Literal["average", "best_match", "weighted_average", "last"] = "average",
+            score_history_length: int = 5,
     ):
-        """Configure embedding storage parameters."""
+        """Configure embedding storage parameters.
+
+        Args:
+            max_embeddings: Maximum number of embeddings to keep in history
+            method: Method for computing representative embedding
+            score_history_length: Number of recent match scores to keep
+        """
         self.embedding_history = deque(maxlen=max_embeddings)
         self.embedding_method = method
+        self.embedding_score_history = deque(maxlen=score_history_length)
         self._cache_valid = False
 
     def add_embedding(self, embedding: np.ndarray):
@@ -284,6 +295,9 @@ class FastTrackState:
             new_observation = position.reshape(1, 2).astype(np.float32)
             new_frame = np.array([frame], dtype=np.int32)
 
+            # Max history size for OC-SORT arrays (prevents unbounded growth)
+            max_oc_history = 30
+
             if len(self.observation_history_array) == 0:
                 self.observation_history_array = new_observation
                 self.observation_frames_array = new_frame
@@ -294,6 +308,11 @@ class FastTrackState:
                 self.observation_frames_array = np.append(
                     self.observation_frames_array, frame
                 )
+
+                # Trim to max history size (keep most recent)
+                if len(self.observation_history_array) > max_oc_history:
+                    self.observation_history_array = self.observation_history_array[-max_oc_history:]
+                    self.observation_frames_array = self.observation_frames_array[-max_oc_history:]
 
             if len(self.observation_history_array) >= 2:
                 dt = self.observation_frames_array[-1] - self.observation_frames_array[-2]
@@ -314,8 +333,12 @@ class FastTrackState:
         self.misses = 0
         self.lost_frames = 0
 
-    def predict_only(self, current_frame: int = None):
-        """Prediction step - behavior depends on kalman_type."""
+    def predict_position(self, current_frame: int = None):
+        """Update predicted_position using Kalman filter WITHOUT modifying counters.
+
+        This should be called for ALL tracks BEFORE assignment to ensure
+        predicted_position is up-to-date for cost matrix computation.
+        """
         # Import here to avoid circular dependency
         from .kalman_filters import simple_kalman_predict, oc_sort_predict
 
@@ -337,6 +360,16 @@ class FastTrackState:
             else:
                 self.predicted_position = self.position.copy()
 
+    def predict_only(self, current_frame: int = None):
+        """Prediction step for UNMATCHED tracks - updates position AND counters.
+
+        This is called for tracks that were NOT matched to a detection.
+        For matched tracks, use update_with_detection() instead.
+        """
+        # Update predicted position
+        self.predict_position(current_frame)
+
+        # Increment counters for unmatched track
         self.age += 1
         self.misses += 1
         self.lost_frames += 1

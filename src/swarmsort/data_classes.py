@@ -2,18 +2,20 @@
 SwarmSort Data Classes
 
 This module defines the core data structures used throughout SwarmSort for
-representing detections, tracked objects, and internal tracking state.
+representing detections and tracked objects.
 
 Classes:
     Detection: Input detection with position, confidence, and optional features
-    TrackedObject: Output tracked object with full tracking state information  
-    PendingDetection: Internal class for managing unconfirmed detections
+    TrackedObject: Output tracked object with full tracking state information
+
+Note:
+    PendingDetection is defined in track_state.py to keep internal tracking
+    state management consolidated in one place.
 """
 
 import numpy as np
 from dataclasses import dataclass, field
-from typing import Optional, Deque
-from collections import deque
+from typing import Optional
 
 
 @dataclass
@@ -89,62 +91,4 @@ class TrackedObject:
     bbox: Optional[np.ndarray] = None
     class_id: Optional[int] = None
     predicted_position: Optional[np.ndarray] = None  # Predicted position for visualization
-
-
-@dataclass
-class PendingDetection:
-    """Internal class to manage detections that are not yet tracks."""
-
-    position: np.ndarray
-    confidence: float
-    first_seen_frame: int
-    last_seen_frame: int
-    consecutive_frames: int = 1
-    total_detections: int = 1
-    embedding: Optional[np.ndarray] = None
-    bbox: Optional[np.ndarray] = field(default_factory=lambda: np.zeros(4, dtype=np.float32))
-    average_position: Optional[np.ndarray] = None
-
-    # New attribute to track consecutive hits without gaps
-    # This is more robust than just incrementing consecutive_frames
-    # as it handles the max_detection_gap logic.
-    consecutive_hits: int = 1
-
-    def __post_init__(self):
-        if self.average_position is None:
-            self.average_position = self.position.copy()
-
-    def __eq__(self, other):
-        """
-        Custom equality check to handle NumPy arrays for list.remove().
-        """
-        if not isinstance(other, PendingDetection):
-            return NotImplemented
-
-        # Compare non-array attributes first for a quick exit
-        if (
-            self.first_seen_frame != other.first_seen_frame
-            or self.last_seen_frame != other.last_seen_frame
-            or self.consecutive_frames != other.consecutive_frames
-            or self.total_detections != other.total_detections
-            or not np.isclose(self.confidence, other.confidence)
-        ):
-            return False
-
-        # Compare numpy arrays safely
-        if not np.array_equal(self.position, other.position):
-            return False
-
-        # Handle optional bbox
-        if (self.bbox is None) != (other.bbox is None) or (
-            self.bbox is not None and not np.array_equal(self.bbox, other.bbox)
-        ):
-            return False
-
-        # Handle optional embedding
-        if (self.embedding is None) != (other.embedding is None) or (
-            self.embedding is not None and not np.array_equal(self.embedding, other.embedding)
-        ):
-            return False
-
-        return True
+    embedding_score: Optional[float] = None  # Average embedding match score (cosine similarity)

@@ -46,7 +46,8 @@ from .cost_computation import (
     compute_cost_matrix_vectorized,
     compute_probabilistic_cost_matrix_vectorized,
     compute_freeze_flags_vectorized,
-    compute_deduplication_mask
+    compute_deduplication_mask,
+    estimate_track_covariances
 )
 
 from .assignment import (
@@ -162,6 +163,9 @@ class SwarmSortTracker:
         # Cost computation
         self.use_probabilistic_costs = self.config.use_probabilistic_costs
 
+        # Initialization threshold - minimum confidence to create pending detection
+        self.init_conf_threshold = getattr(self.config, 'init_conf_threshold', 0.0)
+
     def _setup_tracker_state(self):
         """Initialize tracker state variables."""
         self._tracks: Dict[int, FastTrackState] = {}
@@ -199,7 +203,7 @@ class SwarmSortTracker:
 
             # Initialize embedding scaler
             self.embedding_scaler = EmbeddingDistanceScaler(
-                method=getattr(self.config, 'embedding_scaler_method', 'standard')
+                method=getattr(self.config, 'embedding_scaling_method', 'min_robustmax')
             )
         else:
             self.embedding_extractor = None
@@ -210,9 +214,10 @@ class SwarmSortTracker:
         if not getattr(self, '_numba_compiled', False):
             try:
                 # Create dummy data for compilation
+                emb_dim = getattr(self.config, 'default_embedding_dimension', 128)
                 dummy_det = np.array([[0.0, 0.0]], dtype=np.float32)
                 dummy_track = np.array([[0.0, 0.0]], dtype=np.float32)
-                dummy_emb = np.zeros((1, 128), dtype=np.float32)
+                dummy_emb = np.zeros((1, emb_dim), dtype=np.float32)
                 dummy_cost = np.array([[0.0]], dtype=np.float32)
 
                 # Trigger compilation
@@ -236,13 +241,24 @@ class SwarmSortTracker:
 
         Returns:
             List of TrackedObject instances representing current tracks
+
+        Raises:
+            TypeError: If detections is not a list
+            ValueError: If any detection has invalid data
         """
+        # Input validation
+        if detections is not None and not isinstance(detections, list):
+            raise TypeError(f"detections must be a list, got {type(detections).__name__}")
+
         self._frame_count += 1
         timer = Timer() if self.debug_timings else None
 
         # Handle empty detections
         if not detections:
             return self._handle_empty_frame()
+
+        # Validate individual detections
+        self._validate_detections(detections)
 
         # Filter low confidence detections
         if timer: timer.start("filter_conf")
@@ -259,6 +275,13 @@ class SwarmSortTracker:
         tracks = list(self._tracks.values())
         if not tracks:
             return self._handle_no_tracks(detections)
+
+        # CRITICAL: Predict ALL track positions BEFORE assignment
+        # This ensures cost matrix uses current-frame predictions
+        if timer: timer.start("prediction")
+        for track in tracks:
+            track.predict_position(self._frame_count)
+        if timer: timer.stop("prediction", self.timings)
 
         # Perform assignment
         if timer: timer.start("assignment")
@@ -279,7 +302,7 @@ class SwarmSortTracker:
         if timer: timer.stop("handle_unmatched", self.timings)
 
         # ReID attempt
-        if self.reid_enabled and unmatched_dets:
+        if self.reid_enabled and len(unmatched_dets) > 0:
             if timer: timer.start("reid")
             self._attempt_reid(detections, unmatched_dets)
             if timer: timer.stop("reid", self.timings)
@@ -303,6 +326,59 @@ class SwarmSortTracker:
             self._log_timings()
 
         return results
+
+    def _validate_detections(self, detections: List[Detection]) -> None:
+        """
+        Validate detection inputs.
+
+        Args:
+            detections: List of Detection objects to validate
+
+        Raises:
+            TypeError: If detection is not a Detection object
+            ValueError: If detection has invalid position or contains non-finite values
+        """
+        for i, det in enumerate(detections):
+            # Duck typing check - allow any object with required attributes
+            # This supports Detection objects from different modules (e.g., swarmtracker)
+            if not hasattr(det, 'position') or not hasattr(det, 'confidence'):
+                raise TypeError(
+                    f"Detection {i} must have 'position' and 'confidence' attributes, got {type(det).__name__}"
+                )
+
+            # Position validation
+            if det.position is None:
+                raise ValueError(f"Detection {i}: position cannot be None")
+
+            if not isinstance(det.position, np.ndarray):
+                # Auto-convert list/tuple to numpy array
+                try:
+                    det.position = np.asarray(det.position, dtype=np.float32)
+                except (TypeError, ValueError):
+                    raise ValueError(
+                        f"Detection {i}: position must be array-like, got {type(det.position).__name__}"
+                    )
+
+            # Auto-convert position to shape (2,) if possible
+            if det.position.shape != (2,):
+                if det.position.size == 2:
+                    # Flatten compatible shapes like (1, 2), (2, 1), (2,)
+                    det.position = det.position.flatten().astype(np.float32)
+                else:
+                    raise ValueError(
+                        f"Detection {i}: position must have 2 elements, got shape {det.position.shape}"
+                    )
+
+            if not np.isfinite(det.position).all():
+                raise ValueError(
+                    f"Detection {i}: position contains non-finite values: {det.position}"
+                )
+
+            # Confidence validation
+            if not 0 <= det.confidence <= 1:
+                raise ValueError(
+                    f"Detection {i}: confidence must be in [0, 1], got {det.confidence}"
+                )
 
     def _filter_detections(self, detections: List[Detection]) -> List[Detection]:
         """Filter out low confidence detections."""
@@ -358,7 +434,8 @@ class SwarmSortTracker:
         """Handle case when there are no active tracks."""
         self._handle_unmatched_detections(list(range(len(detections))), detections)
         self._update_pending_detections()
-        return []
+        # Return any newly promoted tracks (don't always return empty!)
+        return self._get_results()
 
     def _perform_assignment(
         self,
@@ -376,11 +453,13 @@ class SwarmSortTracker:
         elif self.assignment_strategy == "hungarian":
             return hungarian_assignment_wrapper(cost_matrix, self.max_distance)
         elif self.assignment_strategy == "hybrid":
+            # hungarian_fallback_threshold is a multiplier, convert to absolute threshold
+            hungarian_threshold = self.max_distance * self.hungarian_fallback_threshold
             return hybrid_assignment(
                 cost_matrix,
                 self.max_distance,
                 self.greedy_threshold,
-                self.hungarian_fallback_threshold
+                hungarian_threshold
             )
         else:
             # Default to Hungarian
@@ -415,21 +494,40 @@ class SwarmSortTracker:
                 detections, tracks
             )
 
+        # Get configurable parameters with defaults
+        miss_threshold = getattr(self.config, 'prediction_miss_threshold', 3)
+
         # Use appropriate cost function
         if self.use_probabilistic_costs:
-            # Compute covariances (simplified for now)
-            track_covariances = np.tile(np.eye(2, dtype=np.float32) * 10, (n_tracks, 1, 1))
+            # Extract track velocities for covariance estimation
+            track_velocities = np.array([t.velocity for t in tracks], dtype=np.float32)
+
+            # Get covariance estimation parameters
+            base_variance = getattr(self.config, 'base_position_variance', 5.0)
+            velocity_scale = getattr(self.config, 'velocity_variance_scale', 2.0)
+            cov_inflation_rate = getattr(self.config, 'time_covariance_inflation', 0.1)
+
+            # Estimate base covariances from velocity (miss-based inflation applied in cost function)
+            track_covariances = estimate_track_covariances(
+                track_velocities, base_variance, velocity_scale
+            )
+
+            # Get probabilistic-specific config parameters
+            gating_multiplier = getattr(self.config, 'probabilistic_gating_multiplier', 1.5)
+            mahal_normalization = getattr(self.config, 'mahalanobis_normalization', 20.0)
 
             return compute_probabilistic_cost_matrix_vectorized(
                 det_positions, track_positions, track_last_positions,
                 track_misses, track_covariances, scaled_embedding_distances,
-                self.embedding_weight, self.max_distance, do_embeddings
+                self.embedding_weight, self.max_distance, do_embeddings,
+                miss_threshold, gating_multiplier, mahal_normalization, cov_inflation_rate
             )
         else:
             return compute_cost_matrix_vectorized(
                 det_positions, track_positions, track_last_positions,
                 track_misses, scaled_embedding_distances,
-                self.embedding_weight, self.max_distance, do_embeddings
+                self.embedding_weight, self.max_distance, do_embeddings,
+                miss_threshold
             )
 
     def _compute_embedding_distances(
@@ -452,22 +550,35 @@ class SwarmSortTracker:
             det_embeddings.append(emb)
         det_embeddings = np.array(det_embeddings, dtype=np.float32)
 
-        # Prepare track embeddings
-        track_embeddings_flat = []
-        track_counts = []
+        # Detect embedding dimension from detection embeddings or use config default
+        emb_dim = det_embeddings.shape[1] if det_embeddings.size > 0 else getattr(
+            self.config, 'default_embedding_dimension', 128
+        )
 
-        for track in tracks:
+        # Prepare track embeddings using vectorized operations
+        # First pass: count total embeddings and per-track counts
+        track_counts = np.zeros(n_tracks, dtype=np.int32)
+        total_embeddings = 0
+        for i, track in enumerate(tracks):
+            count = len(track.embedding_history)
+            track_counts[i] = count if count > 0 else 0
+            total_embeddings += count if count > 0 else 1  # Reserve space for zero embedding
+
+        # Pre-allocate flat array
+        track_embeddings_flat = np.zeros(total_embeddings * emb_dim, dtype=np.float32)
+
+        # Second pass: fill the array using concatenation
+        offset = 0
+        for i, track in enumerate(tracks):
             if len(track.embedding_history) > 0:
-                for emb in track.embedding_history:
-                    track_embeddings_flat.extend(emb)
-                track_counts.append(len(track.embedding_history))
+                # Stack embeddings for this track and copy to flat array
+                track_embs = np.vstack(list(track.embedding_history))
+                n_embs = track_embs.shape[0]
+                track_embeddings_flat[offset:offset + n_embs * emb_dim] = track_embs.ravel()
+                offset += n_embs * emb_dim
             else:
-                # No embeddings for this track
-                track_embeddings_flat.extend(np.zeros(128, dtype=np.float32))
-                track_counts.append(0)
-
-        track_embeddings_flat = np.array(track_embeddings_flat, dtype=np.float32)
-        track_counts = np.array(track_counts, dtype=np.int32)
+                # Zero embedding for tracks without history
+                offset += emb_dim  # Already zeros from initialization
 
         # Method mapping
         method_map = {
@@ -499,10 +610,26 @@ class SwarmSortTracker:
         tracks: List[FastTrackState]
     ):
         """Update tracks with matched detections."""
+        store_scores = getattr(self.config, 'store_embedding_scores', False)
+
         for det_idx, track_idx in matches:
             if track_idx < len(tracks):
                 track = tracks[track_idx]
                 det = detections[det_idx]
+
+                # Compute and store embedding similarity score if enabled
+                if store_scores and self.do_embeddings:
+                    det_emb = getattr(det, 'embedding', None)
+                    if det_emb is not None and len(track.embedding_history) > 0:
+                        # Compute cosine similarity with track's representative embedding
+                        track_emb = track.get_representative_embedding()
+                        if track_emb is not None:
+                            # Normalize embeddings
+                            det_norm = det_emb / (np.linalg.norm(det_emb) + 1e-8)
+                            track_norm = track_emb / (np.linalg.norm(track_emb) + 1e-8)
+                            # Cosine similarity (1.0 = identical, 0.0 = orthogonal, -1.0 = opposite)
+                            similarity = float(np.dot(det_norm, track_norm))
+                            track.embedding_score_history.append(similarity)
 
                 track.update_with_detection(
                     position=det.position,
@@ -521,33 +648,86 @@ class SwarmSortTracker:
         unmatched_track_indices: List[int],
         tracks: List[FastTrackState]
     ):
-        """Handle tracks that weren't matched to any detection."""
+        """Handle tracks that weren't matched to any detection.
+
+        Note: predict_position() was already called for ALL tracks BEFORE assignment,
+        so we only need to update counters here (no double prediction).
+        """
         for track_idx in unmatched_track_indices:
             if track_idx < len(tracks):
                 track = tracks[track_idx]
-                track.predict_only(self._frame_count)
+                # Position already predicted before assignment - just update counters
+                track.age += 1
+                track.misses += 1
+                track.lost_frames += 1
+
+    def _get_detection_confidence(self, detection: Detection) -> float:
+        """Extract confidence from detection object."""
+        if hasattr(detection, 'confidence'):
+            return float(detection.confidence)
+        return 1.0
 
     def _handle_unmatched_detections(
         self,
         unmatched_det_indices: List[int],
         detections: List[Detection]
     ):
-        """Handle detections that weren't matched to any track."""
+        """Handle detections that weren't matched to any track.
+
+        IMPORTANT: This function now includes safeguards against creating
+        duplicate tracks by:
+        1. Filtering detections by init_conf_threshold
+        2. Skipping detections that are close to EXISTING CONFIRMED tracks
+           (these should have matched but failed - don't create duplicates)
+        """
+        if len(unmatched_det_indices) == 0:
+            return
+
+        # Get existing confirmed track positions for spatial filtering
+        confirmed_tracks = [t for t in self._tracks.values() if t.confirmed]
+
         for det_idx in unmatched_det_indices:
             det = detections[det_idx]
 
+            # Check confidence threshold for track initialization
+            det_conf = self._get_detection_confidence(det)
+            if det_conf < self.init_conf_threshold:
+                continue  # Skip low-confidence detections
+
+            det_pos = det.position.flatten()[:2] if hasattr(det.position, 'flatten') else det.position
+
+            # CRITICAL: Skip detections that are very close to existing confirmed tracks
+            # These should have matched but failed - creating pending would cause duplicates
+            # Use deduplication_distance (not pending_detection_distance) to be more conservative
+            # Only skip if detection is within deduplication_distance of an existing track
+            near_existing_track = False
+            dedup_threshold = self.deduplication_distance
+            for track in confirmed_tracks:
+                # Check distance to both predicted and last position
+                dist_to_pred = np.linalg.norm(det_pos - track.predicted_position)
+                dist_to_last = np.linalg.norm(det_pos - track.last_detection_pos)
+                min_dist = min(dist_to_pred, dist_to_last)
+
+                if min_dist < dedup_threshold:
+                    near_existing_track = True
+                    break
+
+            if near_existing_track:
+                continue  # Skip - this detection is very close to an existing track
+
             # Try to match with pending detections
             matched_pending = False
+            pending_distance = self.config.pending_detection_distance
             for pending_id, pending in list(self._pending_detections.items()):
-                dist = np.linalg.norm(det.position - pending.position)
+                dist = np.linalg.norm(det_pos - pending.position)
 
-                if dist < self.config.pending_detection_distance:
+                if dist < pending_distance:
                     # Update existing pending detection
                     pending.update(
-                        det.position,
+                        det_pos,
                         getattr(det, 'embedding', None),
                         getattr(det, 'bbox', None),
-                        det.confidence
+                        det_conf
                     )
                     pending.last_seen_frame = self._frame_count
                     matched_pending = True
@@ -556,10 +736,10 @@ class SwarmSortTracker:
             if not matched_pending:
                 # Create new pending detection
                 pending = PendingDetection(
-                    position=det.position,
+                    position=det_pos.astype(np.float32) if hasattr(det_pos, 'astype') else np.array(det_pos, dtype=np.float32),
                     embedding=getattr(det, 'embedding', None),
                     bbox=getattr(det, 'bbox', None),
-                    confidence=det.confidence,
+                    confidence=det_conf,
                     first_seen_frame=self._frame_count,
                     last_seen_frame=self._frame_count
                 )
@@ -584,9 +764,11 @@ class SwarmSortTracker:
                 )
 
                 # Set embedding parameters
+                score_history_len = getattr(self.config, 'embedding_score_history_length', 5)
                 track.set_embedding_params(
                     self.max_embeddings_per_track,
-                    self.embedding_matching_method
+                    self.embedding_matching_method,
+                    score_history_len
                 )
 
                 # Add initial embedding if available
@@ -624,8 +806,13 @@ class SwarmSortTracker:
         detections: List[Detection],
         unmatched_det_indices: List[int]
     ):
-        """Attempt to re-identify lost tracks using embeddings."""
-        if not self.do_embeddings or not unmatched_det_indices:
+        """Attempt to re-identify lost tracks using embeddings.
+
+        IMPORTANT: ReID only matches detections that are NOT close to any active track.
+        This prevents "stealing" detections that likely belong to active tracks but
+        temporarily failed to match due to noise or occlusion.
+        """
+        if not self.do_embeddings or len(unmatched_det_indices) == 0:
             return
 
         # Get lost tracks eligible for ReID
@@ -648,6 +835,37 @@ class SwarmSortTracker:
 
         if not unmatched_dets_with_emb:
             return
+
+        # --- CRITICAL: Filter out detections close to ACTIVE tracks ---
+        # Active tracks are those that were recently matched (misses < reid_min_frames_lost)
+        # These tracks might have temporarily failed to match due to noise/occlusion
+        # We should NOT allow ReID to "steal" their detections
+        active_tracks = [
+            track for track in self._tracks.values()
+            if track.misses < self.reid_min_frames_lost
+        ]
+
+        if active_tracks:
+            active_positions = np.array(
+                [t.predicted_position for t in active_tracks], dtype=np.float32
+            )
+
+            # Filter: only keep detections that are far from ALL active tracks
+            safe_dets = []
+            for idx, det in unmatched_dets_with_emb:
+                det_pos = np.array(det.position, dtype=np.float32)
+                # Compute distance to all active tracks
+                distances = np.linalg.norm(active_positions - det_pos, axis=1)
+                min_dist_to_active = np.min(distances)
+
+                # Only allow ReID if detection is beyond max_distance from all active tracks
+                if min_dist_to_active > self.max_distance:
+                    safe_dets.append((idx, det))
+
+            unmatched_dets_with_emb = safe_dets
+
+            if not unmatched_dets_with_emb:
+                return
 
         # Prepare data for cost matrix computation
         lost_tracks = [track for _, track in lost_tracks_with_ids]
@@ -672,7 +890,8 @@ class SwarmSortTracker:
         )
 
         # Use a higher embedding weight for ReID to prioritize appearance
-        reid_embedding_weight = min(self.embedding_weight * 1.5, 0.95)
+        reid_boost = getattr(self.config, 'reid_embedding_weight_boost', 1.5)
+        reid_embedding_weight = min(self.embedding_weight * reid_boost, 0.95)
 
         reid_cost_matrix = compute_cost_matrix_vectorized(
             det_positions, track_positions, track_last_positions,
@@ -720,9 +939,15 @@ class SwarmSortTracker:
     def _get_results(self) -> List[TrackedObject]:
         """Get current tracking results."""
         results = []
+        store_scores = getattr(self.config, 'store_embedding_scores', False)
 
         for track in self._tracks.values():
             if track.confirmed and track.misses == 0:
+                # Compute average embedding score if available
+                embedding_score = None
+                if store_scores and len(track.embedding_score_history) > 0:
+                    embedding_score = float(np.mean(list(track.embedding_score_history)))
+
                 results.append(TrackedObject(
                     id=track.id,
                     position=track.position,
@@ -732,7 +957,9 @@ class SwarmSortTracker:
                     hits=track.hits,
                     time_since_update=track.misses,
                     state=1 if track.confirmed else 0,  # 1: Confirmed, 0: Tentative
-                    bbox=track.bbox
+                    bbox=track.bbox,
+                    predicted_position=track.predicted_position.copy() if track.predicted_position is not None else (track.position + track.velocity),
+                    embedding_score=embedding_score
                 ))
 
         return results

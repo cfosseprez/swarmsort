@@ -28,6 +28,7 @@ from loguru import logger
 # ============================================================================
 from .core import SwarmSortTracker as StandaloneSwarmSortTracker, SwarmSortConfig
 from .data_classes import Detection as StandaloneDetection, TrackedObject
+from .integration import convert_any_detection
 
 
 # ============================================================================
@@ -174,43 +175,51 @@ class RawTrackerSwarmSORT:
         )
 
     def _convert_detections(self, detections) -> List[StandaloneDetection]:
-        """Convert various detection formats to standalone Detection objects"""
+        """Convert various detection formats to standalone Detection objects.
+
+        Uses the unified convert_any_detection function from integration module
+        to handle multiple input formats including:
+        - SwarmSort Detection objects
+        - SwarmTracker Detection objects
+        - Objects with position/bbox attributes
+        - Dictionaries
+        - Arrays in [x1, y1, x2, y2, conf, class_id] format
+        """
         if not detections:
             return []
 
         standalone_detections = []
 
         for det in detections:
-            if hasattr(det, "position") or hasattr(det, "points"):
-                # Already a Detection-like object
-                position = getattr(det, "position", None)
-                if position is None and hasattr(det, "points"):
-                    position = det.points() if callable(det.points) else det.points
+            try:
+                # Handle array format [x1, y1, x2, y2, confidence, class_id]
+                if isinstance(det, (list, tuple, np.ndarray)):
+                    det_array = np.asarray(det)
+                    if len(det_array) >= 4:
+                        bbox = det_array[:4].astype(np.float32)
+                        position = np.array(
+                            [(bbox[0] + bbox[2]) / 2, (bbox[1] + bbox[3]) / 2], dtype=np.float32
+                        )
+                        confidence = float(det_array[4]) if len(det_array) > 4 else 1.0
+                        class_id = int(det_array[5]) if len(det_array) > 5 else None
 
-                bbox = getattr(det, "bbox", None)
-                embedding = getattr(det, "embedding", None)
-                confidence = getattr(det, "confidence", 1.0)
+                        standalone_det = StandaloneDetection(
+                            position=position,
+                            bbox=bbox,
+                            embedding=None,
+                            confidence=confidence,
+                            class_id=class_id
+                        )
+                        standalone_detections.append(standalone_det)
+                    continue
 
-            elif isinstance(det, (list, tuple, np.ndarray)):
-                # Assume [x1, y1, x2, y2, confidence, class_id] format
-                det_array = np.asarray(det)
-                if len(det_array) >= 4:
-                    bbox = det_array[:4].astype(np.float32)
-                    position = np.array(
-                        [(bbox[0] + bbox[2]) / 2, (bbox[1] + bbox[3]) / 2], dtype=np.float32
-                    )
-                    confidence = float(det_array[4]) if len(det_array) > 4 else 1.0
-                    embedding = None
-                else:
-                    continue  # Skip invalid detection
-            else:
-                continue  # Skip unknown format
+                # Use unified converter for object/dict formats
+                standalone_det = convert_any_detection(det)
+                standalone_detections.append(standalone_det)
 
-            # Create standalone detection
-            standalone_det = StandaloneDetection(
-                position=position, bbox=bbox, embedding=embedding, confidence=confidence
-            )
-            standalone_detections.append(standalone_det)
+            except (ValueError, TypeError) as e:
+                logger.debug(f"Skipping detection due to conversion error: {e}")
+                continue
 
         return standalone_detections
 

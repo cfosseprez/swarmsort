@@ -1,0 +1,167 @@
+# SwarmSort Configuration File
+# ============================
+# Configuration for SwarmSort multi-object tracker
+# Adjust these parameters based on your specific tracking scenario
+
+# ============================================================================
+# CORE TRACKING PARAMETERS
+# ============================================================================
+
+# Maximum pixel distance for matching detections to tracks
+# Increase for fast objects/low FPS, decrease for crowded scenes
+max_distance: 80.0
+
+# Minimum confidence score to accept a detection (0.0 to 1.0)
+# 0.0 = accept all, 0.5 = moderate filtering, 0.8 = aggressive filtering
+detection_conf_threshold: 0.0
+
+# Maximum frames a track can exist without detection before deletion
+# At 30 FPS: 30 frames = 1 second of occlusion tolerance
+max_track_age: 30
+
+# ============================================================================
+# MOTION PREDICTION SETTINGS
+# ============================================================================
+
+# Motion prediction algorithm: "simple" or "oc"
+# simple = Kalman filter with constant velocity
+# oc = OC-SORT style (no prediction during occlusion)
+kalman_type: "simple"
+
+# ============================================================================
+# UNCERTAINTY & COLLISION HANDLING
+# ============================================================================
+
+# Weight for uncertainty penalties (0.0 to 1.0)
+# Higher values favor more reliable tracks
+uncertainty_weight: 0.33
+
+# Radius to check for nearby tracks (pixels)
+# Set to -1 for auto-compute (max_distance/2)
+local_density_radius: -1.0
+
+# Freeze appearance updates when objects are too close
+collision_freeze_embeddings: true
+
+# Number of nearby tracks to trigger embedding freeze
+embedding_freeze_density: 1
+
+# Minimum distance between detections to be considered separate objects
+deduplication_distance: 10.0
+
+# Distance at which to consider objects in collision
+collision_safety_distance: 30.0
+
+# ============================================================================
+# APPEARANCE MATCHING (EMBEDDINGS) SETTINGS
+# ============================================================================
+
+# Enable appearance-based matching using visual features
+do_embeddings: true
+
+# Relative importance of appearance vs motion (0.0 to ~2.0)
+# 0.0 = position only, 1.0 = equal weight, 2.0 = appearance 2x more important
+embedding_weight: 1.0
+
+# Maximum number of appearance samples to store per track
+max_embeddings_per_track: 15
+
+# Algorithm for extracting appearance features
+# Options: "cupytexture", "cupytexture_color", "cupytexture_mega"
+embedding_function: "cupytexture"
+
+# How to match current appearance against track history
+# Options: "average", "weighted_average", "best_match"
+embedding_matching_method: "average"
+
+# Store embedding match scores for visualization/debugging
+# When true, TrackedObject.embedding_score contains average cosine similarity
+store_embedding_scores: false
+
+# Number of recent embedding match scores to keep per track
+embedding_score_history_length: 5
+
+# ============================================================================
+# EMBEDDING SCALING SETTINGS (ADVANCED)
+# ============================================================================
+
+# Method for normalizing embedding distances to [0,1] range
+embedding_scaling_method: "min_robustmax"
+
+# Learning rate for updating scaling statistics (0.0 to 1.0)
+embedding_scaling_update_rate: 0.05
+
+# Minimum samples before embedding scaling is activated
+embedding_scaling_min_samples: 200
+
+# ============================================================================
+# ASSIGNMENT ALGORITHM SETTINGS
+# ============================================================================
+
+# Threshold for using sparse computation optimization (number of objects)
+sparse_computation_threshold: 300
+
+# Use probabilistic fusion for cost computation
+use_probabilistic_costs: false
+
+# Algorithm for matching detections to tracks
+# Options: "hungarian", "greedy", "hybrid"
+assignment_strategy: "hungarian"
+
+# Distance threshold for confident matches in hybrid/greedy mode
+# Set to -1 for auto-compute (max_distance/5)
+greedy_threshold: -1.0
+
+# Confidence multiplier for greedy matches
+greedy_confidence_boost: 1.0
+
+# Multiplier for max_distance in Hungarian phase of hybrid assignment
+hungarian_fallback_threshold: 1.0
+
+# ============================================================================
+# RE-IDENTIFICATION (REID) SETTINGS
+# ============================================================================
+
+# Enable re-identification of lost tracks
+reid_enabled: true
+
+# Maximum distance for re-identification matching
+# Set to -1 for auto-compute (max_distance * 1.5)
+reid_max_distance: -1.0
+
+# Maximum embedding distance for ReID (0.0 to 1.0, lower = stricter)
+reid_embedding_threshold: 0.5
+
+# Minimum frames a track must be lost before attempting ReID
+reid_min_frames_lost: 2
+
+# ============================================================================
+# TRACK INITIALIZATION SETTINGS
+# ============================================================================
+
+# Minimum confidence to start tracking an object (0.0 to 1.0)
+init_conf_threshold: 0.0
+
+# Number of consecutive detections required to confirm a track
+min_consecutive_detections: 6
+
+# Maximum frame gap allowed during track initialization
+max_detection_gap: 1
+
+# Maximum distance to associate detections during initialization
+# Set to -1 for auto-compute (same as max_distance)
+pending_detection_distance: -1.0
+
+
+# ============================================================================
+# DEBUG SETTINGS
+# ============================================================================
+
+# Print detailed embedding information for debugging
+debug_embeddings: false
+
+# Generate embedding visualization plots (requires matplotlib)
+plot_embeddings: false
+
+# Print detailed timing information for performance analysis
+debug_timings: true
