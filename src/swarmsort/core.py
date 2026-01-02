@@ -539,16 +539,21 @@ class SwarmSortTracker:
         n_dets = len(detections)
         n_tracks = len(tracks)
 
-        # Prepare detection embeddings
-        det_embeddings = []
-        for det in detections:
-            emb = np.asarray(det.embedding, dtype=np.float32)
-            norm = np.linalg.norm(emb)
-            if norm > 0:
-                if abs(norm - 1.0) > 0.01:
-                    emb = emb / norm
-            det_embeddings.append(emb)
-        det_embeddings = np.array(det_embeddings, dtype=np.float32)
+        # Prepare detection embeddings - VECTORIZED
+        # First collect all embeddings into array
+        det_embeddings = np.array(
+            [np.asarray(det.embedding, dtype=np.float32) for det in detections],
+            dtype=np.float32
+        )
+
+        # Compute all norms at once (vectorized)
+        norms = np.linalg.norm(det_embeddings, axis=1, keepdims=True)
+
+        # Normalize where needed: norm > 0 and not already unit length
+        # Avoid division by zero by using np.where
+        needs_norm = (norms > 1e-8) & (np.abs(norms - 1.0) > 0.01)
+        safe_norms = np.where(norms > 1e-8, norms, 1.0)  # Avoid div by zero
+        det_embeddings = np.where(needs_norm, det_embeddings / safe_norms, det_embeddings)
 
         # Detect embedding dimension from detection embeddings or use config default
         emb_dim = det_embeddings.shape[1] if det_embeddings.size > 0 else getattr(
@@ -556,6 +561,8 @@ class SwarmSortTracker:
         )
 
         # Prepare track embeddings using vectorized operations
+        # OPTIMIZATION: Avoid np.vstack per track - directly copy embeddings
+
         # First pass: count total embeddings and per-track counts
         track_counts = np.zeros(n_tracks, dtype=np.int32)
         total_embeddings = 0
@@ -564,21 +571,22 @@ class SwarmSortTracker:
             track_counts[i] = count if count > 0 else 0
             total_embeddings += count if count > 0 else 1  # Reserve space for zero embedding
 
-        # Pre-allocate flat array
+        # Pre-allocate flat array (zeros handles empty tracks automatically)
         track_embeddings_flat = np.zeros(total_embeddings * emb_dim, dtype=np.float32)
 
-        # Second pass: fill the array using concatenation
+        # Second pass: directly copy each embedding without intermediate vstack
         offset = 0
         for i, track in enumerate(tracks):
-            if len(track.embedding_history) > 0:
-                # Stack embeddings for this track and copy to flat array
-                track_embs = np.vstack(list(track.embedding_history))
-                n_embs = track_embs.shape[0]
-                track_embeddings_flat[offset:offset + n_embs * emb_dim] = track_embs.ravel()
-                offset += n_embs * emb_dim
+            n_track_embs = len(track.embedding_history)
+            if n_track_embs > 0:
+                # Directly iterate and copy each embedding (avoids vstack allocation)
+                for emb in track.embedding_history:
+                    emb_arr = np.asarray(emb, dtype=np.float32).ravel()
+                    track_embeddings_flat[offset:offset + emb_dim] = emb_arr[:emb_dim]
+                    offset += emb_dim
             else:
-                # Zero embedding for tracks without history
-                offset += emb_dim  # Already zeros from initialization
+                # Zero embedding for tracks without history (already zeros)
+                offset += emb_dim
 
         # Method mapping
         method_map = {
@@ -686,6 +694,18 @@ class SwarmSortTracker:
         # Get existing confirmed track positions for spatial filtering
         confirmed_tracks = [t for t in self._tracks.values() if t.confirmed]
 
+        # OPTIMIZATION: Pre-compute confirmed track positions as arrays (once, outside loop)
+        dedup_threshold = self.deduplication_distance
+        has_confirmed_tracks = len(confirmed_tracks) > 0
+
+        if has_confirmed_tracks:
+            confirmed_pred_positions = np.array(
+                [t.predicted_position for t in confirmed_tracks], dtype=np.float32
+            )
+            confirmed_last_positions = np.array(
+                [t.last_detection_pos for t in confirmed_tracks], dtype=np.float32
+            )
+
         for det_idx in unmatched_det_indices:
             det = detections[det_idx]
 
@@ -695,22 +715,21 @@ class SwarmSortTracker:
                 continue  # Skip low-confidence detections
 
             det_pos = det.position.flatten()[:2] if hasattr(det.position, 'flatten') else det.position
+            det_pos_arr = np.asarray(det_pos, dtype=np.float32)
 
             # CRITICAL: Skip detections that are very close to existing confirmed tracks
             # These should have matched but failed - creating pending would cause duplicates
-            # Use deduplication_distance (not pending_detection_distance) to be more conservative
-            # Only skip if detection is within deduplication_distance of an existing track
+            # OPTIMIZATION: Vectorized distance computation to all confirmed tracks at once
             near_existing_track = False
-            dedup_threshold = self.deduplication_distance
-            for track in confirmed_tracks:
-                # Check distance to both predicted and last position
-                dist_to_pred = np.linalg.norm(det_pos - track.predicted_position)
-                dist_to_last = np.linalg.norm(det_pos - track.last_detection_pos)
-                min_dist = min(dist_to_pred, dist_to_last)
+            if has_confirmed_tracks:
+                # Compute distances to all confirmed tracks in one operation
+                dists_to_pred = np.linalg.norm(confirmed_pred_positions - det_pos_arr, axis=1)
+                dists_to_last = np.linalg.norm(confirmed_last_positions - det_pos_arr, axis=1)
+                min_dists = np.minimum(dists_to_pred, dists_to_last)
 
-                if min_dist < dedup_threshold:
+                # Check if any track is within threshold
+                if np.any(min_dists < dedup_threshold):
                     near_existing_track = True
-                    break
 
             if near_existing_track:
                 continue  # Skip - this detection is very close to an existing track
@@ -850,19 +869,28 @@ class SwarmSortTracker:
                 [t.predicted_position for t in active_tracks], dtype=np.float32
             )
 
-            # Filter: only keep detections that are far from ALL active tracks
-            safe_dets = []
-            for idx, det in unmatched_dets_with_emb:
-                det_pos = np.array(det.position, dtype=np.float32)
-                # Compute distance to all active tracks
-                distances = np.linalg.norm(active_positions - det_pos, axis=1)
-                min_dist_to_active = np.min(distances)
+            # OPTIMIZATION: Vectorized filtering - compute all pairwise distances at once
+            # Extract all detection positions as array
+            det_positions = np.array(
+                [det.position for _, det in unmatched_dets_with_emb], dtype=np.float32
+            )
 
-                # Only allow ReID if detection is beyond max_distance from all active tracks
-                if min_dist_to_active > self.max_distance:
-                    safe_dets.append((idx, det))
+            # Compute all pairwise distances: [n_dets, n_active_tracks]
+            # Using broadcasting: det_positions[:, None, :] - active_positions[None, :, :]
+            all_distances = np.linalg.norm(
+                det_positions[:, None, :] - active_positions[None, :, :], axis=2
+            )
 
-            unmatched_dets_with_emb = safe_dets
+            # Find minimum distance to any active track for each detection
+            min_distances = np.min(all_distances, axis=1)
+
+            # Create mask: True for detections far enough from all active tracks
+            safe_mask = min_distances > self.max_distance
+
+            # Apply filter using mask
+            unmatched_dets_with_emb = [
+                item for item, is_safe in zip(unmatched_dets_with_emb, safe_mask) if is_safe
+            ]
 
             if not unmatched_dets_with_emb:
                 return

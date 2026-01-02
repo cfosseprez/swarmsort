@@ -168,7 +168,16 @@ def fast_mahalanobis_distance(diff: np.ndarray, cov_inv: np.ndarray) -> float:
     )
 
 
-@nb.njit(fastmath=True, cache=True)
+@nb.njit(fastmath=True, cache=True, inline='always')
+def _compute_dot_product(vec1: np.ndarray, vec2_flat: np.ndarray, start: int, length: int) -> float:
+    """Compute dot product between vec1 and a slice of vec2_flat. Inlined for performance."""
+    result = 0.0
+    for k in range(length):
+        result += vec1[k] * vec2_flat[start + k]
+    return result
+
+
+@nb.njit(fastmath=True, cache=True, parallel=True)
 def compute_embedding_distances_with_method(
     det_embeddings: np.ndarray,
     track_embeddings_flat: np.ndarray,
@@ -178,21 +187,20 @@ def compute_embedding_distances_with_method(
     """
     Compute embedding distances using various methods for historical embeddings.
 
-    This function computes distances between detection embeddings and track
-    embedding histories using different aggregation methods.
+    OPTIMIZED: Uses parallel processing over detections and inlined dot product.
 
     Args:
-        det_embeddings: Detection embeddings [N_det, emb_dim]
-        track_embeddings_flat: Flattened track embedding histories
+        det_embeddings: Detection embeddings [N_det, emb_dim] (must be L2-normalized)
+        track_embeddings_flat: Flattened track embedding histories (L2-normalized)
         track_counts: Number of embeddings per track
         method: Method for aggregating embedding distances
-            0: Use last embedding only
+            0: Use last embedding only (fastest)
             1: Average all distances
             2: Weighted average (recent embeddings have more weight)
             3: Best match (minimum distance)
 
     Returns:
-        Distance matrix [N_det, N_track]
+        Distance matrix [N_det, N_track] with cosine distances in [0, 1]
     """
     n_dets = det_embeddings.shape[0]
     n_tracks = len(track_counts)
@@ -200,12 +208,13 @@ def compute_embedding_distances_with_method(
 
     distances = np.zeros((n_dets, n_tracks), dtype=np.float32)
 
-    # Compute track offsets for flat array
+    # Compute track offsets for flat array (cumulative sum)
     track_offsets = np.zeros(n_tracks + 1, dtype=np.int32)
     for t in range(n_tracks):
         track_offsets[t + 1] = track_offsets[t] + track_counts[t]
 
-    for i in range(n_dets):
+    # Parallel over detections (independent computations)
+    for i in nb.prange(n_dets):
         det_emb = det_embeddings[i]
 
         for j in range(n_tracks):
@@ -213,51 +222,39 @@ def compute_embedding_distances_with_method(
                 distances[i, j] = 1.0
                 continue
 
-            start_idx = track_offsets[j] * emb_dim
-            end_idx = track_offsets[j + 1] * emb_dim
+            start_offset = track_offsets[j] * emb_dim
+            n_track_embs = track_counts[j]
 
-            if method == 0:  # last
-                # Use only the last embedding
-                last_emb_start = end_idx - emb_dim
-                dot_product = 0.0
-                for k in range(emb_dim):
-                    dot_product += det_emb[k] * track_embeddings_flat[last_emb_start + k]
-                distances[i, j] = (1.0 - dot_product) / 2.0
+            if method == 0:  # last - use only the last embedding
+                last_start = start_offset + (n_track_embs - 1) * emb_dim
+                dot_product = _compute_dot_product(det_emb, track_embeddings_flat, last_start, emb_dim)
+                distances[i, j] = (1.0 - dot_product) * 0.5
 
-            elif method == 1:  # average
-                # Average distance to all embeddings
+            elif method == 1:  # average - mean distance to all embeddings
                 total_dist = 0.0
-                for emb_idx in range(track_offsets[j], track_offsets[j + 1]):
-                    emb_start = emb_idx * emb_dim
-                    dot_product = 0.0
-                    for k in range(emb_dim):
-                        dot_product += det_emb[k] * track_embeddings_flat[emb_start + k]
-                    total_dist += (1.0 - dot_product) / 2.0
-                distances[i, j] = total_dist / track_counts[j]
+                for emb_idx in range(n_track_embs):
+                    emb_start = start_offset + emb_idx * emb_dim
+                    dot_product = _compute_dot_product(det_emb, track_embeddings_flat, emb_start, emb_dim)
+                    total_dist += (1.0 - dot_product) * 0.5
+                distances[i, j] = total_dist / n_track_embs
 
-            elif method == 2:  # weighted_average
-                # Weighted average (recent embeddings have more weight)
+            elif method == 2:  # weighted_average - recent embeddings weighted higher
                 total_dist = 0.0
                 total_weight = 0.0
-                for idx, emb_idx in enumerate(range(track_offsets[j], track_offsets[j + 1])):
-                    weight = float(idx + 1)  # Recent embeddings have higher weight
-                    emb_start = emb_idx * emb_dim
-                    dot_product = 0.0
-                    for k in range(emb_dim):
-                        dot_product += det_emb[k] * track_embeddings_flat[emb_start + k]
-                    total_dist += weight * (1.0 - dot_product) / 2.0
+                for emb_idx in range(n_track_embs):
+                    weight = float(emb_idx + 1)
+                    emb_start = start_offset + emb_idx * emb_dim
+                    dot_product = _compute_dot_product(det_emb, track_embeddings_flat, emb_start, emb_dim)
+                    total_dist += weight * (1.0 - dot_product) * 0.5
                     total_weight += weight
-                distances[i, j] = total_dist / total_weight if total_weight > 0 else 1.0
+                distances[i, j] = total_dist / total_weight if total_weight > 0.0 else 1.0
 
-            elif method == 3:  # best_match
-                # Minimum distance to any embedding
+            else:  # method == 3: best_match - minimum distance
                 min_dist = 1.0
-                for emb_idx in range(track_offsets[j], track_offsets[j + 1]):
-                    emb_start = emb_idx * emb_dim
-                    dot_product = 0.0
-                    for k in range(emb_dim):
-                        dot_product += det_emb[k] * track_embeddings_flat[emb_start + k]
-                    dist = (1.0 - dot_product) / 2.0
+                for emb_idx in range(n_track_embs):
+                    emb_start = start_offset + emb_idx * emb_dim
+                    dot_product = _compute_dot_product(det_emb, track_embeddings_flat, emb_start, emb_dim)
+                    dist = (1.0 - dot_product) * 0.5
                     if dist < min_dist:
                         min_dist = dist
                 distances[i, j] = min_dist
@@ -511,13 +508,49 @@ def compute_freeze_flags_vectorized(
 
 
 @nb.njit(fastmath=True, cache=True)
+def _compute_pairwise_dist_sq(positions: np.ndarray) -> np.ndarray:
+    """
+    Compute pairwise squared distances between all positions.
+
+    Returns upper triangular matrix (i < j only) to save memory.
+    Uses vectorized operations within Numba for efficiency.
+    """
+    n = positions.shape[0]
+    # Only store upper triangle (i < j) as flat array
+    # Number of pairs = n*(n-1)/2
+    n_pairs = (n * (n - 1)) // 2
+    dist_sq = np.empty(n_pairs, dtype=np.float32)
+
+    idx = 0
+    for i in range(n):
+        xi, yi = positions[i, 0], positions[i, 1]
+        for j in range(i + 1, n):
+            dx = xi - positions[j, 0]
+            dy = yi - positions[j, 1]
+            dist_sq[idx] = dx * dx + dy * dy
+            idx += 1
+
+    return dist_sq
+
+
+@nb.njit(fastmath=True, cache=True, inline='always')
+def _get_pair_index(i: int, j: int, n: int) -> int:
+    """Get flat index for pair (i, j) where i < j in upper triangular storage."""
+    # Formula: sum of (n-1) + (n-2) + ... + (n-i) + (j - i - 1)
+    # = i*n - i*(i+1)/2 + (j - i - 1)
+    return i * n - (i * (i + 1)) // 2 + j - i - 1
+
+
+@nb.njit(fastmath=True, cache=True)
 def compute_deduplication_mask(
         positions: np.ndarray,
         confidences: np.ndarray,
         dedup_distance: float
 ) -> np.ndarray:
     """
-    Compute mask for detection deduplication based on proximity.
+    Compute mask for detection deduplication based on proximity (NMS-style).
+
+    OPTIMIZED: Pre-computes pairwise distances for O(1) lookups during NMS.
 
     Args:
         positions: Detection positions [N_det, 2]
@@ -528,20 +561,23 @@ def compute_deduplication_mask(
         Boolean mask where True means keep detection
     """
     n_dets = positions.shape[0]
-    keep = np.ones(n_dets, dtype=nb.boolean)
 
-    # Precompute squared threshold to avoid sqrt in loop
+    if n_dets <= 1:
+        return np.ones(n_dets, dtype=nb.boolean)
+
+    keep = np.ones(n_dets, dtype=nb.boolean)
     dedup_distance_sq = dedup_distance * dedup_distance
 
     # Sort by confidence (higher confidence first)
-    # Numba's argsort works reliably on 1D arrays.
     confidences_1d = confidences.flatten()
     sorted_indices = np.argsort(-confidences_1d)
+
+    # Pre-compute all pairwise squared distances (O(n²) but fast vectorized)
+    dist_sq_flat = _compute_pairwise_dist_sq(positions)
 
     for i in range(n_dets):
         idx_i = sorted_indices[i]
 
-        # If this detection has already been suppressed by a higher-confidence one, skip
         if not keep[idx_i]:
             continue
 
@@ -552,13 +588,13 @@ def compute_deduplication_mask(
             if not keep[idx_j]:
                 continue
 
-            # Compute squared distance (avoid sqrt for performance)
-            dx = positions[idx_i, 0] - positions[idx_j, 0]
-            dy = positions[idx_i, 1] - positions[idx_j, 1]
-            dist_sq = dx * dx + dy * dy
+            # Get pre-computed distance (ensure i < j for lookup)
+            if idx_i < idx_j:
+                pair_idx = _get_pair_index(idx_i, idx_j, n_dets)
+            else:
+                pair_idx = _get_pair_index(idx_j, idx_i, n_dets)
 
-            # If too close, suppress the lower-confidence detection
-            if dist_sq < dedup_distance_sq:
+            if dist_sq_flat[pair_idx] < dedup_distance_sq:
                 keep[idx_j] = False
 
     return keep
