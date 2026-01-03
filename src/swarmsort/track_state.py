@@ -229,13 +229,15 @@ class FastTrackState:
         if len(self.embedding_history) > 0:
             if self.embedding_method == "average":
                 if not self._cache_valid:
-                    self._cached_avg_embedding = np.mean(list(self.embedding_history), axis=0)
+                    # OPTIMIZATION: Use np.array() directly on deque (more efficient than list())
+                    self._cached_avg_embedding = np.mean(np.array(self.embedding_history), axis=0)
                     self._cache_valid = True
                 self.avg_embedding = self._cached_avg_embedding
             elif self.embedding_method == "weighted_average":
                 weights = np.arange(1, len(self.embedding_history) + 1, dtype=np.float32)
                 weights = weights / weights.sum()
-                self.avg_embedding = np.average(list(self.embedding_history), axis=0, weights=weights)
+                # OPTIMIZATION: Use np.array() directly on deque
+                self.avg_embedding = np.average(np.array(self.embedding_history), axis=0, weights=weights)
             else:
                 self.avg_embedding = self.embedding_history[-1]
 
@@ -247,11 +249,13 @@ class FastTrackState:
         if self.embedding_method == "last":
             return self.embedding_history[-1]
         elif self.embedding_method == "average":
-            return np.mean(list(self.embedding_history), axis=0)
+            # OPTIMIZATION: Use np.array() directly on deque
+            return np.mean(np.array(self.embedding_history), axis=0)
         elif self.embedding_method == "weighted_average":
             weights = np.arange(1, len(self.embedding_history) + 1, dtype=np.float32)
             weights = weights / weights.sum()
-            return np.average(list(self.embedding_history), axis=0, weights=weights)
+            # OPTIMIZATION: Use np.array() directly on deque
+            return np.average(np.array(self.embedding_history), axis=0, weights=weights)
         else:
             return self.embedding_history[-1]
 

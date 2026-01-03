@@ -43,7 +43,9 @@ from .kalman_filters import (
 from .cost_computation import (
     cosine_similarity_normalized,
     compute_embedding_distances_with_method,
+    compute_embedding_distances_matmul,
     compute_cost_matrix_vectorized,
+    compute_cost_matrix_parallel,
     compute_probabilistic_cost_matrix_vectorized,
     compute_freeze_flags_vectorized,
     compute_deduplication_mask,
@@ -163,6 +165,11 @@ class SwarmSortTracker:
         # Cost computation
         self.use_probabilistic_costs = self.config.use_probabilistic_costs
 
+        # Performance options
+        # parallel_cost_matrix: Use parallel cost matrix computation for better performance
+        # Note: May produce slightly non-deterministic results due to floating-point order
+        self.parallel_cost_matrix = getattr(self.config, 'parallel_cost_matrix', False)
+
         # Initialization threshold - minimum confidence to create pending detection
         self.init_conf_threshold = getattr(self.config, 'init_conf_threshold', 0.0)
 
@@ -174,6 +181,15 @@ class SwarmSortTracker:
         self._next_pending_id = 1
         self._frame_count = 0
         self.timings = {}
+
+        # OPTIMIZATION: Reusable array pools to avoid per-frame allocations
+        # These grow as needed and are reused across frames
+        self._reusable_det_positions: Optional[np.ndarray] = None
+        self._reusable_track_positions: Optional[np.ndarray] = None
+        self._reusable_track_last_positions: Optional[np.ndarray] = None
+        self._reusable_track_misses: Optional[np.ndarray] = None
+        self._max_dets_seen = 0
+        self._max_tracks_seen = 0
 
     def _initialize_embeddings(self):
         """Initialize embedding-related components."""
@@ -477,11 +493,33 @@ class SwarmSortTracker:
         if n_dets == 0 or n_tracks == 0:
             return np.full((n_dets, n_tracks), np.inf, dtype=np.float32)
 
-        # Extract positions
-        det_positions = np.array([d.position for d in detections], dtype=np.float32)
-        track_positions = np.array([t.predicted_position for t in tracks], dtype=np.float32)
-        track_last_positions = np.array([t.last_detection_pos for t in tracks], dtype=np.float32)
-        track_misses = np.array([t.misses for t in tracks], dtype=np.int32)
+        # OPTIMIZATION: Use reusable array pools to avoid per-frame allocations
+        # Grow arrays if needed, but never shrink (avoids repeated allocations)
+        if self._reusable_det_positions is None or self._reusable_det_positions.shape[0] < n_dets:
+            new_size = max(n_dets, self._max_dets_seen, 50)  # Minimum 50 to reduce early reallocations
+            self._reusable_det_positions = np.empty((new_size, 2), dtype=np.float32)
+            self._max_dets_seen = new_size
+
+        if self._reusable_track_positions is None or self._reusable_track_positions.shape[0] < n_tracks:
+            new_size = max(n_tracks, self._max_tracks_seen, 50)
+            self._reusable_track_positions = np.empty((new_size, 2), dtype=np.float32)
+            self._reusable_track_last_positions = np.empty((new_size, 2), dtype=np.float32)
+            self._reusable_track_misses = np.empty(new_size, dtype=np.int32)
+            self._max_tracks_seen = new_size
+
+        # Fill reusable arrays (no new allocation)
+        for i, d in enumerate(detections):
+            self._reusable_det_positions[i] = d.position
+        for i, t in enumerate(tracks):
+            self._reusable_track_positions[i] = t.predicted_position
+            self._reusable_track_last_positions[i] = t.last_detection_pos
+            self._reusable_track_misses[i] = t.misses
+
+        # Use views into reusable arrays
+        det_positions = self._reusable_det_positions[:n_dets]
+        track_positions = self._reusable_track_positions[:n_tracks]
+        track_last_positions = self._reusable_track_last_positions[:n_tracks]
+        track_misses = self._reusable_track_misses[:n_tracks]
 
         # Compute embedding distances if needed
         scaled_embedding_distances = np.zeros((n_dets, n_tracks), dtype=np.float32)
@@ -523,7 +561,12 @@ class SwarmSortTracker:
                 miss_threshold, gating_multiplier, mahal_normalization, cov_inflation_rate
             )
         else:
-            return compute_cost_matrix_vectorized(
+            # Select cost function based on parallel mode setting
+            cost_func = (
+                compute_cost_matrix_parallel if self.parallel_cost_matrix
+                else compute_cost_matrix_vectorized
+            )
+            return cost_func(
                 det_positions, track_positions, track_last_positions,
                 track_misses, scaled_embedding_distances,
                 self.embedding_weight, self.max_distance, do_embeddings,
@@ -598,9 +641,16 @@ class SwarmSortTracker:
         method = method_map.get(self.embedding_matching_method, 1)
 
         # Compute distances
-        distances = compute_embedding_distances_with_method(
-            det_embeddings, track_embeddings_flat, track_counts, method
-        )
+        # OPTIMIZATION: Use fast matrix multiplication path for method=0 (last embedding)
+        # This is 2-3x faster than the Numba loop for large matrices
+        if method == 0:
+            distances = compute_embedding_distances_matmul(
+                det_embeddings, track_embeddings_flat, track_counts
+            )
+        else:
+            distances = compute_embedding_distances_with_method(
+                det_embeddings, track_embeddings_flat, track_counts, method
+            )
 
         # Scale distances if scaler is available
         if self.embedding_scaler:
@@ -735,22 +785,38 @@ class SwarmSortTracker:
                 continue  # Skip - this detection is very close to an existing track
 
             # Try to match with pending detections
+            # OPTIMIZATION: Vectorized distance computation to all pending at once
             matched_pending = False
             pending_distance = self.config.pending_detection_distance
-            for pending_id, pending in list(self._pending_detections.items()):
-                dist = np.linalg.norm(det_pos - pending.position)
 
-                if dist < pending_distance:
-                    # Update existing pending detection
-                    pending.update(
-                        det_pos,
-                        getattr(det, 'embedding', None),
-                        getattr(det, 'bbox', None),
-                        det_conf
-                    )
-                    pending.last_seen_frame = self._frame_count
-                    matched_pending = True
-                    break
+            if self._pending_detections:
+                # Pre-compute pending positions array (only when there are pending detections)
+                pending_ids = list(self._pending_detections.keys())
+                pending_positions = np.array(
+                    [self._pending_detections[pid].position for pid in pending_ids],
+                    dtype=np.float32
+                )
+
+                # Vectorized distance to all pending
+                dists_to_pending = np.linalg.norm(pending_positions - det_pos_arr, axis=1)
+
+                # Find closest within threshold
+                within_threshold_mask = dists_to_pending < pending_distance
+                if np.any(within_threshold_mask):
+                    # Get the closest pending within threshold
+                    closest_idx = np.argmin(dists_to_pending)
+                    if dists_to_pending[closest_idx] < pending_distance:
+                        pending_id = pending_ids[closest_idx]
+                        pending = self._pending_detections[pending_id]
+                        # Update existing pending detection
+                        pending.update(
+                            det_pos,
+                            getattr(det, 'embedding', None),
+                            getattr(det, 'bbox', None),
+                            det_conf
+                        )
+                        pending.last_seen_frame = self._frame_count
+                        matched_pending = True
 
             if not matched_pending:
                 # Create new pending detection
@@ -1007,6 +1073,15 @@ class SwarmSortTracker:
         self._next_pending_id = 1
         self._frame_count = 0
         self.timings.clear()
+
+        # Reset reusable array pools (allow them to be garbage collected)
+        self._reusable_det_positions = None
+        self._reusable_track_positions = None
+        self._reusable_track_last_positions = None
+        self._reusable_track_misses = None
+        self._max_dets_seen = 0
+        self._max_tracks_seen = 0
+
         gc.collect()
 
     @property

@@ -190,12 +190,15 @@ def hungarian_assignment_wrapper(
         if cost_matrix[d_idx, t_idx] <= max_distance:
             matches.append((d_idx, t_idx))
 
-    # Find unmatched
-    matched_dets = {m[0] for m in matches}
-    matched_tracks = {m[1] for m in matches}
+    # Find unmatched - OPTIMIZED: Use numpy mask instead of set lookup
+    matched_det_mask = np.zeros(n_dets, dtype=bool)
+    matched_track_mask = np.zeros(n_tracks, dtype=bool)
+    for d_idx, t_idx in matches:
+        matched_det_mask[d_idx] = True
+        matched_track_mask[t_idx] = True
 
-    unmatched_dets = [i for i in range(n_dets) if i not in matched_dets]
-    unmatched_tracks = [i for i in range(n_tracks) if i not in matched_tracks]
+    unmatched_dets = np.where(~matched_det_mask)[0].tolist()
+    unmatched_tracks = np.where(~matched_track_mask)[0].tolist()
 
     return matches, unmatched_dets, unmatched_tracks
 
@@ -256,8 +259,15 @@ def hybrid_assignment(
                 used_tracks.add(track_idx)
 
     # Phase 2: Hungarian assignment for remaining
-    remaining_dets = [i for i in range(n_dets) if i not in used_dets]
-    remaining_tracks = [j for j in range(n_tracks) if j not in used_tracks]
+    # OPTIMIZED: Use numpy mask instead of set lookup
+    used_det_mask = np.zeros(n_dets, dtype=bool)
+    used_track_mask = np.zeros(n_tracks, dtype=bool)
+    for d_idx, t_idx in greedy_matches:
+        used_det_mask[d_idx] = True
+        used_track_mask[t_idx] = True
+
+    remaining_dets = np.where(~used_det_mask)[0].tolist()
+    remaining_tracks = np.where(~used_track_mask)[0].tolist()
 
     hungarian_matches = []
     if remaining_dets and remaining_tracks:
@@ -289,10 +299,15 @@ def hybrid_assignment(
 
     # Combine results
     all_matches = greedy_matches + hungarian_matches
-    matched_dets = {m[0] for m in all_matches}
-    matched_tracks = {m[1] for m in all_matches}
 
-    unmatched_dets = [i for i in range(n_dets) if i not in matched_dets]
-    unmatched_tracks = [i for i in range(n_tracks) if i not in matched_tracks]
+    # OPTIMIZED: Use numpy mask instead of set lookup
+    matched_det_mask = np.zeros(n_dets, dtype=bool)
+    matched_track_mask = np.zeros(n_tracks, dtype=bool)
+    for d_idx, t_idx in all_matches:
+        matched_det_mask[d_idx] = True
+        matched_track_mask[t_idx] = True
+
+    unmatched_dets = np.where(~matched_det_mask)[0].tolist()
+    unmatched_tracks = np.where(~matched_track_mask)[0].tolist()
 
     return all_matches, unmatched_dets, unmatched_tracks
