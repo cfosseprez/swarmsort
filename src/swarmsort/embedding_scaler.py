@@ -329,6 +329,64 @@ class EmbeddingDistanceScaler:
         else:
             return np.full_like(distances, 0.5)
 
+    def reset(self):
+        """Full reset of all statistics.
+
+        Use this when:
+        - Starting tracking on a new video/scene
+        - The embedding distribution has changed significantly
+        - Scene changes detected (camera switch, dramatic lighting change)
+
+        After reset, the scaler will need min_samples frames to become ready again.
+        """
+        self.min_distance = None
+        self.max_distance = None
+        self.mean_distance = None
+        self.std_distance = None
+        self.sample_count = 0
+        self.p5 = None
+        self.p95 = None
+        self.p1 = None
+        self.p99 = None
+        self.p10 = None
+        self.p90 = None
+        self.median = None
+        self.iqr = None
+        self.q25 = None
+        self.q75 = None
+        self.update_counter = 0
+        logger.debug("EmbeddingDistanceScaler: Full reset performed")
+
+    def soft_reset(self, faster_update_rate: float = 0.2):
+        """Soft reset - keep statistics but increase learning rate temporarily.
+
+        Use this when:
+        - Embedding distribution may be shifting gradually
+        - You want to adapt faster without losing all history
+
+        Args:
+            faster_update_rate: Temporary update rate (default 0.2, 4x faster than default 0.05)
+        """
+        original_rate = self.update_rate
+        self.update_rate = faster_update_rate
+
+        # Reset sample count to half - makes it learn faster but not from scratch
+        self.sample_count = max(self.sample_count // 2, 0)
+
+        logger.debug(
+            f"EmbeddingDistanceScaler: Soft reset - update_rate {original_rate:.3f} -> {faster_update_rate:.3f}, "
+            f"sample_count halved to {self.sample_count}"
+        )
+
+    def restore_update_rate(self, rate: float = None):
+        """Restore the update rate after a soft reset.
+
+        Args:
+            rate: Rate to restore to. If None, uses 0.05 (default).
+        """
+        self.update_rate = rate if rate is not None else 0.05
+        logger.debug(f"EmbeddingDistanceScaler: Update rate restored to {self.update_rate:.3f}")
+
     def get_statistics(self) -> dict:
         """Get current scaler statistics"""
         return {
@@ -349,6 +407,7 @@ class EmbeddingDistanceScaler:
             "q75": self.q75,
             "iqr": self.iqr,
             "ready": self.sample_count >= self.min_samples,
+            "update_rate": self.update_rate,
         }
 
 

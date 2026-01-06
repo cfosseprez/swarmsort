@@ -199,8 +199,17 @@ class FastTrackState:
         self._cache_valid = False
 
     def add_embedding(self, embedding: np.ndarray):
-        """Add new embedding to history with safe normalization."""
+        """Add new embedding to history with safe normalization.
+
+        When the track is frozen (embedding_frozen=True), this method returns
+        immediately without modifying the embedding_history. This protects
+        the appearance model during collisions or crowded areas.
+
+        Args:
+            embedding: The embedding vector to add (will be L2-normalized)
+        """
         if self.embedding_frozen:
+            # Track is in collision zone - don't update embeddings
             return
 
         if embedding is not None:
@@ -260,14 +269,34 @@ class FastTrackState:
             return self.embedding_history[-1]
 
     def freeze_embeddings(self):
-        """Freeze embeddings when collision detected."""
+        """Freeze embeddings when collision/crowded area detected.
+
+        When frozen, add_embedding() will return early without modifying
+        the embedding_history. This protects the track's appearance model
+        from being corrupted by mixed-object detections during collisions.
+
+        The freeze/unfreeze is controlled by core.py's _update_collision_states()
+        which uses embedding_freeze_density with hysteresis to prevent oscillation.
+
+        Note: last_safe_embedding stores a reference embedding from before the
+        collision. This can be useful for debugging or future ReID improvements.
+        """
         if not self.embedding_frozen:
             self.embedding_frozen = True
+            # Save last embedding before freeze for potential debugging/recovery
             if len(self.embedding_history) > 0 and self.last_safe_embedding is None:
                 self.last_safe_embedding = self.embedding_history[-1].copy()
 
     def unfreeze_embeddings(self):
-        """Unfreeze embeddings when collision resolved."""
+        """Unfreeze embeddings when collision area is cleared.
+
+        Since add_embedding() returns early when frozen, the embedding_history
+        should still contain only pre-collision embeddings at this point.
+        No restoration is needed - the history is already clean.
+
+        Note: We don't clear last_safe_embedding here in case it's useful
+        for debugging or comparison purposes.
+        """
         if self.embedding_frozen:
             self.embedding_frozen = False
 

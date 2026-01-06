@@ -253,9 +253,9 @@ class TestDistanceComputation:
         assert isinstance(dist12, float)
         assert 0.0 <= dist12 <= 1.0
 
-        # Test identical embeddings
+        # Test identical embeddings (use tolerance for floating point)
         dist13 = compute_embedding_distance(emb1, emb3)
-        assert dist13 == 0.0
+        assert dist13 < 1e-10  # Should be effectively zero
 
         # Test None embeddings
         dist_none = compute_embedding_distance(None, emb1)
@@ -368,7 +368,9 @@ class TestEmbeddingPerformance:
             np.testing.assert_array_equal(single, batch)
 
         # Batch should be faster (or at least not significantly slower)
-        assert time_batch <= time_single * 1.5  # Allow 50% margin
+        # Add minimum time to handle cases where execution is too fast to measure
+        min_time = 0.001  # 1ms minimum
+        assert time_batch <= max(time_single, min_time) * 2.0  # Allow 100% margin
 
     @pytest.mark.skipif(not CUPY_AVAILABLE, reason="CuPy not available")
     def test_gpu_performance_scalability(self):
@@ -516,25 +518,27 @@ class TestEmbeddingFunctionality:
         assert tracker is not None
 
 
-class _DisabledTestEmbeddingDistanceScaler:
+class TestEmbeddingDistanceScaler:
     """Comprehensive tests for EmbeddingDistanceScaler."""
 
     def test_scaler_different_methods(self):
         """Test scaler with different scaling methods."""
-        methods = ["robust_minmax", "min_robustmax", "zscore", "median_mad", "quantile"]
-        
+        # Use valid scaling method names from RECOMMENDED_SCALING_METHODS
+        methods = ["robust_minmax", "min_robustmax", "zscore", "robust_zscore", "quantile"]
+
         for method in methods:
-            scaler = EmbeddingDistanceScaler(method=method, min_samples=10)
-            
+            # Use update_interval=1 to ensure updates happen on every call
+            scaler = EmbeddingDistanceScaler(method=method, min_samples=10, update_interval=1)
+
             # Add sample data
             distances = np.random.rand(50) * 2.0
             scaler.update_statistics(distances)
-            
+
             # Should become ready after min_samples
             stats = scaler.get_statistics()
-            assert stats["ready"] == True
+            assert stats["ready"] == True, f"Method {method} not ready"
             assert stats["method"] == method
-            
+
             # Test scaling
             test_distances = np.array([0.1, 0.5, 1.0, 1.5])
             scaled = scaler.scale_distances(test_distances)
@@ -542,16 +546,16 @@ class _DisabledTestEmbeddingDistanceScaler:
 
     def test_scaler_insufficient_data(self):
         """Test scaler behavior with insufficient data."""
-        scaler = EmbeddingDistanceScaler(min_samples=100)
-        
+        scaler = EmbeddingDistanceScaler(min_samples=100, update_interval=1)
+
         # Add small amount of data
         distances = np.random.rand(50)
         scaler.update_statistics(distances)
-        
+
         # Should not be ready yet
         stats = scaler.get_statistics()
         assert stats["ready"] == False
-        
+
         # Scaling should return fallback behavior (clipped scaled distances)
         test_distances = np.array([0.1, 0.5, 1.0])
         scaled = scaler.scale_distances(test_distances)
@@ -562,24 +566,24 @@ class _DisabledTestEmbeddingDistanceScaler:
 
     def test_scaler_edge_cases(self):
         """Test scaler with edge case inputs."""
-        scaler = EmbeddingDistanceScaler(min_samples=5)
-        
+        scaler = EmbeddingDistanceScaler(min_samples=5, update_interval=1)
+
         # Test with all zeros
         zeros = np.zeros(10)
         scaler.update_statistics(zeros)
-        
+
         # Test with all same values
         ones = np.ones(10) * 0.5
         scaler.update_statistics(ones)
-        
+
         # Should handle gracefully
         stats = scaler.get_statistics()
         assert stats["ready"] == True
 
     def test_scaler_statistics_tracking(self):
         """Test scaler statistics tracking."""
-        scaler = EmbeddingDistanceScaler(min_samples=10)
-        
+        scaler = EmbeddingDistanceScaler(min_samples=10, update_interval=1)
+
         # Add data to make it ready
         distances = np.random.rand(20)
         scaler.update_statistics(distances)
@@ -589,15 +593,51 @@ class _DisabledTestEmbeddingDistanceScaler:
 
     def test_scaler_incremental_update(self):
         """Test incremental updates to scaler."""
-        scaler = EmbeddingDistanceScaler(min_samples=20, update_rate=0.1)
-        
+        scaler = EmbeddingDistanceScaler(min_samples=20, update_rate=0.1, update_interval=1)
+
         # Add data in batches
         for i in range(5):
             batch = np.random.rand(10) * (i + 1)  # Different ranges per batch
             scaler.update_statistics(batch)
-            
+
             stats = scaler.get_statistics()
             assert stats["sample_count"] == (i + 1) * 10
+
+    def test_scaler_reset(self):
+        """Test scaler reset functionality."""
+        scaler = EmbeddingDistanceScaler(min_samples=10, update_interval=1)
+
+        # Add data to make it ready
+        distances = np.random.rand(20)
+        scaler.update_statistics(distances)
+        assert scaler.get_statistics()["ready"] == True
+
+        # Reset
+        scaler.reset()
+        stats = scaler.get_statistics()
+        assert stats["ready"] == False
+        assert stats["sample_count"] == 0
+        assert stats["min_distance"] is None
+
+    def test_scaler_soft_reset(self):
+        """Test scaler soft reset functionality."""
+        scaler = EmbeddingDistanceScaler(min_samples=10, update_rate=0.05, update_interval=1)
+
+        # Add data to make it ready
+        distances = np.random.rand(50)
+        scaler.update_statistics(distances)
+        original_count = scaler.sample_count
+
+        # Soft reset
+        scaler.soft_reset(faster_update_rate=0.2)
+
+        # Sample count should be halved, update rate should be faster
+        assert scaler.sample_count == original_count // 2
+        assert scaler.update_rate == 0.2
+
+        # Restore update rate
+        scaler.restore_update_rate()
+        assert scaler.update_rate == 0.05
 
 
 if __name__ == "__main__":

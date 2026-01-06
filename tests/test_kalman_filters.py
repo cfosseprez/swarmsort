@@ -111,64 +111,84 @@ class TestSimpleKalmanFilter:
         np.testing.assert_allclose(x_state[2:], true_velocity, atol=1.0)
 
 
-class _DisabledTestOCSortKalmanFilter:  # Disabled due to OC-SORT implementation issues
-    """Test suite for OC-SORT Kalman filter implementation."""
+class TestOCSortKalmanFilter:
+    """Test suite for OC-SORT Kalman filter implementation with current API."""
 
-    @pytest.mark.skip(reason="OC-SORT implementation needs refactoring")
-    def test_oc_predict_updates_state_and_covariance(self):
-        """Test OC-SORT prediction updates observation history."""
-        # Create observation history
-        observation_history = np.zeros((100, 4), dtype=np.float32)
-        observation_history[0] = [100.0, 200.0, 5.0, -3.0]
-        frame_count = 1
+    def test_oc_predict_with_single_observation(self):
+        """Test OC-SORT prediction with single observation."""
+        # Create observation history with one observation
+        observation_history = np.array([[100.0, 200.0]], dtype=np.float32)
+        observation_frames = np.array([0], dtype=np.int32)
         current_frame = 10
 
         # Predict
-        predicted_state = oc_sort_predict(observation_history, frame_count, current_frame)
+        predicted_state = oc_sort_predict(observation_history, observation_frames, current_frame)
 
-        # Should return predicted state
+        # Should return state with zero velocity (single obs = no velocity)
         assert predicted_state.shape == (4,)
-        # Position should be updated by velocity
-        expected_pos_x = 100.0 + 5.0 * (current_frame - 0)
-        assert np.abs(predicted_state[0] - expected_pos_x) < 50  # Allow some tolerance
+        assert predicted_state[0] == 100.0  # x unchanged
+        assert predicted_state[1] == 200.0  # y unchanged
+        assert predicted_state[2] == 0.0  # vx = 0
+        assert predicted_state[3] == 0.0  # vy = 0
 
-    @pytest.mark.skip(reason="OC-SORT implementation needs refactoring")
-    def test_oc_update_reduces_uncertainty(self):
-        """Test that OC-SORT update incorporates new measurement."""
-        # Create observation history
-        observation_history = np.zeros((100, 4), dtype=np.float32)
-        observation_history[0] = [105.0, 197.0, 5.0, -3.0]
-        frame_count = 1
+    def test_oc_predict_with_two_observations(self):
+        """Test OC-SORT prediction extrapolates from last two observations."""
+        # Create observation history with two observations
+        observation_history = np.array([
+            [100.0, 200.0],
+            [110.0, 195.0]  # Moved +10 in x, -5 in y
+        ], dtype=np.float32)
+        observation_frames = np.array([0, 1], dtype=np.int32)
+        current_frame = 2  # One frame after last observation
 
-        # Measurement
-        z_measurement = np.array([106.0, 196.0], dtype=np.float32)
+        # Predict
+        predicted_state = oc_sort_predict(observation_history, observation_frames, current_frame)
+
+        # Should extrapolate velocity
+        assert predicted_state.shape == (4,)
+        # Velocity should be (10, -5) per frame
+        np.testing.assert_allclose(predicted_state[2], 10.0)  # vx
+        np.testing.assert_allclose(predicted_state[3], -5.0)  # vy
+        # Position should be predicted at frame 2
+        np.testing.assert_allclose(predicted_state[0], 120.0)  # 110 + 10*1
+        np.testing.assert_allclose(predicted_state[1], 190.0)  # 195 - 5*1
+
+    def test_oc_update_appends_observation(self):
+        """Test that OC-SORT update appends new observation."""
+        # Initial observation history
+        observation_history = np.array([[100.0, 200.0]], dtype=np.float32)
+        observation_frames = np.array([0], dtype=np.int32)
+
+        # New observation
+        new_obs = np.array([105.0, 198.0], dtype=np.float32)
         current_frame = 1
 
         # Update
-        updated_state = oc_sort_update(observation_history, frame_count, current_frame, z_measurement)
+        new_history, new_frames = oc_sort_update(
+            observation_history, observation_frames, new_obs, current_frame
+        )
 
-        # Should return updated state
-        assert updated_state.shape == (4,)
-        # State should be influenced by measurement
-        assert not np.array_equal(updated_state, observation_history[0])
+        # Should append the observation
+        assert len(new_frames) == 2
+        np.testing.assert_allclose(new_history[-1], new_obs)
+        assert new_frames[-1] == current_frame
 
-    @pytest.mark.skip(reason="OC-SORT implementation needs refactoring")
     def test_oc_filter_handles_missing_measurements(self):
-        """Test OC-SORT behavior with missing measurements (prediction only)."""
-        # Create observation history with initial state
-        observation_history = np.zeros((100, 4), dtype=np.float32)
-        observation_history[0] = [100.0, 100.0, 2.0, 1.0]
-        frame_count = 1
+        """Test OC-SORT prediction with gaps between observations."""
+        # Observations at frames 0 and 1
+        observation_history = np.array([
+            [100.0, 100.0],
+            [102.0, 101.0]  # velocity = (2, 1)
+        ], dtype=np.float32)
+        observation_frames = np.array([0, 1], dtype=np.int32)
 
-        # Multiple predictions without updates (missing measurements)
-        for frame in range(1, 6):
-            predicted_state = oc_sort_predict(observation_history, frame_count, frame)
+        # Predict at frame 5 (4 frames after last observation)
+        predicted_state = oc_sort_predict(observation_history, observation_frames, 5)
 
-        # Position should follow velocity trajectory
-        assert predicted_state[0] > 100.0  # X should increase
-        assert predicted_state[1] > 100.0  # Y should increase
+        # Position should extrapolate: 102 + 2*4 = 110, 101 + 1*4 = 105
+        np.testing.assert_allclose(predicted_state[0], 110.0)
+        np.testing.assert_allclose(predicted_state[1], 105.0)
 
-    @pytest.mark.skip(reason="OC-SORT implementation needs refactoring")
     def test_oc_vs_simple_kalman_comparison(self):
         """Compare OC-SORT and simple Kalman filter behaviors."""
         # Same initial conditions for both
@@ -185,21 +205,26 @@ class _DisabledTestOCSortKalmanFilter:  # Disabled due to OC-SORT implementation
             simple_state = simple_kalman_predict(simple_state)
             simple_state = simple_kalman_update(simple_state, z)
 
-        # OC-SORT Kalman
-        observation_history = np.zeros((100, 4), dtype=np.float32)
-        observation_history[0] = initial_state
-        frame_count = 1
+        # OC-SORT Kalman - use current API
+        oc_history = np.array([[100.0, 100.0]], dtype=np.float32)
+        oc_frames = np.array([0], dtype=np.int32)
 
         for i, z in enumerate(measurements):
-            predicted = oc_sort_predict(observation_history, frame_count, i)
-            updated = oc_sort_update(observation_history, frame_count, i, z)
-            observation_history[frame_count] = updated
-            frame_count = min(frame_count + 1, 99)
+            # Predict current position
+            predicted = oc_sort_predict(oc_history, oc_frames, i + 1)
+            # Update with new measurement
+            oc_history, oc_frames = oc_sort_update(oc_history, oc_frames, z, i + 1)
 
-        # Both should track the object
-        # Velocity estimates should be non-zero
+        # Both should track the object - get final prediction
+        final_prediction = oc_sort_predict(oc_history, oc_frames, len(measurements) + 1)
+
+        # Simple Kalman velocity should be non-zero
         simple_velocity_magnitude = np.linalg.norm(simple_state[2:])
         assert simple_velocity_magnitude > 0
+
+        # OC-SORT should also have estimated velocity
+        oc_velocity_magnitude = np.linalg.norm(final_prediction[2:])
+        assert oc_velocity_magnitude > 0
 
 
 class TestConfigurableKalmanParameters:

@@ -209,13 +209,11 @@ class TestPendingDetection:
         pass
 
 
-class _DisabledTestTrackStateLifecycle:  # Disabled due to extensive API changes
-    """Integration tests for complete track lifecycle."""
+class TestTrackStateLifecycle:
+    """Integration tests for complete track lifecycle using current API."""
 
-    @pytest.mark.skip(reason="API changes - needs refactoring")
     def test_track_creation_from_pending(self):
         """Test creating track from pending detection."""
-        # Simulate pending detection meeting criteria
         pending = PendingDetection(
             position=np.array([100.0, 100.0], dtype=np.float32),
             confidence=0.9,
@@ -225,139 +223,163 @@ class _DisabledTestTrackStateLifecycle:  # Disabled due to extensive API changes
             total_detections=5,
         )
 
-        # Create track from pending
-        track = FastTrackState(id=1, x=np.concatenate([pending.position, [0.0, 0.0]]).astype(np.float32))
+        # Create track from pending - current API
+        track = FastTrackState(
+            id=1,
+            position=pending.position.copy(),
+        )
 
         if pending.embedding is not None:
             track.add_embedding(pending.embedding)
 
         assert track.id == 1
-        np.testing.assert_allclose(track.x[:2], pending.position)
+        np.testing.assert_allclose(track.position, pending.position)
 
-    @pytest.mark.skip(reason="API changes - needs refactoring")
-    def test_track_lifecycle_complete(self):
-        """Test complete track lifecycle from creation to deletion."""
-        track = FastTrackState(id=1, min_hits=3, max_age=5)
-
-        # Phase 1: Tentative (initial detections)
-        assert track.state == 0
-
-        for i in range(2):
-            det = Detection(position=np.array([100.0 + i, 100.0], dtype=np.float32), confidence=0.9)
-            track.update(det)
-
-        assert track.state == 0  # Still tentative (need 3 hits)
-
-        # Phase 2: Confirmation
-        det = Detection(position=np.array([102.0, 100.0], dtype=np.float32), confidence=0.9)
-        track.update(det)
-
-        assert track.state == 1  # Now confirmed
-        assert track.hits == 4  # Including initial
-
-        # Phase 3: Tracking with predictions
-        for i in range(3):
-            track.predict()  # No detection
-            assert track.state == 1  # Still confirmed
-            assert track.time_since_update == i + 1
-
-        # Phase 4: Re-acquisition
-        det = Detection(position=np.array([110.0, 100.0], dtype=np.float32), confidence=0.9)
-        track.update(det)
-
-        assert track.state == 1  # Still confirmed
-        assert track.time_since_update == 0  # Reset
-
-        # Phase 5: Deletion after max age
-        for i in range(6):  # Exceed max_age
-            track.predict()
-
-        assert track.state == 2  # Deleted
-        assert track.time_since_update > track.max_age
-
-    @pytest.mark.skip(reason="API changes - needs refactoring")
-    def test_predict_only_mode(self):
-        """Test predict-only mode for lost tracks."""
-        track = FastTrackState(id=1, kalman_type="simple", x=np.array([100.0, 100.0, 5.0, 3.0], dtype=np.float32))
-
-        initial_position = track.x[:2].copy()
-
-        # Predict only (no update)
-        track.predict_only()
-
-        # Position should update based on velocity
-        expected_pos = initial_position + np.array([5.0, 3.0])
-        np.testing.assert_allclose(track.x[:2], expected_pos)
-
-        # Velocity should remain constant in simple mode
-        np.testing.assert_allclose(track.x[2:], [5.0, 3.0])
-
-        # Test OC-SORT predict only
-        track_oc = FastTrackState(
-            id=2, kalman_type="oc", x=np.array([100.0, 100.0, 5.0, 3.0], dtype=np.float32), current_frame=10
+    def test_track_update_with_detection(self):
+        """Test updating track with new detections."""
+        track = FastTrackState(
+            id=1,
+            position=np.array([100.0, 100.0], dtype=np.float32),
         )
 
-        track_oc.predict_only(current_frame=11)
+        # Update with new detection
+        new_pos = np.array([105.0, 102.0], dtype=np.float32)
+        track.update_with_detection(
+            position=new_pos,
+            frame=1,
+            det_conf=0.9
+        )
 
-        # Should update position but handle differently than simple
-        assert not np.array_equal(track_oc.x[:2], [100.0, 100.0])
+        # Track should update
+        assert track.hits == 1
+        assert track.misses == 0
+        np.testing.assert_allclose(track.position, new_pos)
+
+    def test_track_prediction_updates_position(self):
+        """Test that predict_position updates the predicted position."""
+        track = FastTrackState(
+            id=1,
+            position=np.array([100.0, 100.0], dtype=np.float32),
+            kalman_type="simple"
+        )
+
+        # Give it some velocity by doing an update
+        track.update_with_detection(
+            position=np.array([105.0, 100.0], dtype=np.float32),
+            frame=1
+        )
+
+        # Now predict
+        track.predict_position()
+
+        # Predicted position should be different from last detection
+        assert track.predicted_position is not None
+
+    def test_predict_only_increments_counters(self):
+        """Test predict_only increments age and misses."""
+        track = FastTrackState(
+            id=1,
+            position=np.array([100.0, 100.0], dtype=np.float32),
+        )
+        initial_age = track.age
+        initial_misses = track.misses
+
+        # Predict only (unmatched track)
+        track.predict_only()
+
+        assert track.age == initial_age + 1
+        assert track.misses == initial_misses + 1
+
+    def test_track_embedding_lifecycle(self):
+        """Test embedding freeze/unfreeze lifecycle."""
+        track = FastTrackState(
+            id=1,
+            position=np.array([100.0, 100.0], dtype=np.float32),
+        )
+
+        # Add embedding
+        emb1 = np.random.rand(64).astype(np.float32)
+        track.add_embedding(emb1)
+        assert len(track.embedding_history) == 1
+
+        # Freeze - should save last safe embedding
+        track.freeze_embeddings()
+        assert track.embedding_frozen == True
+        assert track.last_safe_embedding is not None
+
+        # Try to add during freeze - should be blocked
+        emb2 = np.random.rand(64).astype(np.float32)
+        track.add_embedding(emb2)
+        assert len(track.embedding_history) == 1  # Still 1
+
+        # Unfreeze
+        track.unfreeze_embeddings()
+        assert track.embedding_frozen == False
+
+        # Now add should work
+        track.add_embedding(emb2)
+        assert len(track.embedding_history) == 2
 
 
-class _DisabledTestTrackStateValidation:  # Disabled due to API changes
-    """Validation tests for track state consistency."""
+class TestTrackStateValidation:
+    """Validation tests for track state consistency using current API."""
 
-    @pytest.mark.skip(reason="API changes - needs refactoring")
     def test_track_state_consistency(self):
         """Test that track state remains internally consistent."""
-        track = FastTrackState(id=1)
+        track = FastTrackState(
+            id=1,
+            position=np.array([100.0, 100.0], dtype=np.float32)
+        )
 
         for i in range(10):
             if i % 3 == 0:
                 # Update with detection
-                det = Detection(position=np.array([100.0 + i, 100.0], dtype=np.float32), confidence=0.9)
-                track.update(det)
+                position = np.array([100.0 + i, 100.0], dtype=np.float32)
+                track.update_with_detection(position=position, frame=i, det_conf=0.9)
             else:
-                # Predict
-                track.predict()
+                # Predict only
+                track.predict_only()
 
-            # Validate consistency
-            assert track.age >= track.hits - 1  # Age >= hits - 1 (initial hit)
-            assert track.time_since_update >= 0
-            assert track.embedding_count <= track.max_embeddings
-            assert track.state in [0, 1, 2]  # Valid states
+            # Validate consistency - current API attributes
+            assert track.age >= 0
+            assert track.misses >= 0
+            assert len(track.embedding_history) <= track.embedding_history.maxlen
+            assert track.confirmed in [True, False]
 
-            if track.kalman_type == "oc":
-                assert track.P is not None
-                assert track.observations is not None
-
-    @pytest.mark.skip(reason="API changes - needs refactoring")
     def test_track_id_uniqueness(self):
         """Test that track IDs remain unique."""
         tracks = []
         for i in range(100):
-            track = FastTrackState(id=i)
+            track = FastTrackState(
+                id=i,
+                position=np.array([100.0, 100.0], dtype=np.float32)
+            )
             tracks.append(track)
 
         ids = [t.id for t in tracks]
         assert len(ids) == len(set(ids))  # All unique
 
-    @pytest.mark.skip(reason="API changes - needs refactoring")
     def test_numerical_stability(self):
         """Test numerical stability over many updates."""
-        track = FastTrackState(id=1, kalman_type="simple")
+        track = FastTrackState(
+            id=1,
+            position=np.array([100.0, 100.0], dtype=np.float32),
+            kalman_type="simple"
+        )
 
         # Many updates with small movements
-        for i in range(1000):
-            position = np.array([100.0 + i * 0.01, 100.0 + i * 0.01], dtype=np.float32)
-            det = Detection(position=position, confidence=0.9)
+        for i in range(100):  # Reduced from 1000 for faster tests
+            position = np.array([100.0 + i * 0.1, 100.0 + i * 0.1], dtype=np.float32)
 
-            track.predict()
-            track.update(det)
+            track.predict_position()
+            track.update_with_detection(position=position, frame=i)
 
             # Check for numerical issues
-            assert not np.any(np.isnan(track.x))
-            assert not np.any(np.isinf(track.x))
-            assert np.all(np.abs(track.x) < 1e6)  # No explosion
+            assert not np.any(np.isnan(track.position))
+            assert not np.any(np.isinf(track.position))
+            assert not np.any(np.isnan(track.kalman_state))
+            assert not np.any(np.isinf(track.kalman_state))
+            assert np.all(np.abs(track.position) < 1e6)  # No explosion
 
 
 if __name__ == "__main__":

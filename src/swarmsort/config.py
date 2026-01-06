@@ -324,16 +324,34 @@ class SwarmSortConfig(BaseConfig):
     """
 
     embedding_weight: float = 1.0
-    """Relative importance of appearance vs motion (0.0 to ~2.0).
+    """Relative importance of appearance penalty (0.0 to ~2.0).
 
-    Controls the balance between position-based and appearance-based matching:
+    Controls how much embedding distance adds to the position-based cost:
+    Cost = position_distance + embedding_weight × embedding_distance × max_distance
 
     - 0.0 = Position only (appearance ignored even if do_embeddings=True)
-    - 0.5 = Position is 2x more important than appearance
-    - 1.0 = Equal weight (default, balanced approach)
-    - 2.0 = Appearance is 2x more important than position
+    - 0.5 = Embedding adds up to 50% of max_distance as penalty
+    - 1.0 = Embedding adds up to 100% of max_distance as penalty (default)
+    - 2.0 = Embedding adds up to 200% of max_distance as penalty
 
     Increase for distinct-looking objects, decrease for similar-looking objects.
+    """
+
+    embedding_threshold_adjustment: float = 1.0
+    """Threshold adjustment factor for embedding contribution to assignment gating.
+
+    With additive cost formula, total cost can exceed max_distance. This parameter
+    adjusts the effective assignment threshold to account for embedding contribution:
+
+    effective_max_distance = max_distance × (1 + embedding_weight × embedding_threshold_adjustment)
+
+    Example with max_distance=80, embedding_weight=1.0, embedding_threshold_adjustment=1.0:
+    - effective_max_distance = 80 × (1 + 1.0 × 1.0) = 160
+    - Allows costs up to 160 (80 position + 80 max embedding contribution)
+
+    - 0.0 = No threshold adjustment (may reject valid matches with high embedding cost)
+    - 1.0 = Full adjustment for embedding contribution (default, recommended)
+    - 0.5 = Partial adjustment (more strict on appearance)
     """
 
     max_embeddings_per_track: int = 15
@@ -725,6 +743,30 @@ class SwarmSortConfig(BaseConfig):
     - 0.0 = Velocity doesn't affect uncertainty
     - 1.0-2.0 = Moderate velocity effect (default)
     - 3.0+ = Strong velocity effect
+    """
+
+    velocity_isotropic_threshold: float = 0.1
+    """Velocity threshold (pixels/frame) below which covariance is isotropic.
+
+    When a track's velocity magnitude is below this threshold, the covariance
+    is circular (same uncertainty in all directions). Above this threshold,
+    the covariance becomes elliptical (more uncertainty in direction of motion).
+
+    - 0.1 = Very slow tracks only get isotropic covariance (default)
+    - 1.0 = Tracks moving < 1 pixel/frame get isotropic covariance
+    - 5.0 = Only very fast tracks get anisotropic covariance
+    """
+
+    singular_covariance_threshold: float = 1e-6
+    """Threshold for detecting singular (degenerate) covariance matrices.
+
+    If the covariance matrix determinant is below this value, the tracker
+    falls back to Euclidean distance instead of Mahalanobis distance.
+    This prevents numerical instability from matrix inversion.
+
+    - 1e-6 = Default, works for most cases
+    - 1e-8 = More aggressive, may have numerical issues
+    - 1e-4 = More conservative, falls back to Euclidean more often
     """
 
     def __post_init__(self):

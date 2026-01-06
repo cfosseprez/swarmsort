@@ -195,96 +195,115 @@ class TestHungarianAssignment:
         assert len(unmatched_dets) == 2  # 2 detections unmatched
 
 
-class _DisabledTestNumbaGreedyAssignment:
-    """Test suite for Numba-optimized greedy assignment."""
+class TestGreedyAssignmentPerformance:
+    """Test suite for greedy assignment with various matrix sizes."""
 
-    def test_numba_greedy_equivalent_to_python(self):
-        """Test that Numba version produces same results as Python version."""
-        cost_matrix = np.array(
-            [[0.5, 10.0, 10.0], [10.0, 0.3, 10.0], [10.0, 10.0, 0.7]], dtype=np.float32
-        )
-
-        # Run both versions
-        python_matches, python_unmatched_d, python_unmatched_t = greedy_assignment(cost_matrix, max_distance=5.0)
-
-        numba_matches, numba_unmatched_d, numba_unmatched_t = numba_greedy_assignment(cost_matrix, max_distance=5.0)
-
-        # Convert numba results to lists for comparison
-        numba_matches_list = [(int(m[0]), int(m[1])) for m in numba_matches if m[0] >= 0]
-        numba_unmatched_d_list = [int(d) for d in numba_unmatched_d if d >= 0]
-        numba_unmatched_t_list = [int(t) for t in numba_unmatched_t if t >= 0]
-
-        # Should produce identical results
-        assert set(python_matches) == set(numba_matches_list)
-        assert set(python_unmatched_d) == set(numba_unmatched_d_list)
-        assert set(python_unmatched_t) == set(numba_unmatched_t_list)
-
-    def test_numba_greedy_performance_characteristics(self):
-        """Test that Numba version handles various matrix sizes."""
+    def test_greedy_various_matrix_sizes(self):
+        """Test that greedy assignment handles various matrix sizes correctly."""
         sizes = [(10, 10), (50, 20), (20, 50), (100, 100)]
 
         for n_det, n_track in sizes:
+            np.random.seed(42)  # For reproducibility
             cost_matrix = np.random.rand(n_det, n_track).astype(np.float32) * 10
 
             matches, unmatched_d, unmatched_t = numba_greedy_assignment(cost_matrix, max_distance=5.0)
 
-            # Basic sanity checks
-            matched_dets = set(m[0] for m in matches if m[0] >= 0)
-            matched_tracks = set(m[1] for m in matches if m[0] >= 0)
+            # Basic sanity checks - get matched detections and tracks
+            if len(matches) > 0:
+                matched_dets = set(int(m[0]) for m in matches)
+                matched_tracks = set(int(m[1]) for m in matches)
 
-            # No detection or track should be matched twice
-            assert len(matched_dets) == len([m for m in matches if m[0] >= 0])
-            assert len(matched_tracks) == len([m for m in matches if m[0] >= 0])
+                # No detection or track should be matched twice
+                assert len(matched_dets) == len(matches), f"Duplicate detection in matches for size {n_det}x{n_track}"
+                assert len(matched_tracks) == len(matches), f"Duplicate track in matches for size {n_det}x{n_track}"
+
+    def test_greedy_deterministic(self):
+        """Test that greedy assignment is deterministic."""
+        np.random.seed(42)
+        cost_matrix = np.random.rand(20, 20).astype(np.float32) * 10
+
+        matches1, unmatched_d1, unmatched_t1 = numba_greedy_assignment(cost_matrix, max_distance=5.0)
+        matches2, unmatched_d2, unmatched_t2 = numba_greedy_assignment(cost_matrix, max_distance=5.0)
+
+        # Results should be identical
+        assert len(matches1) == len(matches2)
+        for m1, m2 in zip(matches1, matches2):
+            assert m1[0] == m2[0] and m1[1] == m2[1]
 
 
-class _DisabledTestHybridAssignment:
+class TestHybridAssignment:
     """Test suite for hybrid assignment strategy."""
 
-    def test_hybrid_uses_greedy_for_small_matrices(self):
-        """Test that hybrid uses greedy for small cost matrices."""
-        small_cost_matrix = np.array([[0.5, 10.0], [10.0, 0.3]], dtype=np.float32)
+    def test_hybrid_low_cost_matches_use_greedy(self):
+        """Test that hybrid uses greedy phase for low cost matches."""
+        # Create matrix with clear low-cost matches
+        cost_matrix = np.array([[0.5, 10.0], [10.0, 0.3]], dtype=np.float32)
 
         matches, unmatched_d, unmatched_t = hybrid_assignment(
-            small_cost_matrix, max_distance=5.0, greedy_threshold=10.0  # Size 2x2 < threshold
+            cost_matrix, max_distance=5.0, greedy_threshold=5.0
         )
 
-        # Should use greedy for small matrix
-        greedy_matches, _, _ = greedy_assignment(small_cost_matrix, max_distance=5.0)
-        assert set(matches) == set(greedy_matches)
+        # Should match optimally
+        assert len(matches) == 2
+        assert (0, 0) in matches
+        assert (1, 1) in matches
 
-    def test_hybrid_uses_hungarian_for_large_matrices(self):
-        """Test that hybrid uses Hungarian for large cost matrices."""
-        # Create larger matrix
-        size = 20
+    def test_hybrid_ambiguous_uses_hungarian(self):
+        """Test that hybrid uses Hungarian phase for ambiguous matches."""
+        # Create matrix where no costs are below greedy_threshold
+        # This forces Hungarian algorithm to be used
         np.random.seed(42)
-        large_cost_matrix = np.random.rand(size, size).astype(np.float32) * 10
+        cost_matrix = np.array([
+            [5.0, 5.1, 5.2],
+            [5.3, 5.0, 5.4],
+            [5.5, 5.6, 5.0]
+        ], dtype=np.float32)
 
         matches, unmatched_d, unmatched_t = hybrid_assignment(
-            large_cost_matrix, max_distance=15.0, greedy_threshold=10.0  # Size 20 > threshold
+            cost_matrix, max_distance=10.0, greedy_threshold=4.0,  # greedy_threshold < all costs
+            hungarian_fallback_threshold=10.0
         )
 
-        # Should use Hungarian for large matrix
-        hungarian_matches, _, _ = hungarian_assignment(large_cost_matrix, max_distance=15.0)
-        assert set(matches) == set(hungarian_matches)
+        # Should still find optimal matches via Hungarian
+        assert len(matches) == 3
+        # Check that diagonal matches are made (optimal)
+        matched_pairs = set(matches)
+        assert (0, 0) in matched_pairs
+        assert (1, 1) in matched_pairs
+        assert (2, 2) in matched_pairs
 
-    def test_hybrid_confidence_boost(self):
-        """Test that confidence boost affects assignments."""
-        cost_matrix = np.array([[1.0, 1.1], [1.05, 0.8]], dtype=np.float32)
+    def test_hybrid_mixed_greedy_and_hungarian(self):
+        """Test hybrid with some obvious and some ambiguous matches."""
+        cost_matrix = np.array([
+            [0.5, 100.0, 100.0],  # Obvious match to track 0
+            [100.0, 6.0, 6.1],   # Ambiguous - needs Hungarian
+            [100.0, 6.2, 6.0]    # Ambiguous - needs Hungarian
+        ], dtype=np.float32)
 
-        confidences = np.array([0.9, 0.5], dtype=np.float32)  # First detection has higher confidence
-
-        # Without boost
-        matches_no_boost, _, _ = hybrid_assignment(
-            cost_matrix, max_distance=5.0, greedy_threshold=10.0, confidence_scores=None
+        matches, unmatched_d, unmatched_t = hybrid_assignment(
+            cost_matrix, max_distance=50.0, greedy_threshold=5.0,
+            hungarian_fallback_threshold=50.0
         )
 
-        # With confidence boost
-        matches_with_boost, _, _ = hybrid_assignment(
-            cost_matrix, max_distance=5.0, greedy_threshold=10.0, confidence_scores=confidences, confidence_boost_factor=0.5
+        # Should match all 3
+        assert len(matches) == 3
+        # Det 0 should definitely match track 0 (obvious)
+        assert (0, 0) in matches
+
+    def test_hybrid_respects_max_distance(self):
+        """Test that hybrid respects max_distance threshold."""
+        cost_matrix = np.array([
+            [5.0, 100.0],
+            [100.0, 5.0]
+        ], dtype=np.float32)
+
+        matches, unmatched_d, unmatched_t = hybrid_assignment(
+            cost_matrix, max_distance=10.0, greedy_threshold=10.0,
+            hungarian_fallback_threshold=10.0
         )
 
-        # Confidence boost should affect assignment decisions
-        # High confidence detection (0) gets priority
+        # Should match both (costs 5.0 < max_distance 10.0)
+        assert len(matches) == 2
 
 
 class TestAssignmentValidation:

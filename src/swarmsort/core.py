@@ -48,6 +48,7 @@ from .cost_computation import (
     compute_cost_matrix_parallel,
     compute_probabilistic_cost_matrix_vectorized,
     compute_freeze_flags_vectorized,
+    compute_neighbor_counts_vectorized,
     compute_deduplication_mask,
     estimate_track_covariances
 )
@@ -136,6 +137,7 @@ class SwarmSortTracker:
         # Embedding parameters
         self.do_embeddings = self.config.do_embeddings
         self.embedding_weight = self.config.embedding_weight
+        self.embedding_threshold_adjustment = getattr(self.config, 'embedding_threshold_adjustment', 1.0)
         self.max_embeddings_per_track = self.config.max_embeddings_per_track
         self.embedding_matching_method = self.config.embedding_matching_method
 
@@ -157,6 +159,12 @@ class SwarmSortTracker:
         self.collision_freeze_embeddings = self.config.collision_freeze_embeddings
         self.collision_safety_distance = self.config.collision_safety_distance
         self.deduplication_distance = self.config.deduplication_distance
+
+        # Embedding freeze density parameters
+        self.embedding_freeze_density = getattr(self.config, 'embedding_freeze_density', 1)
+        # Use local_density_radius if set, otherwise fall back to collision_safety_distance
+        local_density = getattr(self.config, 'local_density_radius', -1.0)
+        self.local_density_radius = local_density if local_density > 0 else self.collision_safety_distance
 
         # Debug options
         self.debug_timings = self.config.debug_timings
@@ -239,7 +247,7 @@ class SwarmSortTracker:
                 # Trigger compilation
                 compute_cost_matrix_vectorized(
                     dummy_det, dummy_track, dummy_track,
-                    np.array([0]), dummy_emb, 0.5, 100.0, False
+                    np.array([0]), dummy_emb, 0.5, 100.0, False, 3, 1.0
                 )
                 numba_greedy_assignment(dummy_cost, 100.0)
 
@@ -420,7 +428,15 @@ class SwarmSortTracker:
         return [d for i, d in enumerate(detections) if keep_mask[i]]
 
     def _update_collision_states(self):
-        """Update embedding freeze states based on track proximity."""
+        """Update embedding freeze states based on track proximity with hysteresis.
+
+        Uses embedding_freeze_density to determine when to freeze:
+        - Freeze when neighbor_count >= embedding_freeze_density
+        - Unfreeze when neighbor_count < max(0, embedding_freeze_density - 1)
+
+        The hysteresis (freeze_density - 1 for unfreeze) prevents oscillation
+        when tracks are on the boundary of the collision zone.
+        """
         if not self.collision_freeze_embeddings or len(self._tracks) < 2:
             return
 
@@ -429,14 +445,22 @@ class SwarmSortTracker:
             dtype=np.float32
         )
 
-        freeze_flags = compute_freeze_flags_vectorized(
-            positions, self.collision_safety_distance
+        # Count neighbors within local_density_radius
+        neighbor_counts = compute_neighbor_counts_vectorized(
+            positions, self.local_density_radius
         )
 
-        for (track, should_freeze) in zip(self._tracks.values(), freeze_flags):
-            if should_freeze:
+        # Hysteresis thresholds
+        freeze_threshold = self.embedding_freeze_density
+        # Unfreeze requires fewer neighbors than freeze (hysteresis prevents oscillation)
+        unfreeze_threshold = max(0, self.embedding_freeze_density - 1)
+
+        for (track, count) in zip(self._tracks.values(), neighbor_counts):
+            if count >= freeze_threshold:
+                # Too many neighbors - freeze embeddings
                 track.freeze_embeddings()
-            else:
+            elif count <= unfreeze_threshold and track.embedding_frozen:
+                # Few enough neighbors and currently frozen - safe to unfreeze
                 track.unfreeze_embeddings()
 
     def _handle_empty_frame(self) -> List[TrackedObject]:
@@ -522,15 +546,21 @@ class SwarmSortTracker:
         track_misses = self._reusable_track_misses[:n_tracks]
 
         # Compute embedding distances if needed
+        # Changed from all() to any() - allows partial embeddings
         scaled_embedding_distances = np.zeros((n_dets, n_tracks), dtype=np.float32)
-        do_embeddings = self.do_embeddings and all(
-            hasattr(d, 'embedding') and d.embedding is not None for d in detections
-        )
+        has_embedding_mask = np.array([
+            hasattr(d, 'embedding') and d.embedding is not None
+            for d in detections
+        ], dtype=bool)
+        any_embeddings = self.do_embeddings and np.any(has_embedding_mask)
 
-        if do_embeddings:
+        if any_embeddings:
             scaled_embedding_distances = self._compute_embedding_distances(
-                detections, tracks
+                detections, tracks, has_embedding_mask, det_positions, track_positions
             )
+
+        # do_embeddings flag for cost matrix - only True if we computed embeddings
+        do_embeddings = any_embeddings
 
         # Get configurable parameters with defaults
         miss_threshold = getattr(self.config, 'prediction_miss_threshold', 3)
@@ -540,25 +570,28 @@ class SwarmSortTracker:
             # Extract track velocities for covariance estimation
             track_velocities = np.array([t.velocity for t in tracks], dtype=np.float32)
 
-            # Get covariance estimation parameters
-            base_variance = getattr(self.config, 'base_position_variance', 5.0)
+            # Get covariance estimation parameters (fallbacks match config defaults)
+            base_variance = getattr(self.config, 'base_position_variance', 15.0)
             velocity_scale = getattr(self.config, 'velocity_variance_scale', 2.0)
+            velocity_isotropic_threshold = getattr(self.config, 'velocity_isotropic_threshold', 0.1)
             cov_inflation_rate = getattr(self.config, 'time_covariance_inflation', 0.1)
 
             # Estimate base covariances from velocity (miss-based inflation applied in cost function)
             track_covariances = estimate_track_covariances(
-                track_velocities, base_variance, velocity_scale
+                track_velocities, base_variance, velocity_scale, velocity_isotropic_threshold
             )
 
-            # Get probabilistic-specific config parameters
+            # Get probabilistic-specific config parameters (fallbacks match config defaults)
             gating_multiplier = getattr(self.config, 'probabilistic_gating_multiplier', 1.5)
-            mahal_normalization = getattr(self.config, 'mahalanobis_normalization', 20.0)
+            mahal_normalization = getattr(self.config, 'mahalanobis_normalization', 5.0)
+            singular_cov_threshold = getattr(self.config, 'singular_covariance_threshold', 1e-6)
 
             return compute_probabilistic_cost_matrix_vectorized(
                 det_positions, track_positions, track_last_positions,
                 track_misses, track_covariances, scaled_embedding_distances,
                 self.embedding_weight, self.max_distance, do_embeddings,
-                miss_threshold, gating_multiplier, mahal_normalization, cov_inflation_rate
+                miss_threshold, gating_multiplier, mahal_normalization, cov_inflation_rate,
+                self.embedding_threshold_adjustment, singular_cov_threshold
             )
         else:
             # Select cost function based on parallel mode setting
@@ -570,24 +603,62 @@ class SwarmSortTracker:
                 det_positions, track_positions, track_last_positions,
                 track_misses, scaled_embedding_distances,
                 self.embedding_weight, self.max_distance, do_embeddings,
-                miss_threshold
+                miss_threshold, self.embedding_threshold_adjustment
             )
 
     def _compute_embedding_distances(
         self,
         detections: List[Detection],
-        tracks: List[FastTrackState]
+        tracks: List[FastTrackState],
+        has_embedding_mask: np.ndarray = None,
+        det_positions: np.ndarray = None,
+        track_positions: np.ndarray = None
     ) -> np.ndarray:
-        """Compute embedding distances between detections and tracks."""
+        """Compute embedding distances between detections and tracks.
+
+        For detections without embeddings (has_embedding_mask[i] = False),
+        the embedding distance is set to normalized position distance so that
+        the combined cost equals position-only cost:
+            cost = (1-w)*pos + w*(pos/max)*max = pos
+
+        Args:
+            detections: List of Detection objects
+            tracks: List of FastTrackState objects
+            has_embedding_mask: Boolean mask indicating which detections have embeddings
+            det_positions: Detection positions [N_det, 2] (for fallback computation)
+            track_positions: Track predicted positions [N_track, 2] (for fallback computation)
+
+        Returns:
+            Scaled embedding distance matrix [N_det, N_track]
+        """
         n_dets = len(detections)
         n_tracks = len(tracks)
 
-        # Prepare detection embeddings - VECTORIZED
-        # First collect all embeddings into array
-        det_embeddings = np.array(
-            [np.asarray(det.embedding, dtype=np.float32) for det in detections],
-            dtype=np.float32
-        )
+        # Handle backward compatibility - if mask not provided, assume all have embeddings
+        if has_embedding_mask is None:
+            has_embedding_mask = np.ones(n_dets, dtype=bool)
+
+        # Get indices of detections with embeddings
+        dets_with_emb = np.where(has_embedding_mask)[0]
+        dets_without_emb = np.where(~has_embedding_mask)[0]
+
+        # Log if we have partial embeddings
+        if len(dets_without_emb) > 0 and len(dets_with_emb) > 0:
+            logger.debug(
+                f"Partial embeddings: {len(dets_with_emb)}/{n_dets} detections have embeddings"
+            )
+
+        # Get embedding dimension from first detection with embedding, or config default
+        emb_dim = getattr(self.config, 'default_embedding_dimension', 128)
+        if len(dets_with_emb) > 0:
+            first_emb = detections[dets_with_emb[0]].embedding
+            if first_emb is not None:
+                emb_dim = len(first_emb)
+
+        # Prepare detection embeddings - only for those that have them
+        det_embeddings = np.zeros((n_dets, emb_dim), dtype=np.float32)
+        for i in dets_with_emb:
+            det_embeddings[i] = np.asarray(detections[i].embedding, dtype=np.float32)[:emb_dim]
 
         # Compute all norms at once (vectorized)
         norms = np.linalg.norm(det_embeddings, axis=1, keepdims=True)
@@ -597,11 +668,6 @@ class SwarmSortTracker:
         needs_norm = (norms > 1e-8) & (np.abs(norms - 1.0) > 0.01)
         safe_norms = np.where(norms > 1e-8, norms, 1.0)  # Avoid div by zero
         det_embeddings = np.where(needs_norm, det_embeddings / safe_norms, det_embeddings)
-
-        # Detect embedding dimension from detection embeddings or use config default
-        emb_dim = det_embeddings.shape[1] if det_embeddings.size > 0 else getattr(
-            self.config, 'default_embedding_dimension', 128
-        )
 
         # Prepare track embeddings using vectorized operations
         # OPTIMIZATION: Avoid np.vstack per track - directly copy embeddings
@@ -657,7 +723,18 @@ class SwarmSortTracker:
             distances_flat = distances.flatten()
             scaled_flat = self.embedding_scaler.scale_distances(distances_flat)
             self.embedding_scaler.update_statistics(distances_flat)
-            return scaled_flat.reshape(distances.shape)
+            distances = scaled_flat.reshape(distances.shape)
+
+        # For detections without embeddings, set embedding distance = pos_dist / max_distance
+        # This makes the combined cost equal position distance:
+        # cost = (1-w)*pos + w*(pos/max)*max = (1-w)*pos + w*pos = pos
+        if len(dets_without_emb) > 0 and det_positions is not None and track_positions is not None:
+            for i in dets_without_emb:
+                for j in range(n_tracks):
+                    # Compute position distance
+                    pos_dist = np.linalg.norm(det_positions[i] - track_positions[j])
+                    # Normalize to [0, 1] range (same as scaled embedding distances)
+                    distances[i, j] = min(pos_dist / self.max_distance, 1.0)
 
         return distances
 
@@ -990,7 +1067,8 @@ class SwarmSortTracker:
         reid_cost_matrix = compute_cost_matrix_vectorized(
             det_positions, track_positions, track_last_positions,
             track_misses, scaled_embedding_distances,
-            reid_embedding_weight, self.reid_max_distance, do_embeddings=True
+            reid_embedding_weight, self.reid_max_distance, do_embeddings=True,
+            miss_threshold=3, embedding_threshold_adjustment=self.embedding_threshold_adjustment
         )
 
         # --- 2. Perform Assignment ---
@@ -1066,7 +1144,11 @@ class SwarmSortTracker:
             self.timings.clear()
 
     def reset(self):
-        """Reset the tracker to initial state."""
+        """Reset the tracker to initial state.
+
+        This clears all tracks, pending detections, and resets the embedding
+        scaler statistics. Use when starting a new video or scene.
+        """
         self._tracks.clear()
         self._pending_detections.clear()
         self._next_id = 1
@@ -1081,6 +1163,10 @@ class SwarmSortTracker:
         self._reusable_track_misses = None
         self._max_dets_seen = 0
         self._max_tracks_seen = 0
+
+        # Reset embedding scaler statistics
+        if self.embedding_scaler:
+            self.embedding_scaler.reset()
 
         gc.collect()
 

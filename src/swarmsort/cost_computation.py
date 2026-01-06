@@ -39,9 +39,10 @@ DEFAULT_PREDICTION_MISS_THRESHOLD: int = 3
 """Number of misses before using last position instead of prediction.
 Tracks with >= this many misses use last known position for matching."""
 
-DEFAULT_MAHALANOBIS_NORMALIZATION: float = 20.0
+DEFAULT_MAHALANOBIS_NORMALIZATION: float = 5.0
 """Normalization factor for Mahalanobis distance.
-Scales Mahalanobis to be comparable with max_distance."""
+Scales Mahalanobis to be comparable with max_distance.
+NOTE: Must match config.py default (5.0)."""
 
 DEFAULT_PROBABILISTIC_GATING_MULTIPLIER: float = 1.5
 """Multiplier for max_distance in probabilistic gating.
@@ -51,11 +52,16 @@ DEFAULT_TIME_COVARIANCE_INFLATION: float = 0.1
 """Rate at which covariance inflates per missed frame.
 Covariance *= (1 + this * misses)."""
 
-DEFAULT_BASE_POSITION_VARIANCE: float = 5.0
-"""Base position variance for covariance estimation."""
+DEFAULT_BASE_POSITION_VARIANCE: float = 15.0
+"""Base position variance for covariance estimation.
+NOTE: Must match config.py default (15.0)."""
 
 DEFAULT_VELOCITY_VARIANCE_SCALE: float = 2.0
 """Scale factor for velocity contribution to covariance."""
+
+DEFAULT_VELOCITY_ISOTROPIC_THRESHOLD: float = 0.1
+"""Velocity threshold below which covariance is isotropic (circular).
+NOTE: Must match config.py default (0.1)."""
 
 
 # ============================================================================
@@ -65,8 +71,9 @@ DEFAULT_VELOCITY_VARIANCE_SCALE: float = 2.0
 @nb.njit(fastmath=True, cache=True)
 def estimate_track_covariances(
     track_velocities: np.ndarray,
-    base_variance: float = 5.0,
-    velocity_scale: float = 2.0
+    base_variance: float = 15.0,
+    velocity_scale: float = 2.0,
+    velocity_isotropic_threshold: float = 0.1
 ) -> np.ndarray:
     """
     Estimate base track covariance matrices from velocity.
@@ -81,8 +88,9 @@ def estimate_track_covariances(
 
     Args:
         track_velocities: Track velocities [N_track, 2] as [vx, vy]
-        base_variance: Base position variance (default: 5.0)
+        base_variance: Base position variance (default: 15.0)
         velocity_scale: Scale for velocity contribution (default: 2.0)
+        velocity_isotropic_threshold: Velocity below which covariance is isotropic (default: 0.1)
 
     Returns:
         Covariance matrices [N_track, 2, 2]
@@ -97,7 +105,7 @@ def estimate_track_covariances(
         # Velocity magnitude
         vel_magnitude = np.sqrt(vx * vx + vy * vy)
 
-        if vel_magnitude < 0.1:
+        if vel_magnitude < velocity_isotropic_threshold:
             # Low velocity: use isotropic covariance
             covariances[i, 0, 0] = base_variance
             covariances[i, 1, 1] = base_variance
@@ -327,7 +335,8 @@ def compute_cost_matrix_parallel(
     embedding_weight: float,
     max_distance: float,
     do_embeddings: bool,
-    miss_threshold: int = 3
+    miss_threshold: int = 3,
+    embedding_threshold_adjustment: float = 1.0
 ) -> np.ndarray:
     """
     Parallel version of cost matrix computation for maximum performance.
@@ -343,6 +352,9 @@ def compute_cost_matrix_parallel(
     cost_matrix = np.full((n_dets, n_tracks), np.inf, dtype=np.float32)
     max_distance_sq = max_distance * max_distance
 
+    # Effective max distance for assignment gating (accounts for embedding contribution)
+    effective_max = max_distance * (1.0 + embedding_weight * embedding_threshold_adjustment) if do_embeddings else max_distance
+
     # Parallel over detections (independent computations)
     for i in nb.prange(n_dets):
         for j in range(n_tracks):
@@ -356,17 +368,21 @@ def compute_cost_matrix_parallel(
 
             pos_distance_sq = min(dist_sq_pred, dist_sq_last)
 
+            # Position gating: skip if position alone exceeds max_distance
             if pos_distance_sq > max_distance_sq:
                 continue
 
             pos_distance = np.sqrt(pos_distance_sq)
 
             if do_embeddings:
+                # Additive cost: position is primary, embedding adds penalty
+                # C_i,j = pos_distance + w_e × emb_distance × max_distance
                 emb_dist = scaled_embedding_distances[i, j]
-                cost_matrix[i, j] = (
-                    (1.0 - embedding_weight) * pos_distance +
-                    embedding_weight * emb_dist * max_distance
-                )
+                cost = pos_distance + embedding_weight * emb_dist * max_distance
+
+                # Assignment gating: only accept if total cost within effective max
+                if cost <= effective_max:
+                    cost_matrix[i, j] = cost
             else:
                 cost_matrix[i, j] = pos_distance
 
@@ -383,26 +399,34 @@ def compute_cost_matrix_vectorized(
     embedding_weight: float,
     max_distance: float,
     do_embeddings: bool,
-    miss_threshold: int = 3
+    miss_threshold: int = 3,
+    embedding_threshold_adjustment: float = 1.0
 ) -> np.ndarray:
     """
-    Compute optimized cost matrix with position and optional embedding costs.
+    Compute optimized cost matrix with position-centric additive embedding costs.
 
     ALWAYS uses MINIMUM of predicted and last position for matching.
     This handles all cases:
     1. Object moving predictably -> predicted position is closer
     2. Object stopped or changed direction -> last position is closer
 
+    Cost Formula (Position-Centric Additive):
+        C_i,j = pos_distance + w_e × emb_distance × max_distance
+
+    Position is always the primary cost. Embedding adds an additional penalty
+    that increases the matching cost but never replaces position.
+
     Args:
         det_positions: Detection positions [N_det, 2]
         track_predicted_positions: Predicted track positions [N_track, 2]
         track_last_positions: Last observed track positions [N_track, 2]
         track_misses: Number of misses for each track (unused, kept for API compatibility)
-        scaled_embedding_distances: Pre-computed embedding distances
-        embedding_weight: Weight for embedding term (0-1)
-        max_distance: Maximum allowed distance
+        scaled_embedding_distances: Pre-computed embedding distances [0, 1]
+        embedding_weight: Weight for embedding penalty term (0+)
+        max_distance: Maximum position distance for gating
         do_embeddings: Whether to include embedding costs
         miss_threshold: Unused (kept for API compatibility)
+        embedding_threshold_adjustment: Threshold adjustment factor for gating
 
     Returns:
         Cost matrix [N_det, N_track]
@@ -414,6 +438,9 @@ def compute_cost_matrix_vectorized(
 
     # Precompute squared max_distance for gating optimization
     max_distance_sq = max_distance * max_distance
+
+    # Effective max distance for assignment gating (accounts for embedding contribution)
+    effective_max = max_distance * (1.0 + embedding_weight * embedding_threshold_adjustment) if do_embeddings else max_distance
 
     for i in range(n_dets):
         for j in range(n_tracks):
@@ -433,7 +460,7 @@ def compute_cost_matrix_vectorized(
             # Take the minimum distance
             pos_distance_sq = min(dist_sq_pred, dist_sq_last)
 
-            # Gating: skip if beyond max_distance
+            # Position gating: skip if position alone exceeds max_distance
             if pos_distance_sq > max_distance_sq:
                 continue
 
@@ -441,17 +468,18 @@ def compute_cost_matrix_vectorized(
             pos_distance = np.sqrt(pos_distance_sq)
 
             if do_embeddings:
-                # Combined cost matching paper formula:
-                # C_i,j = min(d_k, d_l) × (1 - w_e) + w_e × d_s × d_max
+                # Position-centric additive cost formula:
+                # C_i,j = pos_distance + w_e × emb_distance × max_distance
                 #
-                # Position gating already done above (pos_distance <= max_distance)
-                # The embedding term is scaled by d_max to be in the same range as position
-                # This ensures w_e intuitively controls the balance between motion and appearance
+                # Position is always the primary cost component.
+                # Embedding adds a penalty scaled by max_distance to be comparable.
+                # This ensures position is never ignored, and embedding only increases cost.
                 emb_dist = scaled_embedding_distances[i, j]
-                cost_matrix[i, j] = (
-                    (1.0 - embedding_weight) * pos_distance +
-                    embedding_weight * emb_dist * max_distance
-                )
+                cost = pos_distance + embedding_weight * emb_dist * max_distance
+
+                # Assignment gating: only accept if total cost within effective max
+                if cost <= effective_max:
+                    cost_matrix[i, j] = cost
             else:
                 cost_matrix[i, j] = pos_distance
 
@@ -471,16 +499,21 @@ def compute_probabilistic_cost_matrix_vectorized(
     do_embeddings: bool,
     miss_threshold: int = 3,
     gating_multiplier: float = 1.5,
-    mahal_normalization: float = 20.0,
-    cov_inflation_rate: float = 0.1
+    mahal_normalization: float = 5.0,
+    cov_inflation_rate: float = 0.1,
+    embedding_threshold_adjustment: float = 1.0,
+    singular_cov_threshold: float = 1e-6
 ) -> np.ndarray:
     """
-    Compute probabilistic cost matrix using Mahalanobis distance.
+    Compute probabilistic cost matrix using Mahalanobis distance with additive embedding cost.
 
     ALWAYS uses MINIMUM of predicted and last position for matching.
     This handles all cases:
     1. Object moving predictably -> predicted position is closer
     2. Object stopped or changed direction -> last position is closer
+
+    Cost Formula (Position-Centric Additive):
+        C_i,j = normalized_mahal + w_e × emb_distance × max_distance
 
     Args:
         det_positions: Detection positions [N_det, 2]
@@ -488,14 +521,16 @@ def compute_probabilistic_cost_matrix_vectorized(
         track_last_positions: Last observed track positions [N_track, 2]
         track_misses: Number of misses for each track
         track_covariances: Track covariance matrices [N_track, 2, 2]
-        scaled_embedding_distances: Pre-computed embedding distances
-        embedding_weight: Weight for embedding term
+        scaled_embedding_distances: Pre-computed embedding distances [0, 1]
+        embedding_weight: Weight for embedding penalty term
         max_distance: Maximum allowed distance
         do_embeddings: Whether to include embedding costs
         miss_threshold: Unused (kept for API compatibility)
         gating_multiplier: Multiplier for max_distance in Euclidean pre-filter
-        mahal_normalization: Normalization factor for Mahalanobis distance
+        mahal_normalization: Normalization factor for Mahalanobis distance (default: 5.0)
         cov_inflation_rate: Rate of covariance inflation per missed frame
+        embedding_threshold_adjustment: Threshold adjustment factor for gating
+        singular_cov_threshold: Threshold for detecting singular covariance (default: 1e-6)
 
     Returns:
         Cost matrix [N_det, N_track]
@@ -509,6 +544,9 @@ def compute_probabilistic_cost_matrix_vectorized(
     gating_threshold = max_distance * gating_multiplier
     gating_threshold_sq = gating_threshold * gating_threshold
 
+    # Effective max distance for assignment gating (accounts for embedding contribution)
+    effective_max = max_distance * (1.0 + embedding_weight * embedding_threshold_adjustment) if do_embeddings else max_distance
+
     for i in range(n_dets):
         for j in range(n_tracks):
             # Get covariance for this track
@@ -520,7 +558,7 @@ def compute_probabilistic_cost_matrix_vectorized(
 
             # Compute inverse covariance
             det_cov = inflated_cov[0, 0] * inflated_cov[1, 1] - inflated_cov[0, 1] * inflated_cov[1, 0]
-            use_euclidean = abs(det_cov) < SINGULAR_COV_THRESHOLD
+            use_euclidean = abs(det_cov) < singular_cov_threshold
 
             if not use_euclidean:
                 cov_inv = np.zeros((2, 2), dtype=np.float32)
@@ -559,16 +597,19 @@ def compute_probabilistic_cost_matrix_vectorized(
             # Normalize Mahalanobis to be comparable with max_distance
             normalized_mahal = mahal_dist * mahal_normalization
 
+            # Position gating: skip if normalized Mahalanobis exceeds max_distance
             if normalized_mahal > max_distance:
                 continue
 
             if do_embeddings:
+                # Position-centric additive cost formula:
+                # C_i,j = normalized_mahal + w_e × emb_distance × max_distance
                 emb_dist = scaled_embedding_distances[i, j]
-                normalized_dist = normalized_mahal / max_distance
-                cost_matrix[i, j] = (
-                    (1.0 - embedding_weight) * normalized_dist +
-                    embedding_weight * emb_dist
-                ) * max_distance
+                cost = normalized_mahal + embedding_weight * emb_dist * max_distance
+
+                # Assignment gating: only accept if total cost within effective max
+                if cost <= effective_max:
+                    cost_matrix[i, j] = cost
             else:
                 cost_matrix[i, j] = normalized_mahal
 
@@ -580,12 +621,50 @@ def compute_probabilistic_cost_matrix_vectorized(
 # ============================================================================
 
 @nb.njit(fastmath=True, cache=True)
+def compute_neighbor_counts_vectorized(
+    positions: np.ndarray,
+    radius: float
+) -> np.ndarray:
+    """
+    Count the number of neighbors within radius for each track.
+
+    Used to implement embedding_freeze_density - tracks freeze when they have
+    too many neighbors, indicating a crowded/collision scenario.
+
+    Args:
+        positions: Track positions [N_tracks, 2]
+        radius: Distance threshold for counting neighbors
+
+    Returns:
+        Integer array with neighbor count for each track (excludes self)
+    """
+    n_tracks = positions.shape[0]
+    neighbor_counts = np.zeros(n_tracks, dtype=np.int32)
+    radius_sq = radius * radius
+
+    for i in range(n_tracks):
+        for j in range(i + 1, n_tracks):
+            dx = positions[i, 0] - positions[j, 0]
+            dy = positions[i, 1] - positions[j, 1]
+            distance_sq = dx * dx + dy * dy
+
+            if distance_sq < radius_sq:
+                neighbor_counts[i] += 1
+                neighbor_counts[j] += 1
+
+    return neighbor_counts
+
+
+@nb.njit(fastmath=True, cache=True)
 def compute_freeze_flags_vectorized(
     positions: np.ndarray,
     safety_distance: float
 ) -> np.ndarray:
     """
     Compute freeze flags for tracks based on proximity (collision detection).
+
+    DEPRECATED: Use compute_neighbor_counts_vectorized() with embedding_freeze_density
+    for proper density-based freezing with hysteresis.
 
     Args:
         positions: Track positions [N_tracks, 2]
