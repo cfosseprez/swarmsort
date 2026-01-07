@@ -148,6 +148,7 @@ class SwarmSortTracker:
 
         # Kalman filter type
         self.kalman_type = self.config.kalman_type
+        self.kalman_velocity_damping = self.config.kalman_velocity_damping
 
         # ReID parameters
         self.reid_enabled = self.config.reid_enabled
@@ -172,6 +173,10 @@ class SwarmSortTracker:
 
         # Cost computation
         self.use_probabilistic_costs = self.config.use_probabilistic_costs
+
+        # Uncertainty penalty (0 = disabled, no overhead)
+        self.uncertainty_weight = getattr(self.config, 'uncertainty_weight', 0.0)
+        self.uncertainty_window = getattr(self.config, 'uncertainty_window', 10)
 
         # Performance options
         # parallel_cost_matrix: Use parallel cost matrix computation for better performance
@@ -200,7 +205,15 @@ class SwarmSortTracker:
         self._max_tracks_seen = 0
 
     def _initialize_embeddings(self):
-        """Initialize embedding-related components."""
+        """Initialize embedding-related components.
+
+        Embedding modes:
+        1. Built-in extractor: Set embedding_function to 'cupytexture', etc.
+           SwarmSort will compute embeddings from image crops.
+        2. External embeddings: Set embedding_function=None or 'external'.
+           You must provide embeddings in Detection.embedding field.
+        3. No embeddings: Set do_embeddings=False.
+        """
         if self.do_embeddings:
             # Determine which embedding type to use
             # Priority: embedding_type_override > config.embedding_function > config.embedding_extractor
@@ -210,20 +223,35 @@ class SwarmSortTracker:
                 getattr(self.config, 'embedding_extractor', None)
             )
 
-            # Initialize embedding extractor if specified
-            if embedding_type:
+            # Check if user wants external embeddings (provided in Detection objects)
+            if embedding_type is None or embedding_type.lower() == 'external':
+                logger.info("Using external embeddings mode - embeddings must be provided in Detection.embedding")
+                self.embedding_extractor = None
+            else:
+                # Try to initialize built-in embedding extractor
                 try:
                     from .embeddings import get_embedding_extractor
                     self.embedding_extractor = get_embedding_extractor(
                         embedding_type,
                         use_gpu=self.use_gpu
                     )
-                    logger.debug(f"Using embedding extractor: {embedding_type}")
+                    logger.info(f"Using built-in embedding extractor: {embedding_type}")
                 except Exception as e:
-                    logger.warning(f"Failed to create embedding extractor '{embedding_type}': {e}")
-                    self.embedding_extractor = None
-            else:
-                self.embedding_extractor = None
+                    # Check if this looks like an external embedding type (not a built-in)
+                    builtin_types = ['cupytexture', 'cupytexture_color', 'cupytexture_mega', 'cupyshape']
+                    if embedding_type.lower() not in builtin_types:
+                        logger.warning(
+                            f"Embedding '{embedding_type}' is not a built-in type. "
+                            f"Available built-in: {builtin_types}. "
+                            f"Assuming external embeddings will be provided in Detection.embedding."
+                        )
+                        self.embedding_extractor = None
+                    else:
+                        # Built-in type failed to load - this is an error
+                        raise RuntimeError(
+                            f"Failed to create built-in embedding extractor '{embedding_type}': {e}. "
+                            f"If providing external embeddings, set embedding_function='external' or None."
+                        )
 
             # Initialize embedding scaler
             self.embedding_scaler = EmbeddingDistanceScaler(
@@ -565,6 +593,15 @@ class SwarmSortTracker:
         # Get configurable parameters with defaults
         miss_threshold = getattr(self.config, 'prediction_miss_threshold', 3)
 
+        # Compute uncertainty ratios only if uncertainty_weight > 0 (no overhead when disabled)
+        if self.uncertainty_weight > 0.0:
+            track_uncertainty_ratios = np.array(
+                [t.get_recent_miss_ratio() for t in tracks], dtype=np.float32
+            )
+        else:
+            # Pass empty array when disabled (Numba requires consistent types)
+            track_uncertainty_ratios = np.empty(0, dtype=np.float32)
+
         # Use appropriate cost function
         if self.use_probabilistic_costs:
             # Extract track velocities for covariance estimation
@@ -591,7 +628,8 @@ class SwarmSortTracker:
                 track_misses, track_covariances, scaled_embedding_distances,
                 self.embedding_weight, self.max_distance, do_embeddings,
                 miss_threshold, gating_multiplier, mahal_normalization, cov_inflation_rate,
-                self.embedding_threshold_adjustment, singular_cov_threshold
+                self.embedding_threshold_adjustment, singular_cov_threshold,
+                track_uncertainty_ratios, self.uncertainty_weight
             )
         else:
             # Select cost function based on parallel mode setting
@@ -603,7 +641,8 @@ class SwarmSortTracker:
                 det_positions, track_positions, track_last_positions,
                 track_misses, scaled_embedding_distances,
                 self.embedding_weight, self.max_distance, do_embeddings,
-                miss_threshold, self.embedding_threshold_adjustment
+                miss_threshold, self.embedding_threshold_adjustment,
+                track_uncertainty_ratios, self.uncertainty_weight
             )
 
     def _compute_embedding_distances(
@@ -702,7 +741,8 @@ class SwarmSortTracker:
             "last": 0,
             "average": 1,
             "weighted_average": 2,
-            "best_match": 3
+            "best_match": 3,
+            "median": 4
         }
         method = method_map.get(self.embedding_matching_method, 1)
 
@@ -922,7 +962,8 @@ class SwarmSortTracker:
                 track = FastTrackState(
                     id=self._next_id,
                     position=pending.average_position,
-                    kalman_type=self.kalman_type
+                    kalman_type=self.kalman_type,
+                    velocity_damping=self.kalman_velocity_damping
                 )
 
                 # Set embedding parameters
@@ -932,6 +973,10 @@ class SwarmSortTracker:
                     self.embedding_matching_method,
                     score_history_len
                 )
+
+                # Set uncertainty window if enabled
+                if self.uncertainty_weight > 0.0:
+                    track.set_uncertainty_window(self.uncertainty_window)
 
                 # Add initial embedding if available
                 if pending.embedding is not None:
@@ -970,6 +1015,11 @@ class SwarmSortTracker:
     ):
         """Attempt to re-identify lost tracks using embeddings.
 
+        OPTIMIZED VERSION:
+        - Uses representative embeddings (single per track) instead of full history
+        - Uses greedy assignment O(n²) instead of Hungarian O(n³)
+        - Uses matrix multiplication for fast cosine similarity
+
         IMPORTANT: ReID only matches detections that are NOT close to any active track.
         This prevents "stealing" detections that likely belong to active tracks but
         temporarily failed to match due to noise or occlusion.
@@ -999,9 +1049,6 @@ class SwarmSortTracker:
             return
 
         # --- CRITICAL: Filter out detections close to ACTIVE tracks ---
-        # Active tracks are those that were recently matched (misses < reid_min_frames_lost)
-        # These tracks might have temporarily failed to match due to noise/occlusion
-        # We should NOT allow ReID to "steal" their detections
         active_tracks = [
             track for track in self._tracks.values()
             if track.misses < self.reid_min_frames_lost
@@ -1011,26 +1058,17 @@ class SwarmSortTracker:
             active_positions = np.array(
                 [t.predicted_position for t in active_tracks], dtype=np.float32
             )
-
-            # OPTIMIZATION: Vectorized filtering - compute all pairwise distances at once
-            # Extract all detection positions as array
-            det_positions = np.array(
+            det_positions_filter = np.array(
                 [det.position for _, det in unmatched_dets_with_emb], dtype=np.float32
             )
 
-            # Compute all pairwise distances: [n_dets, n_active_tracks]
-            # Using broadcasting: det_positions[:, None, :] - active_positions[None, :, :]
+            # Vectorized distance computation
             all_distances = np.linalg.norm(
-                det_positions[:, None, :] - active_positions[None, :, :], axis=2
+                det_positions_filter[:, None, :] - active_positions[None, :, :], axis=2
             )
-
-            # Find minimum distance to any active track for each detection
             min_distances = np.min(all_distances, axis=1)
-
-            # Create mask: True for detections far enough from all active tracks
             safe_mask = min_distances > self.max_distance
 
-            # Apply filter using mask
             unmatched_dets_with_emb = [
                 item for item, is_safe in zip(unmatched_dets_with_emb, safe_mask) if is_safe
             ]
@@ -1038,29 +1076,52 @@ class SwarmSortTracker:
             if not unmatched_dets_with_emb:
                 return
 
-        # Prepare data for cost matrix computation
-        lost_tracks = [track for _, track in lost_tracks_with_ids]
-        unmatched_detections = [det for _, det in unmatched_dets_with_emb]
-
-        # --- 1. Compute ReID Cost Matrix ---
-        # This reuses the main cost computation logic but with ReID parameters.
-        n_dets = len(unmatched_detections)
-        n_tracks = len(lost_tracks)
+        n_dets = len(unmatched_dets_with_emb)
+        n_tracks = len(lost_tracks_with_ids)
 
         if n_dets == 0 or n_tracks == 0:
             return
 
-        det_positions = np.array([d.position for d in unmatched_detections], dtype=np.float32)
-        track_positions = np.array([t.predicted_position for t in lost_tracks], dtype=np.float32)
-        track_last_positions = np.array([t.last_detection_pos for t in lost_tracks], dtype=np.float32)
-        track_misses = np.array([t.misses for t in lost_tracks], dtype=np.int32)
+        # --- OPTIMIZATION: Use representative embeddings (single per track) ---
+        # Extract detection embeddings
+        det_embeddings = np.array([
+            det.embedding for _, det in unmatched_dets_with_emb
+        ], dtype=np.float32)
 
-        # Compute embedding distances between unmatched dets and lost tracks
-        scaled_embedding_distances = self._compute_embedding_distances(
-            unmatched_detections, lost_tracks
-        )
+        # Normalize detection embeddings
+        det_norms = np.linalg.norm(det_embeddings, axis=1, keepdims=True)
+        det_norms = np.where(det_norms > 1e-8, det_norms, 1.0)
+        det_embeddings = det_embeddings / det_norms
 
-        # Use a higher embedding weight for ReID to prioritize appearance
+        # Get representative embedding for each track (most recent)
+        track_embeddings = np.array([
+            track.embedding_history[-1] for _, track in lost_tracks_with_ids
+        ], dtype=np.float32)
+
+        # Normalize track embeddings
+        track_norms = np.linalg.norm(track_embeddings, axis=1, keepdims=True)
+        track_norms = np.where(track_norms > 1e-8, track_norms, 1.0)
+        track_embeddings = track_embeddings / track_norms
+
+        # --- OPTIMIZATION: Matrix multiplication for cosine similarity ---
+        # cosine_similarity = det @ track.T, then distance = (1 - sim) / 2
+        cos_similarities = det_embeddings @ track_embeddings.T
+        raw_embedding_distances = (1.0 - cos_similarities) / 2.0
+
+        # Scale embedding distances
+        if self.embedding_scaler:
+            scaled_flat = self.embedding_scaler.scale_distances(raw_embedding_distances.flatten())
+            scaled_embedding_distances = scaled_flat.reshape(n_dets, n_tracks)
+        else:
+            scaled_embedding_distances = raw_embedding_distances
+
+        # Get position data
+        det_positions = np.array([det.position for _, det in unmatched_dets_with_emb], dtype=np.float32)
+        track_positions = np.array([t.predicted_position for _, t in lost_tracks_with_ids], dtype=np.float32)
+        track_last_positions = np.array([t.last_detection_pos for _, t in lost_tracks_with_ids], dtype=np.float32)
+        track_misses = np.array([t.misses for _, t in lost_tracks_with_ids], dtype=np.int32)
+
+        # Compute ReID cost matrix
         reid_boost = getattr(self.config, 'reid_embedding_weight_boost', 1.5)
         reid_embedding_weight = min(self.embedding_weight * reid_boost, 0.95)
 
@@ -1071,16 +1132,14 @@ class SwarmSortTracker:
             miss_threshold=3, embedding_threshold_adjustment=self.embedding_threshold_adjustment
         )
 
-        # --- 2. Perform Assignment ---
-        # Use the same assignment strategy as the main tracker for consistency.
-        # The cost matrix is already gated by reid_max_distance.
-        reid_matches, _, _ = hungarian_assignment_wrapper(
+        # --- OPTIMIZATION: Use greedy assignment O(n²) instead of Hungarian O(n³) ---
+        # ReID typically has few candidates, greedy is sufficient and much faster
+        reid_matches, _, _ = numba_greedy_assignment(
             reid_cost_matrix, self.reid_max_distance
         )
 
         # Apply ReID matches
         for det_match_idx, track_match_idx in reid_matches:
-            # Map indices back to original detection and track IDs
             det_idx, det = unmatched_dets_with_emb[det_match_idx]
             track_id, track = lost_tracks_with_ids[track_match_idx]
 
@@ -1137,11 +1196,14 @@ class SwarmSortTracker:
         return results
 
     def _log_timings(self):
-        """Log timing information for debugging."""
-        if self._frame_count % 10 == 0:
-            formatted = {k: f"{v*1000:.2f} ms" for k, v in self.timings.items()}
-            logger.info(f"[Frame {self._frame_count}] Timings: {formatted}")
-            self.timings.clear()
+        """Log timing information for debugging.
+
+        Prints to stdout every frame when debug_timings is enabled.
+        Uses print() instead of logger to ensure visibility regardless of logging config.
+        """
+        formatted = {k: f"{v*1000:.2f} ms" for k, v in self.timings.items()}
+        print(f"[Frame {self._frame_count}] Timings: {formatted}")
+        self.timings.clear()
 
     def reset(self):
         """Reset the tracker to initial state.

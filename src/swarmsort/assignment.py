@@ -47,8 +47,9 @@ def numba_greedy_assignment(
     n_dets, n_tracks = cost_matrix.shape
 
     # Create a working copy of the cost matrix
+    # Note: Cost matrix already has infinity for entries beyond the effective threshold
+    # (which accounts for embedding contribution). No need to re-filter by max_distance.
     working_matrix = cost_matrix.copy()
-    working_matrix[working_matrix > max_distance] = np.inf
 
     # Track used detections and tracks
     used_dets = np.zeros(n_dets, dtype=bool)
@@ -175,8 +176,11 @@ def hungarian_assignment_wrapper(
         return [], list(range(n_dets)), list(range(n_tracks))
 
     # Prepare cost matrix for Hungarian algorithm
+    # Replace infinity values with a large finite value (required for scipy's linear_sum_assignment)
+    # Note: Cost matrix already has infinity for entries beyond effective threshold.
     working_matrix = cost_matrix.copy()
-    working_matrix[working_matrix > max_distance] = max_distance * 2
+    large_value = np.max(working_matrix[np.isfinite(working_matrix)]) * 10 if np.any(np.isfinite(working_matrix)) else 1e10
+    working_matrix[~np.isfinite(working_matrix)] = large_value
 
     try:
         det_indices, track_indices = linear_sum_assignment(working_matrix)
@@ -185,9 +189,11 @@ def hungarian_assignment_wrapper(
         return [], list(range(n_dets)), list(range(n_tracks))
 
     # Filter valid matches
+    # Note: Cost matrix already has infinity for entries beyond the effective threshold
+    # (which accounts for embedding contribution). We just need to check for finite costs.
     matches = []
     for d_idx, t_idx in zip(det_indices, track_indices):
-        if cost_matrix[d_idx, t_idx] <= max_distance:
+        if np.isfinite(cost_matrix[d_idx, t_idx]):
             matches.append((d_idx, t_idx))
 
     # Find unmatched - OPTIMIZED: Use numpy mask instead of set lookup

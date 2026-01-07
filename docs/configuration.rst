@@ -26,11 +26,11 @@ Configuration Overview Table
      - Type
      - Description
    * - **Core Tracking**
-     - 
-     - 
-     - 
+     -
+     -
+     -
    * - max_distance
-     - 150.0
+     - 80.0
      - float
      - Base distance for association (see note above)
    * - detection_conf_threshold
@@ -41,6 +41,10 @@ Configuration Overview Table
      - 30
      - int
      - Frames before track deletion (30 = 1s at 30fps)
+   * - deduplication_distance
+     - 10.0
+     - float
+     - Min distance between detections (NMS-style)
    * - **Motion Modeling**
      - 
      - 
@@ -80,7 +84,39 @@ Configuration Overview Table
    * - embedding_matching_method
      - 'weighted_average'
      - str
-     - 'average', 'weighted_average', or 'best_match'
+     - 'average', 'weighted_average', 'best_match', or 'median'
+   * - embedding_function
+     - 'cupytexture'
+     - str
+     - Feature extractor: 'cupytexture', 'cupytexture_color', 'cupytexture_mega'
+   * - embedding_threshold_adjustment
+     - 1.0
+     - float
+     - Gating threshold expansion factor
+   * - store_embedding_scores
+     - False
+     - bool
+     - Store match scores in TrackedObject
+   * - embedding_score_history_length
+     - 5
+     - int
+     - Number of recent scores to keep per track
+   * - **Embedding Scaling**
+     -
+     -
+     -
+   * - embedding_scaling_method
+     - 'min_robustmax'
+     - str
+     - Distance normalization method
+   * - embedding_scaling_update_rate
+     - 0.05
+     - float
+     - Learning rate for scaling statistics
+   * - embedding_scaling_min_samples
+     - 200
+     - int
+     - Samples before scaling activation
    * - **Collision Handling**
      - 
      - 
@@ -93,6 +129,10 @@ Configuration Overview Table
      - 1
      - int
      - Number of nearby tracks to trigger freeze
+   * - collision_safety_distance
+     - 30.0
+     - float
+     - Distance threshold for collision detection
    * - **Assignment Strategy**
      - 
      - 
@@ -109,6 +149,18 @@ Configuration Overview Table
      - 1.0
      - float
      - Multiplier of max_distance for Hungarian fallback
+   * - sparse_computation_threshold
+     - 300
+     - int
+     - Object count threshold for sparse mode
+   * - use_probabilistic_costs
+     - False
+     - bool
+     - Use Mahalanobis distance for costs
+   * - greedy_confidence_boost
+     - 1.0
+     - float
+     - Confidence boost for greedy matches
    * - **Track Initialization**
      - 
      - 
@@ -125,6 +177,10 @@ Configuration Overview Table
      - 80.0
      - float
      - Distance threshold for pending detections
+   * - init_conf_threshold
+     - 0.0
+     - float
+     - Min confidence to start tracking
    * - **Re-identification**
      - 
      - 
@@ -141,6 +197,58 @@ Configuration Overview Table
      - 0.3
      - float
      - Embedding similarity for ReID
+   * - reid_min_frames_lost
+     - 2
+     - int
+     - Frames lost before ReID attempt
+   * - **Probabilistic Mode**
+     -
+     -
+     -
+   * - base_position_variance
+     - 15.0
+     - float
+     - Base uncertainty in pixels²
+   * - velocity_variance_scale
+     - 2.0
+     - float
+     - Velocity contribution to uncertainty
+   * - velocity_isotropic_threshold
+     - 0.1
+     - float
+     - Threshold for circular covariance
+   * - time_covariance_inflation
+     - 0.1
+     - float
+     - Uncertainty growth per missed frame
+   * - mahalanobis_normalization
+     - 5.0
+     - float
+     - Scale factor for Mahalanobis distance
+   * - probabilistic_gating_multiplier
+     - 1.5
+     - float
+     - Pre-filter threshold expansion
+   * - singular_covariance_threshold
+     - 1e-6
+     - float
+     - Fallback to Euclidean threshold
+   * - **Debug Settings**
+     -
+     -
+     -
+   * - debug_embeddings
+     - False
+     - bool
+     - Print embedding debug info
+   * - plot_embeddings
+     - False
+     - bool
+     - Generate embedding plots (requires matplotlib)
+   * - debug_timings
+     - True
+     - bool
+     - Print per-frame timing info
 
 Parameter Relationships
 -----------------------
@@ -207,8 +315,39 @@ Embedding Features
 **max_embeddings_per_track** : int, default=15
    Maximum number of embeddings stored per track.
 
-**embedding_matching_method** : {'average', 'weighted_average', 'best_match'}, default='weighted_average'
+**embedding_matching_method** : {'average', 'weighted_average', 'best_match', 'median'}, default='weighted_average'
    Method for matching multiple embeddings.
+
+   - 'average': Mean distance to all stored embeddings
+   - 'weighted_average': Recent embeddings weighted more (recommended)
+   - 'best_match': Minimum distance (most similar embedding wins)
+   - 'median': Median distance (robust to outliers)
+
+**embedding_function** : str, default='cupytexture'
+   Feature extractor algorithm for visual embeddings.
+
+   - 'cupytexture': Fast texture-based features (GPU-accelerated)
+   - 'cupytexture_color': Includes color information
+   - 'cupytexture_mega': Most detailed features (slower)
+
+**embedding_threshold_adjustment** : float, default=1.0
+   Expands the gating threshold for embedding-based matching.
+   Effective max distance = max_distance × (1 + embedding_weight × embedding_threshold_adjustment).
+
+**store_embedding_scores** : bool, default=False
+   When True, stores embedding match scores in TrackedObject for visualization/debugging.
+
+Embedding Scaling
+-----------------
+
+**embedding_scaling_method** : str, default='min_robustmax'
+   Method for normalizing embedding distances to [0,1] range.
+
+**embedding_scaling_update_rate** : float, default=0.05
+   Learning rate for updating scaling statistics (0.0 to 1.0).
+
+**embedding_scaling_min_samples** : int, default=200
+   Minimum samples before embedding scaling is activated.
 
 Collision Handling
 ------------------
@@ -218,6 +357,9 @@ Collision Handling
 
 **embedding_freeze_density** : int, default=1
    Number of nearby tracks to trigger embedding freeze.
+
+**collision_safety_distance** : float, default=30.0
+   Distance threshold below which objects are considered in collision.
 
 Assignment Strategy
 -------------------
@@ -231,6 +373,15 @@ Assignment Strategy
 
 **greedy_threshold** : float, default=30.0
    Distance threshold for greedy assignment in hybrid mode.
+
+**sparse_computation_threshold** : int, default=300
+   Object count threshold for switching to sparse computation mode.
+
+**use_probabilistic_costs** : bool, default=False
+   When True, use Mahalanobis distance instead of Euclidean for cost computation.
+
+**greedy_confidence_boost** : float, default=1.0
+   Confidence multiplier for greedy matches in hybrid mode.
 
 Track Initialization
 --------------------
@@ -247,6 +398,9 @@ Track Initialization
 **pending_detection_distance** : float, default=80.0
    Distance threshold for matching pending detections.
 
+**init_conf_threshold** : float, default=0.0
+   Minimum confidence score to start tracking an object (0.0 to 1.0).
+
 Re-identification
 -----------------
 
@@ -258,6 +412,47 @@ Re-identification
 
 **reid_embedding_threshold** : float, default=0.3
    Embedding similarity threshold for re-identification.
+
+**reid_min_frames_lost** : int, default=2
+   Minimum frames a track must be lost before attempting ReID.
+
+Probabilistic Mode
+------------------
+
+Enable probabilistic mode with ``use_probabilistic_costs=True`` for Mahalanobis distance-based matching.
+
+**base_position_variance** : float, default=15.0
+   Base uncertainty in position (pixels²).
+
+**velocity_variance_scale** : float, default=2.0
+   Velocity contribution to uncertainty computation.
+
+**velocity_isotropic_threshold** : float, default=0.1
+   Speed threshold below which covariance becomes circular (isotropic).
+
+**time_covariance_inflation** : float, default=0.1
+   Uncertainty growth rate per missed frame.
+
+**mahalanobis_normalization** : float, default=5.0
+   Scale factor for Mahalanobis distance normalization.
+
+**probabilistic_gating_multiplier** : float, default=1.5
+   Pre-filter threshold expansion for probabilistic mode.
+
+**singular_covariance_threshold** : float, default=1e-6
+   Threshold for detecting singular covariance matrices; falls back to Euclidean.
+
+Debug Settings
+--------------
+
+**debug_embeddings** : bool, default=False
+   Print detailed embedding information for debugging.
+
+**plot_embeddings** : bool, default=False
+   Generate embedding visualization plots (requires matplotlib).
+
+**debug_timings** : bool, default=True
+   Print per-frame timing information for performance analysis.
 
 Configuration Examples
 ----------------------

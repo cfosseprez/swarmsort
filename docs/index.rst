@@ -19,10 +19,10 @@ Quick Start
 
    # Configure tracker for your use case
    config = SwarmSortConfig(
-       max_distance=150.0,              # Maximum association distance
+       max_distance=80.0,               # Maximum association distance
        uncertainty_weight=0.33,         # Enable uncertainty-aware tracking
        assignment_strategy='hybrid',    # Smart assignment strategy
-       do_embeddings=True              # Use visual features
+       do_embeddings=True               # Use visual features
    )
    tracker = SwarmSortTracker(config)
 
@@ -34,7 +34,7 @@ Quick Start
 
    # Get tracked objects with persistent IDs
    tracked_objects = tracker.update(detections)
-   
+
    for obj in tracked_objects:
        print(f"Track {obj.id}: position {obj.position}")
 
@@ -56,6 +56,23 @@ Key Features
 **Production Ready**
    200+ unit tests, cross-platform support, and comprehensive error handling.
 
+How It Works
+------------
+
+SwarmSort uses a position-centric additive cost model for detection-track association:
+
+.. code-block:: text
+
+   cost = position_distance + embedding_weight × embedding_distance × max_distance
+
+**Tracking Pipeline:**
+
+1. **Motion Prediction** - Kalman filter predicts track positions
+2. **Cost Computation** - Calculate association costs (spatial + appearance)
+3. **Assignment** - Match detections to tracks (Hungarian/greedy/hybrid)
+4. **Track Management** - Confirm new tracks, delete lost tracks
+5. **Re-identification** - Recover lost tracks using visual features
+
 Contents
 ========
 
@@ -65,42 +82,13 @@ Contents
 
    installation
    quickstart
+
+.. toctree::
+   :maxdepth: 2
+   :caption: Reference
+
    configuration
-
-.. toctree::
-   :maxdepth: 2
-   :caption: User Guide
-
-   basic_tracking
-   advanced_features
-   performance_tuning
-   troubleshooting
-
-.. toctree::
-   :maxdepth: 2
-   :caption: API Reference
-
-   api/core_tracker
-   api/configuration
-   api/data_structures
-   api/embeddings
-   api/motion_models
-   api/utilities
-
-.. toctree::
-   :maxdepth: 2
-   :caption: Examples
-
-   examples/basic_usage
-   examples/visualization
-   examples/benchmarks
-
-.. toctree::
-   :maxdepth: 1
-   :caption: Development
-
-   contributing
-   changelog
+   api_reference
 
 Indices and Tables
 ==================

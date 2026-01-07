@@ -111,13 +111,16 @@ class FastTrackState:
     # Track type
     kalman_type: str = "simple"
 
+    # Kalman filter tuning
+    velocity_damping: float = 0.95
+
     # Embedding freeze tracking
     embedding_frozen: bool = False
     last_safe_embedding: Optional[np.ndarray] = None
 
     # Embedding history with configurable size
     embedding_history: deque = field(default_factory=lambda: deque(maxlen=5))
-    embedding_method: Literal["average", "best_match", "weighted_average", "last"] = "average"
+    embedding_method: Literal["average", "best_match", "weighted_average", "last", "median"] = "average"
 
     # Embedding match score history (cosine similarity from recent matches)
     embedding_score_history: deque = field(default_factory=lambda: deque(maxlen=5))
@@ -142,6 +145,10 @@ class FastTrackState:
     confidence_score: float = 0.5
 
     lost_frames: int = 0
+
+    # Recent hit/miss history for uncertainty computation
+    # True = hit (matched), False = miss (unmatched)
+    recent_match_history: deque = field(default_factory=lambda: deque(maxlen=10))
 
     def __post_init__(self):
         self.kalman_state[:2] = self.position
@@ -183,7 +190,7 @@ class FastTrackState:
     def set_embedding_params(
             self,
             max_embeddings: int = 5,
-            method: Literal["average", "best_match", "weighted_average", "last"] = "average",
+            method: Literal["average", "best_match", "weighted_average", "last", "median"] = "average",
             score_history_length: int = 5,
     ):
         """Configure embedding storage parameters.
@@ -228,10 +235,10 @@ class FastTrackState:
                 self.embedding_history.append(normalized_emb.copy())
                 self.embedding_update_count += 1
 
+                # Only invalidate caches - don't recompute (lazy evaluation)
                 self._cache_valid = False
                 self._representative_cache_valid = False
-
-                self._update_avg_embedding()
+                # REMOVED: self._update_avg_embedding() - avg_embedding is never read
 
     def _update_avg_embedding(self):
         """Update avg_embedding with caching."""
@@ -265,6 +272,9 @@ class FastTrackState:
             weights = weights / weights.sum()
             # OPTIMIZATION: Use np.array() directly on deque
             return np.average(np.array(self.embedding_history), axis=0, weights=weights)
+        elif self.embedding_method == "median":
+            # Median embedding (element-wise median across history)
+            return np.median(np.array(self.embedding_history), axis=0)
         else:
             return self.embedding_history[-1]
 
@@ -323,7 +333,8 @@ class FastTrackState:
         if self.kalman_type == "simple":
             self.kalman_state = simple_kalman_update(self.kalman_state, position, is_reid=is_reid)
             self.velocity = self.kalman_state[2:].copy()
-            self.predicted_position = self.kalman_state[:2].copy()
+            # predicted_position is WHERE we expect the object in the NEXT frame
+            self.predicted_position = self.position + self.velocity
         elif self.kalman_type == "oc":
             new_observation = position.reshape(1, 2).astype(np.float32)
             new_frame = np.array([frame], dtype=np.int32)
@@ -366,6 +377,9 @@ class FastTrackState:
         self.misses = 0
         self.lost_frames = 0
 
+        # Record hit for uncertainty tracking
+        self.recent_match_history.append(True)
+
     def predict_position(self, current_frame: int = None):
         """Update predicted_position using Kalman filter WITHOUT modifying counters.
 
@@ -373,10 +387,12 @@ class FastTrackState:
         predicted_position is up-to-date for cost matrix computation.
         """
         # Import here to avoid circular dependency
-        from .kalman_filters import simple_kalman_predict, oc_sort_predict
+        from .kalman_filters import simple_kalman_predict_with_damping, oc_sort_predict
 
         if self.kalman_type == "simple":
-            self.kalman_state = simple_kalman_predict(self.kalman_state)
+            self.kalman_state = simple_kalman_predict_with_damping(
+                self.kalman_state, self.velocity_damping
+            )
             self.velocity = self.kalman_state[2:].copy()
             self.predicted_position = self.kalman_state[:2].copy()
         elif self.kalman_type == "oc":
@@ -404,6 +420,9 @@ class FastTrackState:
 
         # Increment counters for unmatched track
         self.age += 1
+
+        # Record miss for uncertainty tracking
+        self.recent_match_history.append(False)
         self.misses += 1
         self.lost_frames += 1
 
@@ -444,4 +463,30 @@ class FastTrackState:
         self.embedding_history.append(embedding)
         self.embedding_update_count += 1
 
-        self._update_avg_embedding()
+        # Only invalidate caches - don't recompute (lazy evaluation)
+        self._cache_valid = False
+        self._representative_cache_valid = False
+        # REMOVED: self._update_avg_embedding() - avg_embedding is never read
+
+    def get_recent_miss_ratio(self) -> float:
+        """Get the ratio of misses in recent frames.
+
+        Returns:
+            Float in [0, 1] where 0 = all hits, 1 = all misses.
+            Returns 0 if no history yet.
+        """
+        if len(self.recent_match_history) == 0:
+            return 0.0
+        # Count False values (misses)
+        miss_count = sum(1 for hit in self.recent_match_history if not hit)
+        return miss_count / len(self.recent_match_history)
+
+    def set_uncertainty_window(self, window_size: int):
+        """Set the window size for uncertainty tracking.
+
+        Args:
+            window_size: Number of recent frames to track (default: 10)
+        """
+        # Create new deque with updated maxlen, preserving recent history
+        old_history = list(self.recent_match_history)
+        self.recent_match_history = deque(old_history[-window_size:], maxlen=window_size)

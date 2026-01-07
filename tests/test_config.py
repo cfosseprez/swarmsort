@@ -310,10 +310,11 @@ class TestConfigDistanceRelationships:
         """Test that auto-computed parameters are set correctly."""
         config = SwarmSortConfig(max_distance=100.0)
         # These should be auto-computed in __post_init__
-        assert config.local_density_radius == 50.0  # max_distance / 2
-        assert config.greedy_threshold == 20.0  # max_distance / 5
+        assert abs(config.local_density_radius - 100.0 / 3) < 0.01  # max_distance / 3
+        assert abs(config.greedy_threshold - 100.0 / 3) < 0.01  # max_distance / 3
         assert config.reid_max_distance == 150.0  # max_distance * 1.5
         assert config.pending_detection_distance == 100.0  # max_distance
+        assert config.collision_safety_distance == 25.0  # max_distance * 0.25
 
 
 class TestValidateConfigFunction:
@@ -408,10 +409,10 @@ class TestConfigDefaults:
     def test_default_probabilistic_parameters(self):
         """Test default probabilistic cost parameters."""
         config = SwarmSortConfig()
-        assert config.mahalanobis_normalization == 5.0  # Reduced for better tolerance
+        assert config.mahalanobis_normalization == 5.0
         assert config.probabilistic_gating_multiplier == 1.5
-        assert config.time_covariance_inflation == 0.1
-        assert config.base_position_variance == 15.0  # Increased for better tolerance
+        assert config.time_covariance_inflation == 0.2
+        assert config.base_position_variance == 25.0
 
 
 if __name__ == "__main__":

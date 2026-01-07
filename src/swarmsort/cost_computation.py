@@ -41,20 +41,29 @@ Tracks with >= this many misses use last known position for matching."""
 
 DEFAULT_MAHALANOBIS_NORMALIZATION: float = 5.0
 """Normalization factor for Mahalanobis distance.
-Scales Mahalanobis to be comparable with max_distance.
+
+Mahalanobis distance is a dimensionless statistical measure (chi-squared distributed).
+This factor scales it to pixel-space for comparison with max_distance.
+
+Empirical tuning: With base_variance=25.0 and typical velocities:
+- mahal_dist=1.0 (1 std) → 5 pixels penalty
+- mahal_dist=2.0 (2 std) → 10 pixels penalty
+- mahal_dist=3.0 (3 std) → 15 pixels penalty
+
 NOTE: Must match config.py default (5.0)."""
 
 DEFAULT_PROBABILISTIC_GATING_MULTIPLIER: float = 1.5
 """Multiplier for max_distance in probabilistic gating.
 Euclidean pre-filter: max_distance * this value."""
 
-DEFAULT_TIME_COVARIANCE_INFLATION: float = 0.1
+DEFAULT_TIME_COVARIANCE_INFLATION: float = 0.2
 """Rate at which covariance inflates per missed frame.
-Covariance *= (1 + this * misses)."""
+Covariance *= (1 + this * misses).
+NOTE: Must match config.py default (0.2)."""
 
-DEFAULT_BASE_POSITION_VARIANCE: float = 15.0
+DEFAULT_BASE_POSITION_VARIANCE: float = 25.0
 """Base position variance for covariance estimation.
-NOTE: Must match config.py default (15.0)."""
+NOTE: Must match config.py default (25.0)."""
 
 DEFAULT_VELOCITY_VARIANCE_SCALE: float = 2.0
 """Scale factor for velocity contribution to covariance."""
@@ -71,7 +80,7 @@ NOTE: Must match config.py default (0.1)."""
 @nb.njit(fastmath=True, cache=True)
 def estimate_track_covariances(
     track_velocities: np.ndarray,
-    base_variance: float = 15.0,
+    base_variance: float = 25.0,
     velocity_scale: float = 2.0,
     velocity_isotropic_threshold: float = 0.1
 ) -> np.ndarray:
@@ -236,12 +245,40 @@ def compute_embedding_distances_matmul(
     return distances.astype(np.float32)
 
 
+@nb.njit(fastmath=True, cache=True)
+def _numba_median(arr: np.ndarray, n: int) -> float:
+    """Compute median of first n elements using insertion sort (efficient for small n)."""
+    if n == 0:
+        return 1.0
+    if n == 1:
+        return arr[0]
+
+    # Simple insertion sort for small arrays (max ~15 embeddings typically)
+    sorted_arr = np.empty(n, dtype=np.float32)
+    for i in range(n):
+        sorted_arr[i] = arr[i]
+
+    for i in range(1, n):
+        key = sorted_arr[i]
+        j = i - 1
+        while j >= 0 and sorted_arr[j] > key:
+            sorted_arr[j + 1] = sorted_arr[j]
+            j -= 1
+        sorted_arr[j + 1] = key
+
+    # Return median
+    if n % 2 == 1:
+        return sorted_arr[n // 2]
+    else:
+        return (sorted_arr[n // 2 - 1] + sorted_arr[n // 2]) * 0.5
+
+
 @nb.njit(fastmath=True, cache=True, parallel=True)
 def compute_embedding_distances_with_method(
     det_embeddings: np.ndarray,
     track_embeddings_flat: np.ndarray,
     track_counts: np.ndarray,
-    method: int  # 0=last, 1=average, 2=weighted_average, 3=best_match
+    method: int  # 0=last, 1=average, 2=weighted_average, 3=best_match, 4=median
 ) -> np.ndarray:
     """
     Compute embedding distances using various methods for historical embeddings.
@@ -257,6 +294,7 @@ def compute_embedding_distances_with_method(
             1: Average all distances
             2: Weighted average (recent embeddings have more weight)
             3: Best match (minimum distance)
+            4: Median distance (robust to outliers)
 
     Returns:
         Distance matrix [N_det, N_track] with cosine distances in [0, 1]
@@ -308,7 +346,7 @@ def compute_embedding_distances_with_method(
                     total_weight += weight
                 distances[i, j] = total_dist / total_weight if total_weight > 0.0 else 1.0
 
-            else:  # method == 3: best_match - minimum distance
+            elif method == 3:  # best_match - minimum distance
                 min_dist = 1.0
                 for emb_idx in range(n_track_embs):
                     emb_start = start_offset + emb_idx * emb_dim
@@ -317,6 +355,15 @@ def compute_embedding_distances_with_method(
                     if dist < min_dist:
                         min_dist = dist
                 distances[i, j] = min_dist
+
+            else:  # method == 4: median - robust to outliers
+                # Collect all distances for this track
+                dist_buffer = np.empty(n_track_embs, dtype=np.float32)
+                for emb_idx in range(n_track_embs):
+                    emb_start = start_offset + emb_idx * emb_dim
+                    dot_product = _compute_dot_product(det_emb, track_embeddings_flat, emb_start, emb_dim)
+                    dist_buffer[emb_idx] = (1.0 - dot_product) * 0.5
+                distances[i, j] = _numba_median(dist_buffer, n_track_embs)
 
     return distances
 
@@ -336,7 +383,9 @@ def compute_cost_matrix_parallel(
     max_distance: float,
     do_embeddings: bool,
     miss_threshold: int = 3,
-    embedding_threshold_adjustment: float = 1.0
+    embedding_threshold_adjustment: float = 1.0,
+    track_uncertainty_ratios: np.ndarray = np.empty(0, dtype=np.float32),
+    uncertainty_weight: float = 0.0
 ) -> np.ndarray:
     """
     Parallel version of cost matrix computation for maximum performance.
@@ -354,6 +403,10 @@ def compute_cost_matrix_parallel(
 
     # Effective max distance for assignment gating (accounts for embedding contribution)
     effective_max = max_distance * (1.0 + embedding_weight * embedding_threshold_adjustment) if do_embeddings else max_distance
+
+    # Check if uncertainty penalty is enabled (avoid overhead when disabled)
+    # Note: check weight only, array is always passed (empty if disabled)
+    use_uncertainty = uncertainty_weight > 0.0
 
     # Parallel over detections (independent computations)
     for i in nb.prange(n_dets):
@@ -380,11 +433,21 @@ def compute_cost_matrix_parallel(
                 emb_dist = scaled_embedding_distances[i, j]
                 cost = pos_distance + embedding_weight * emb_dist * max_distance
 
+                # Apply uncertainty penalty if enabled
+                if use_uncertainty:
+                    cost = cost * (1.0 + uncertainty_weight * track_uncertainty_ratios[j])
+
                 # Assignment gating: only accept if total cost within effective max
                 if cost <= effective_max:
                     cost_matrix[i, j] = cost
             else:
-                cost_matrix[i, j] = pos_distance
+                cost = pos_distance
+
+                # Apply uncertainty penalty if enabled
+                if use_uncertainty:
+                    cost = cost * (1.0 + uncertainty_weight * track_uncertainty_ratios[j])
+
+                cost_matrix[i, j] = cost
 
     return cost_matrix
 
@@ -400,7 +463,9 @@ def compute_cost_matrix_vectorized(
     max_distance: float,
     do_embeddings: bool,
     miss_threshold: int = 3,
-    embedding_threshold_adjustment: float = 1.0
+    embedding_threshold_adjustment: float = 1.0,
+    track_uncertainty_ratios: np.ndarray = np.empty(0, dtype=np.float32),
+    uncertainty_weight: float = 0.0
 ) -> np.ndarray:
     """
     Compute optimized cost matrix with position-centric additive embedding costs.
@@ -412,6 +477,9 @@ def compute_cost_matrix_vectorized(
 
     Cost Formula (Position-Centric Additive):
         C_i,j = pos_distance + w_e × emb_distance × max_distance
+
+    With uncertainty penalty (when uncertainty_weight > 0):
+        C_i,j = base_cost × (1 + uncertainty_weight × miss_ratio_j)
 
     Position is always the primary cost. Embedding adds an additional penalty
     that increases the matching cost but never replaces position.
@@ -427,6 +495,8 @@ def compute_cost_matrix_vectorized(
         do_embeddings: Whether to include embedding costs
         miss_threshold: Unused (kept for API compatibility)
         embedding_threshold_adjustment: Threshold adjustment factor for gating
+        track_uncertainty_ratios: Recent miss ratios per track [N_track] (optional)
+        uncertainty_weight: Weight for uncertainty penalty (0 = disabled, no overhead)
 
     Returns:
         Cost matrix [N_det, N_track]
@@ -441,6 +511,10 @@ def compute_cost_matrix_vectorized(
 
     # Effective max distance for assignment gating (accounts for embedding contribution)
     effective_max = max_distance * (1.0 + embedding_weight * embedding_threshold_adjustment) if do_embeddings else max_distance
+
+    # Check if uncertainty penalty is enabled (avoid overhead when disabled)
+    # Note: check weight only, array is always passed (empty if disabled)
+    use_uncertainty = uncertainty_weight > 0.0
 
     for i in range(n_dets):
         for j in range(n_tracks):
@@ -477,11 +551,21 @@ def compute_cost_matrix_vectorized(
                 emb_dist = scaled_embedding_distances[i, j]
                 cost = pos_distance + embedding_weight * emb_dist * max_distance
 
+                # Apply uncertainty penalty if enabled
+                if use_uncertainty:
+                    cost = cost * (1.0 + uncertainty_weight * track_uncertainty_ratios[j])
+
                 # Assignment gating: only accept if total cost within effective max
                 if cost <= effective_max:
                     cost_matrix[i, j] = cost
             else:
-                cost_matrix[i, j] = pos_distance
+                cost = pos_distance
+
+                # Apply uncertainty penalty if enabled
+                if use_uncertainty:
+                    cost = cost * (1.0 + uncertainty_weight * track_uncertainty_ratios[j])
+
+                cost_matrix[i, j] = cost
 
     return cost_matrix
 
@@ -502,7 +586,9 @@ def compute_probabilistic_cost_matrix_vectorized(
     mahal_normalization: float = 5.0,
     cov_inflation_rate: float = 0.1,
     embedding_threshold_adjustment: float = 1.0,
-    singular_cov_threshold: float = 1e-6
+    singular_cov_threshold: float = 1e-6,
+    track_uncertainty_ratios: np.ndarray = np.empty(0, dtype=np.float32),
+    uncertainty_weight: float = 0.0
 ) -> np.ndarray:
     """
     Compute probabilistic cost matrix using Mahalanobis distance with additive embedding cost.
@@ -514,6 +600,9 @@ def compute_probabilistic_cost_matrix_vectorized(
 
     Cost Formula (Position-Centric Additive):
         C_i,j = normalized_mahal + w_e × emb_distance × max_distance
+
+    With uncertainty penalty (when uncertainty_weight > 0):
+        C_i,j = base_cost × (1 + uncertainty_weight × miss_ratio_j)
 
     Args:
         det_positions: Detection positions [N_det, 2]
@@ -531,6 +620,8 @@ def compute_probabilistic_cost_matrix_vectorized(
         cov_inflation_rate: Rate of covariance inflation per missed frame
         embedding_threshold_adjustment: Threshold adjustment factor for gating
         singular_cov_threshold: Threshold for detecting singular covariance (default: 1e-6)
+        track_uncertainty_ratios: Recent miss ratios per track [N_track] (optional)
+        uncertainty_weight: Weight for uncertainty penalty (0 = disabled, no overhead)
 
     Returns:
         Cost matrix [N_det, N_track]
@@ -546,6 +637,10 @@ def compute_probabilistic_cost_matrix_vectorized(
 
     # Effective max distance for assignment gating (accounts for embedding contribution)
     effective_max = max_distance * (1.0 + embedding_weight * embedding_threshold_adjustment) if do_embeddings else max_distance
+
+    # Check if uncertainty penalty is enabled (avoid overhead when disabled)
+    # Note: check weight only, array is always passed (empty if disabled)
+    use_uncertainty = uncertainty_weight > 0.0
 
     for i in range(n_dets):
         for j in range(n_tracks):
@@ -607,11 +702,21 @@ def compute_probabilistic_cost_matrix_vectorized(
                 emb_dist = scaled_embedding_distances[i, j]
                 cost = normalized_mahal + embedding_weight * emb_dist * max_distance
 
+                # Apply uncertainty penalty if enabled
+                if use_uncertainty:
+                    cost = cost * (1.0 + uncertainty_weight * track_uncertainty_ratios[j])
+
                 # Assignment gating: only accept if total cost within effective max
                 if cost <= effective_max:
                     cost_matrix[i, j] = cost
             else:
-                cost_matrix[i, j] = normalized_mahal
+                cost = normalized_mahal
+
+                # Apply uncertainty penalty if enabled
+                if use_uncertainty:
+                    cost = cost * (1.0 + uncertainty_weight * track_uncertainty_ratios[j])
+
+                cost_matrix[i, j] = cost
 
     return cost_matrix
 

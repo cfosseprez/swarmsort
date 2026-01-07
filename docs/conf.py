@@ -76,8 +76,8 @@ myst_enable_extensions = [
 # -- Suppress warnings -------------------------------------------------------
 suppress_warnings = ['image.not_readable']
 
-# -- Exclude patterns --------------------------------------------------------
-exclude_patterns.extend(['generated/**'])
+# -- Autosummary configuration -----------------------------------------------
+autosummary_generate = True
 
 # -- Link check --------------------------------------------------------------
 linkcheck_ignore = [

@@ -335,6 +335,7 @@ class TestReIdentification:
             max_track_age=20,
             reid_min_frames_lost=2,
             min_consecutive_detections=1,
+            embedding_weight=0.5,  # Balance position and embedding so close tracks still match
         )
         tracker = SwarmSortTracker(config)
 

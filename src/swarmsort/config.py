@@ -92,6 +92,12 @@ def merge_config_with_priority(default_config: Any,
             else:
                 logger.warning(f"Ignoring unknown runtime config key: {k}")
 
+    # Recompute auto-parameters after all overrides are applied
+    # This handles cases where YAML or runtime sets values to -1.0 (sentinel)
+    # or changes max_distance which affects dependent parameters
+    if hasattr(config, '_compute_auto_parameters'):
+        config._compute_auto_parameters()
+
     if verbose_parameters:
         config_dict = config.to_dict()
         lines = [f"     {key} = {value}" for key, value in config_dict.items()]
@@ -122,8 +128,9 @@ def load_local_yaml_config(yaml_filename: str, caller_file: Optional[str] = None
 
     # Add original search paths
     search_paths.extend([
-        Path(__file__).parent / yaml_filename,
-        Path(__file__).parent.parent / yaml_filename,
+        Path(__file__).parent / "data" / yaml_filename,  # swarmsort/data/
+        Path(__file__).parent / yaml_filename,            # swarmsort/
+        Path(__file__).parent.parent / yaml_filename,     # src/
     ])
 
     for yaml_path in search_paths:
@@ -235,19 +242,26 @@ class SwarmSortConfig(BaseConfig):
     # UNCERTAINTY & COLLISION HANDLING
     # ============================================================================
 
-    uncertainty_weight: float = 0.33
+    uncertainty_weight: float = 0.0
     """Weight for uncertainty penalties in cost computation (0.0 to 1.0).
 
-    Makes the tracker less confident about tracks in difficult situations:
-    - Tracks that have missed recent detections
-    - Tracks in crowded areas
-    - Tracks with poor detection history
+    Adds a cost penalty based on recent miss ratio, making unreliable tracks
+    less likely to steal matches from reliable ones.
 
-    - 0.0 = Disabled (treat all tracks equally)
+    Formula: cost = base_cost * (1 + uncertainty_weight * recent_miss_ratio)
+
+    - 0.0 = Disabled (no overhead, treat all tracks equally)
     - 0.2-0.3 = Light uncertainty (small preference for reliable tracks)
     - 0.5-0.7 = Strong uncertainty (heavily favor reliable tracks)
+    """
 
-    Helps prevent ID switches in challenging scenarios.
+    uncertainty_window: int = 10
+    """Number of recent frames to consider for uncertainty calculation.
+
+    Tracks the hit/miss ratio over the last N frames.
+
+    - 5-10 = Short memory (quick adaptation)
+    - 10-20 = Medium memory (balanced)
     """
 
     local_density_radius: float = -1.0  # Default: max_distance / 2
@@ -281,8 +295,7 @@ class SwarmSortConfig(BaseConfig):
     - 2-3 = Freeze only in moderately crowded areas
     - 5+ = Freeze only in very dense crowds
     """
-
-    deduplication_distance: float = 10.0
+    deduplication_distance: float = 0.0
     """Minimum distance between detections to be considered separate objects.
 
     Detections closer than this are merged to prevent duplicate tracks.
@@ -293,17 +306,20 @@ class SwarmSortConfig(BaseConfig):
     - 20-50 pixels = Loose deduplication for large objects
     """
 
-    collision_safety_distance: float = 30.0
+    collision_safety_distance: float = -1.0
     """Distance at which to consider objects in collision for embedding freezing.
 
     When objects are closer than this, their embeddings stop updating to prevent
     appearance confusion during occlusion. This is typically larger than
     deduplication_distance but smaller than max_distance.
 
+    Set to -1.0 for auto-compute (max_distance * 0.4).
+
     - 20-30 pixels = Early freeze for safety
     - 30-50 pixels = Standard collision distance
     - 50+ pixels = Late freeze, allows more updates
     """
+    # Note: -1.0 means auto-compute from max_distance in __post_init__
 
     # ============================================================================
     # APPEARANCE MATCHING (EMBEDDINGS) SETTINGS
@@ -370,15 +386,26 @@ class SwarmSortConfig(BaseConfig):
     embedding_function: str = "cupytexture"
     """Algorithm for extracting appearance features.
 
-    Options depend on your installation:
+    Built-in options (require CuPy for GPU):
     - "cupytexture": GPU-accelerated texture features (fast, good quality)
     - "cupytexture_color": Texture + color histogram features
     - "cupytexture_mega": Advanced features (slower, best quality)
+    - "cupyshape": Shape-based features
 
-    GPU options require CuPy. Falls back to CPU if unavailable.
+    External embeddings:
+    - "external" or None: Use embeddings provided in Detection.embedding field.
+      This allows using custom models (MobileNet, ResNet, etc.).
+      You must attach embeddings to each Detection before calling tracker.update().
+
+    Example with external embeddings:
+        detection = Detection(
+            position=np.array([x, y]),
+            bbox=np.array([x1, y1, x2, y2]),
+            embedding=my_model.extract_features(crop)  # Your custom embedding
+        )
     """
 
-    embedding_matching_method: Literal["average", "weighted_average", "best_match"] = "weighted_average"
+    embedding_matching_method: Literal["average", "weighted_average", "best_match", "median"] = "median"
     """How to match current appearance against track history.
 
     - "average": Compare against mean of all stored appearances
@@ -389,6 +416,9 @@ class SwarmSortConfig(BaseConfig):
 
     - "best_match": Find best matching historical appearance
       Handles appearance changes well but more computationally expensive
+
+    - "median": Median distance to all stored appearances
+      More robust to outliers than average, good for noisy embeddings
     """
 
     store_embedding_scores: bool = False
@@ -412,7 +442,7 @@ class SwarmSortConfig(BaseConfig):
     # ============================================================================
 
     sparse_computation_threshold: int = 300
-    """Use the many ovject optimized sparse computation"""
+    """Use the many object optimized sparse computation"""
 
     use_probabilistic_costs: bool = False
     """Use probabilistic fusion for cost computation.
@@ -501,7 +531,7 @@ class SwarmSortConfig(BaseConfig):
     Lower values = fewer but more accurate re-identifications.
     """
 
-    reid_min_frames_lost: int = 2
+    reid_min_frames_lost: int = 3
     """Minimum frames a track must be lost before attempting ReID.
 
     Prevents immediate re-identification that can cause ID swaps.
@@ -544,7 +574,7 @@ class SwarmSortConfig(BaseConfig):
     Use higher values to reduce false positive tracks.
     """
 
-    min_consecutive_detections: int = 6
+    min_consecutive_detections: int = 10
     """Number of consecutive detections required to confirm a track.
 
     New tracks start as "tentative" and become "confirmed" after being
@@ -644,7 +674,7 @@ class SwarmSortConfig(BaseConfig):
     Helpful for understanding embedding behavior but slows tracking.
     """
 
-    debug_timings: bool = False
+    debug_timings: bool = True
     """Print detailed timing information for performance analysis.
 
     Shows time spent in each component of the tracking pipeline.
@@ -715,14 +745,14 @@ class SwarmSortConfig(BaseConfig):
     Allows Mahalanobis gating to consider matches beyond strict max_distance.
     """
 
-    time_covariance_inflation: float = 0.1
+    time_covariance_inflation: float = 0.2
     """Rate at which covariance inflates per missed frame (0.0 to 1.0).
 
     Each missed frame, covariance is multiplied by (1 + this * misses).
     Higher values make uncertainty grow faster during occlusion.
     """
 
-    base_position_variance: float = 15.0
+    base_position_variance: float = 25.0
     """Base position variance for covariance estimation in probabilistic mode.
 
     This is the minimum uncertainty in position regardless of velocity.
@@ -733,7 +763,7 @@ class SwarmSortConfig(BaseConfig):
     - 25-50 = Loose uncertainty (for noisy detections or fast motion)
     """
 
-    velocity_variance_scale: float = 2.0
+    velocity_variance_scale: float = 0.5
     """Scale factor for velocity contribution to position uncertainty.
 
     In probabilistic mode, tracks moving faster have higher uncertainty
@@ -745,7 +775,7 @@ class SwarmSortConfig(BaseConfig):
     - 3.0+ = Strong velocity effect
     """
 
-    velocity_isotropic_threshold: float = 0.1
+    velocity_isotropic_threshold: float = 2.0
     """Velocity threshold (pixels/frame) below which covariance is isotropic.
 
     When a track's velocity magnitude is below this threshold, the covariance
@@ -775,14 +805,26 @@ class SwarmSortConfig(BaseConfig):
         This ensures that if `max_distance` is changed, related parameters
         are updated accordingly.
         """
+        self._compute_auto_parameters()
+
+    def _compute_auto_parameters(self):
+        """Compute auto-parameters based on max_distance.
+
+        This method can be called after config merging to recompute
+        dependent parameters when max_distance changes.
+
+        Parameters with value -1.0 are sentinel values meaning "auto-compute".
+        """
         if self.local_density_radius == -1.0:
-            self.local_density_radius = self.max_distance / 2
+            self.local_density_radius = self.max_distance / 3
         if self.greedy_threshold == -1.0:
-            self.greedy_threshold = self.max_distance / 5
+            self.greedy_threshold = self.max_distance / 3
         if self.reid_max_distance == -1.0:
             self.reid_max_distance = self.max_distance * 1.5
         if self.pending_detection_distance == -1.0:
             self.pending_detection_distance = self.max_distance
+        if self.collision_safety_distance == -1.0:
+            self.collision_safety_distance = self.max_distance * 0.25
 
 
     def validate(self) -> None:
@@ -814,7 +856,7 @@ class SwarmSortConfig(BaseConfig):
         if self.max_embeddings_per_track < 1:
             raise ValueError("max_embeddings_per_track must be at least 1")
 
-        if self.embedding_matching_method not in ["average", "weighted_average", "best_match"]:
+        if self.embedding_matching_method not in ["average", "weighted_average", "best_match", "median"]:
             raise ValueError("Invalid embedding_matching_method")
 
         if self.min_consecutive_detections < 1:
@@ -944,7 +986,7 @@ def validate_config(config: SwarmSortConfig) -> Tuple[bool, List[str]]:
     if config.max_embeddings_per_track < 1:
         errors.append("max_embeddings_per_track must be at least 1")
 
-    if config.embedding_matching_method not in ["average", "weighted_average", "best_match"]:
+    if config.embedding_matching_method not in ["average", "weighted_average", "best_match", "median"]:
         errors.append(f"Invalid embedding_matching_method: {config.embedding_matching_method}")
 
     if config.min_consecutive_detections < 1:
