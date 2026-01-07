@@ -674,7 +674,7 @@ class SwarmSortConfig(BaseConfig):
     Helpful for understanding embedding behavior but slows tracking.
     """
 
-    debug_timings: bool = True
+    debug_timings: bool = False
     """Print detailed timing information for performance analysis.
 
     Shows time spent in each component of the tracking pipeline.

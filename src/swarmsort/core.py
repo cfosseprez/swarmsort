@@ -512,18 +512,27 @@ class SwarmSortTracker:
         timer: Optional[Timer] = None
     ) -> Tuple[List[Tuple[int, int]], List[int], List[int]]:
         """Perform detection-track assignment using configured strategy."""
+        detailed_timing = self.debug_timings
+
         # Compute cost matrix
+        if detailed_timing:
+            t0 = time.perf_counter()
+
         cost_matrix = self._compute_cost_matrix(detections, tracks)
+
+        if detailed_timing:
+            t_cost = time.perf_counter() - t0
+            t0 = time.perf_counter()
 
         # Apply assignment strategy
         if self.assignment_strategy == "greedy":
-            return numba_greedy_assignment(cost_matrix, self.max_distance)
+            result = numba_greedy_assignment(cost_matrix, self.max_distance)
         elif self.assignment_strategy == "hungarian":
-            return hungarian_assignment_wrapper(cost_matrix, self.max_distance)
+            result = hungarian_assignment_wrapper(cost_matrix, self.max_distance)
         elif self.assignment_strategy == "hybrid":
             # hungarian_fallback_threshold is a multiplier, convert to absolute threshold
             hungarian_threshold = self.max_distance * self.hungarian_fallback_threshold
-            return hybrid_assignment(
+            result = hybrid_assignment(
                 cost_matrix,
                 self.max_distance,
                 self.greedy_threshold,
@@ -531,7 +540,14 @@ class SwarmSortTracker:
             )
         else:
             # Default to Hungarian
-            return hungarian_assignment_wrapper(cost_matrix, self.max_distance)
+            result = hungarian_assignment_wrapper(cost_matrix, self.max_distance)
+
+        if detailed_timing:
+            t_assign = time.perf_counter() - t0
+            n_dets, n_tracks = cost_matrix.shape
+            print(f"  [Assignment] {self.assignment_strategy} | cost_matrix={t_cost*1000:.2f}ms | assign={t_assign*1000:.2f}ms | matches={len(result[0])}")
+
+        return result
 
     def _compute_cost_matrix(
         self,
@@ -542,11 +558,20 @@ class SwarmSortTracker:
         n_dets = len(detections)
         n_tracks = len(tracks)
 
+        # Detailed timing for performance profiling
+        detailed_timing = self.debug_timings
+        if detailed_timing:
+            t_start = time.perf_counter()
+            cost_timings = {}
+
         if n_dets == 0 or n_tracks == 0:
             return np.full((n_dets, n_tracks), np.inf, dtype=np.float32)
 
         # OPTIMIZATION: Use reusable array pools to avoid per-frame allocations
         # Grow arrays if needed, but never shrink (avoids repeated allocations)
+        if detailed_timing:
+            t0 = time.perf_counter()
+
         if self._reusable_det_positions is None or self._reusable_det_positions.shape[0] < n_dets:
             new_size = max(n_dets, self._max_dets_seen, 50)  # Minimum 50 to reduce early reallocations
             self._reusable_det_positions = np.empty((new_size, 2), dtype=np.float32)
@@ -559,6 +584,10 @@ class SwarmSortTracker:
             self._reusable_track_misses = np.empty(new_size, dtype=np.int32)
             self._max_tracks_seen = new_size
 
+        if detailed_timing:
+            cost_timings['array_pool'] = time.perf_counter() - t0
+            t0 = time.perf_counter()
+
         # Fill reusable arrays (no new allocation)
         for i, d in enumerate(detections):
             self._reusable_det_positions[i] = d.position
@@ -566,6 +595,10 @@ class SwarmSortTracker:
             self._reusable_track_positions[i] = t.predicted_position
             self._reusable_track_last_positions[i] = t.last_detection_pos
             self._reusable_track_misses[i] = t.misses
+
+        if detailed_timing:
+            cost_timings['fill_arrays'] = time.perf_counter() - t0
+            t0 = time.perf_counter()
 
         # Use views into reusable arrays
         det_positions = self._reusable_det_positions[:n_dets]
@@ -582,10 +615,18 @@ class SwarmSortTracker:
         ], dtype=bool)
         any_embeddings = self.do_embeddings and np.any(has_embedding_mask)
 
+        if detailed_timing:
+            cost_timings['embedding_mask'] = time.perf_counter() - t0
+            t0 = time.perf_counter()
+
         if any_embeddings:
             scaled_embedding_distances = self._compute_embedding_distances(
                 detections, tracks, has_embedding_mask, det_positions, track_positions
             )
+
+        if detailed_timing:
+            cost_timings['embedding_distances'] = time.perf_counter() - t0
+            t0 = time.perf_counter()
 
         # do_embeddings flag for cost matrix - only True if we computed embeddings
         do_embeddings = any_embeddings
@@ -601,6 +642,10 @@ class SwarmSortTracker:
         else:
             # Pass empty array when disabled (Numba requires consistent types)
             track_uncertainty_ratios = np.empty(0, dtype=np.float32)
+
+        if detailed_timing:
+            cost_timings['uncertainty_ratios'] = time.perf_counter() - t0
+            t0 = time.perf_counter()
 
         # Use appropriate cost function
         if self.use_probabilistic_costs:
@@ -623,7 +668,11 @@ class SwarmSortTracker:
             mahal_normalization = getattr(self.config, 'mahalanobis_normalization', 5.0)
             singular_cov_threshold = getattr(self.config, 'singular_covariance_threshold', 1e-6)
 
-            return compute_probabilistic_cost_matrix_vectorized(
+            if detailed_timing:
+                cost_timings['prob_prep'] = time.perf_counter() - t0
+                t0 = time.perf_counter()
+
+            result = compute_probabilistic_cost_matrix_vectorized(
                 det_positions, track_positions, track_last_positions,
                 track_misses, track_covariances, scaled_embedding_distances,
                 self.embedding_weight, self.max_distance, do_embeddings,
@@ -631,19 +680,47 @@ class SwarmSortTracker:
                 self.embedding_threshold_adjustment, singular_cov_threshold,
                 track_uncertainty_ratios, self.uncertainty_weight
             )
+
+            if detailed_timing:
+                cost_timings['cost_func'] = time.perf_counter() - t0
+                cost_timings['total'] = time.perf_counter() - t_start
+                self._print_cost_matrix_timings(cost_timings, n_dets, n_tracks, 'probabilistic')
+
+            return result
         else:
             # Select cost function based on parallel mode setting
             cost_func = (
                 compute_cost_matrix_parallel if self.parallel_cost_matrix
                 else compute_cost_matrix_vectorized
             )
-            return cost_func(
+            func_name = 'parallel' if self.parallel_cost_matrix else 'vectorized'
+
+            result = cost_func(
                 det_positions, track_positions, track_last_positions,
                 track_misses, scaled_embedding_distances,
                 self.embedding_weight, self.max_distance, do_embeddings,
                 miss_threshold, self.embedding_threshold_adjustment,
                 track_uncertainty_ratios, self.uncertainty_weight
             )
+
+            if detailed_timing:
+                cost_timings['cost_func'] = time.perf_counter() - t0
+                cost_timings['total'] = time.perf_counter() - t_start
+                self._print_cost_matrix_timings(cost_timings, n_dets, n_tracks, func_name)
+
+            return result
+
+    def _print_cost_matrix_timings(self, timings: dict, n_dets: int, n_tracks: int, mode: str):
+        """Print detailed cost matrix computation timings."""
+        total_ms = timings['total'] * 1000
+        breakdown = []
+        for key, val in timings.items():
+            if key != 'total':
+                ms = val * 1000
+                pct = (val / timings['total']) * 100 if timings['total'] > 0 else 0
+                breakdown.append(f"{key}={ms:.2f}ms({pct:.0f}%)")
+
+        print(f"  [CostMatrix] {mode} | {n_dets}x{n_tracks} | total={total_ms:.2f}ms | {' '.join(breakdown)}")
 
     def _compute_embedding_distances(
         self,
@@ -1244,4 +1321,24 @@ class SwarmSortTracker:
             "n_tracks": len(self._tracks),
             "n_pending": len(self._pending_detections),
             "track_ids": list(self._tracks.keys())
+        }
+
+    def get_statistics(self) -> dict:
+        """Get tracker statistics for benchmarking and analysis.
+
+        Returns:
+            Dictionary containing:
+                - next_id: Next track ID to be assigned (= total tracks created)
+                - active_tracks: Number of currently active tracks
+                - confirmed_tracks: Number of confirmed tracks
+                - pending_detections: Number of pending detections
+                - frame_count: Total frames processed
+        """
+        confirmed = sum(1 for t in self._tracks.values() if t.confirmed)
+        return {
+            "next_id": self._next_id,
+            "active_tracks": len(self._tracks),
+            "confirmed_tracks": confirmed,
+            "pending_detections": len(self._pending_detections),
+            "frame_count": self._frame_count
         }

@@ -169,4 +169,4 @@ debug_embeddings: false
 plot_embeddings: false
 
 # Print detailed timing information for performance analysis
-debug_timings: true
+debug_timings: false
