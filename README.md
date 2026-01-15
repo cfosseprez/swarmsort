@@ -187,10 +187,10 @@ from swarmsort import yolo_to_detections, SwarmSortTracker, SwarmSortConfig
 # Initialize YOLO detector
 model = YOLO('yolov8n.pt')  # or yolov11n.pt, yolov8x.pt, etc.
 
-# Initialize SwarmSort tracker
+# Initialize SwarmSort tracker with custom settings for fast-moving objects
 tracker = SwarmSortTracker(SwarmSortConfig(
-    max_distance=150,
-    uncertainty_weight=0.3
+    max_distance=150,         # Custom: default is 80 - increase for fast objects
+    uncertainty_weight=0.3    # Custom: default is 0 (disabled)
 ))
 
 # Process video stream
@@ -302,6 +302,37 @@ config = SwarmSortConfig(
 tracker = SwarmSortTracker(config)
 ```
 
+#### External Embeddings Mode
+
+For custom embedding extractors (MobileNet, ResNet, CLIP, etc.), use external mode:
+
+```python
+from swarmsort import SwarmSortTracker, SwarmSortConfig, Detection
+
+# Configure for external embeddings
+config = SwarmSortConfig(
+    do_embeddings=True,
+    embedding_function='external',  # Or None - tells SwarmSort to expect pre-computed embeddings
+)
+tracker = SwarmSortTracker(config)
+
+# Your custom embedding extractor
+def extract_embedding(image_patch):
+    # Your CNN/feature extractor here (MobileNet, ResNet, CLIP, etc.)
+    embedding = your_model(image_patch)  # Returns N-dimensional vector
+    # L2-normalize for best results with cosine similarity
+    return embedding / np.linalg.norm(embedding)
+
+# Attach embeddings to each Detection
+detection = Detection(
+    position=[100, 200],
+    confidence=0.9,
+    embedding=extract_embedding(cropped_image)  # Your pre-computed embedding
+)
+
+tracked = tracker.update([detection])
+```
+
 Or you can use a personalized embedding, and pass it directly the Detection.
 
 ```python
@@ -341,10 +372,10 @@ The `max_distance` parameter is the foundation of SwarmSort's configuration. **I
 
 Many other parameters **automatically scale** with `max_distance`:
 ```python
-# When you set max_distance=150, these defaults are automatically set:
-local_density_radius = 150      # Same as max_distance
-greedy_threshold = 30           # max_distance / 5
-reid_max_distance = 150         # Same as max_distance
+# With default max_distance=80, these are automatically computed:
+local_density_radius = 80       # Same as max_distance
+greedy_threshold = 16           # max_distance / 5
+reid_max_distance = 120         # max_distance * 1.5
 ```
 
 ### All Parameters
@@ -352,17 +383,18 @@ reid_max_distance = 150         # Same as max_distance
 | Parameter                  | Default            | Description                                                                           |
 |----------------------------|--------------------|---------------------------------------------------------------------------------------|
 | **Core Tracking**          |                    |                                                                                       |
-| `max_distance`             | 150.0              | Maximum distance for detection-track association                                      |
+| `max_distance`             | 80.0               | Maximum distance for detection-track association                                      |
 | `detection_conf_threshold` | 0.0                | Minimum confidence for detections                                                     |
 | `max_track_age`            | 30                 | Maximum frames to keep track alive without detections                                 |
 | **Motion prediction**      |                    |                                                                                       |
 | `kalman_type`              | 'simple'           | Kalman filter type: 'simple' or 'oc' (OC-SORT style)                                  |
+| `velocity_damping`         | 0.95               | Velocity decay factor for Kalman prediction (0-1)                                     |
 | **Uncertainty System**     |                    |                                                                                       |
-| `uncertainty_weight`       | 0.33               | Weight for uncertainty penalties (0 = disabled)                                       |
-| `local_density_radius`     | max_distance       | Radius for computing local track density (defaults to max_distance)                   |
+| `uncertainty_weight`       | 0.0                | Weight for uncertainty penalties (0 = disabled by default)                            |
+| `local_density_radius`     | auto (=max_distance) | Radius for computing local track density                                            |
 | **Embeddings**             |                    |                                                                                       |
 | `do_embeddings`            | True               | Whether to use embedding features                                                     |
-| `embedding_function`       | 'cupytexture'      | Integrated embedding function: "cupytexture", "cupytexture_color", "mega_cupytexture" |
+| `embedding_function`       | 'cupytexture'      | Embedding function: "cupytexture", "external", or None for custom embeddings         |
 | `embedding_weight`         | 1.0                | Weight for embedding similarity in cost function                                      |
 | `max_embeddings_per_track` | 15                 | Maximum embeddings stored per track                                                   |
 | `embedding_matching_method` | 'weighted_average' | Method for multi-embedding matching                                                   |
@@ -371,17 +403,17 @@ reid_max_distance = 150         # Same as max_distance
 | `embedding_freeze_density` | 1                  | Freeze when ≥N tracks within radius                                                   |
 | **Assignment Strategy**    |                    |                                                                                       |
 | `assignment_strategy`      | 'hybrid'           | Assignment method: 'hungarian', 'greedy', or 'hybrid'                                 |
-| `greedy_threshold`         | max_distance/5     | Distance threshold for greedy assignment                                              |
+| `greedy_threshold`         | auto (max_distance/5) | Distance threshold for greedy assignment                                           |
 | **Track Initialization**   |                    |                                                                                       |
-| `min_consecutive_detections` | 6                  | Minimum consecutive detections to create track                                        |
+| `min_consecutive_detections` | 10                 | Minimum consecutive detections to create track                                        |
 | `max_detection_gap`        | 2                  | Maximum gap between detections                                                        |
-| `pending_detection_distance` | max_distance       | Distance threshold for pending detection matching                                     |
+| `pending_detection_distance` | auto (=max_distance) | Distance threshold for pending detection matching                                  |
 | **Re-identification**      |                    |                                                                                       |
 | `reid_enabled`             | True               | Enable re-identification of lost tracks                                               |
-| `reid_max_distance`        | max_distance*1.5   | Maximum distance for ReID                                                             |
+| `reid_max_distance`        | auto (max_distance*1.5) | Maximum distance for ReID                                                        |
 | `reid_embedding_threshold` | 0.3                | Embedding threshold for ReID                                                          |
 | **Experimental**           |                    |                                                                                       |
-| `use_probabilistic_costs`  | False              | Use gaussian fusion for cost computation                                              |
+| `use_probabilistic_costs`  | False              | Use Mahalanobis distance with velocity covariance (slower but handles variable motion)|
 
 
 ### 🎯 Preset Configurations for Common Scenarios
@@ -392,21 +424,21 @@ Best Settings for Performance:
   For good balance (speed + accuracy): up to 300 individuals
 ```python
   config = SwarmSortConfig(
-      kalman_type="simple",           # Fast but accurate enough                                                                                                                                         
-      assignment_strategy="hybrid",    # Good balance                                                                                                                                                    
-      uncertainty_weight=0.33,         # Some uncertainty handling                                                                                                                                       
-      do_embeddings=True,              # Use embeddings if available                                                                                                                                     
-      reid_enabled=False,              # Skip for speed                                                                                                                                                  
+      kalman_type="simple",           # Default
+      assignment_strategy="hybrid",    # Default
+      uncertainty_weight=0.33,         # CUSTOM: enables uncertainty (default is 0)
+      do_embeddings=True,              # Default
+      reid_enabled=False,              # CUSTOM: disabled for speed (default is True)
   )
 ```
   For maximum speed across all scales: 300+ individuals
 ```python
   config = SwarmSortConfig(
-      kalman_type="simple",           # Fastest Kalman filter                                                                                                                                            
-      assignment_strategy="greedy",    # Fastest assignment                                                                                                                                              
-      uncertainty_weight=0.0,          # Disable uncertainty                                                                                                                                             
-      do_embeddings=False,             # No embeddings                                                                                                                                                   
-      reid_enabled=False,              # No re-identification                                                                                                                                            
+      kalman_type="simple",           # Default
+      assignment_strategy="greedy",    # CUSTOM: fastest (default is 'hybrid')
+      uncertainty_weight=0.0,          # Default (disabled)
+      do_embeddings=False,             # CUSTOM: disabled (default is True)
+      reid_enabled=False,              # CUSTOM: disabled (default is True)
   )
 ```
 
@@ -417,22 +449,22 @@ Best Settings for Performance:
 
 config = SwarmSortConfig(
     # 1. How far can an object move between frames?
-    max_distance=150.0,  # Increase for fast objects, decrease for slow
-    
+    max_distance=80.0,   # Default. Increase for fast objects, decrease for slow
+
     # 2. How many frames to confirm a new track?
-    min_consecutive_detections=6,  # Lower = faster response, more false positives
-                                   # Higher = slower response, fewer false positives
-    
+    min_consecutive_detections=10,  # Default. Lower = faster response, more false positives
+                                    # Higher = slower response, fewer false positives
+
     # 3. How long to keep lost tracks?
-    max_track_age=30,  # At 30 FPS, this is 1 second of "memory"
-    
+    max_track_age=30,  # Default. At 30 FPS, this is 1 second of "memory"
+
     # 4. Use appearance features?
-    do_embeddings=True,  # True if objects look different from each other
-                        # False if all objects look the same (e.g., identical boxes)
-    
+    do_embeddings=True,  # Default. True if objects look different from each other
+                         # False if all objects look the same (e.g., identical boxes)
+
     # 5. How to handle crowded scenes?
-    collision_freeze_embeddings=True,  # Prevents ID switches when objects touch
-    uncertainty_weight=0.33,  # Higher = more conservative in uncertain situations
+    collision_freeze_embeddings=True,  # Default. Prevents ID switches when objects touch
+    uncertainty_weight=0.3,  # CUSTOM (default is 0). Higher = more conservative
 )
 ```
 
@@ -464,11 +496,11 @@ tracker = SwarmSortTracker()
 
 # Configure for specific use cases
 config = SwarmSortConfig(
-    do_embeddings=True,
-    reid_enabled=True,
-    max_distance=100.0,
-    assignment_strategy='hybrid',  # Use hybrid assignment strategy
-    uncertainty_weight=0.33         # Enable uncertainty-based costs
+    do_embeddings=True,             # Default
+    reid_enabled=True,              # Default
+    max_distance=100.0,             # Custom: default is 80
+    assignment_strategy='hybrid',   # Default
+    uncertainty_weight=0.3          # Custom: enables uncertainty (default is 0)
 )
 tracker_configured = SwarmSortTracker(config)
 ```
@@ -591,7 +623,9 @@ SwarmSort is optimized for real-world performance:
 
 ## Visualization Example
 
-SwarmSort includes built-in visualization utilities for beautiful tracking displays:
+SwarmSort includes built-in visualization utilities for beautiful tracking displays.
+
+> **Note**: Some visualization features require `matplotlib`. Install with: `pip install matplotlib`
 <details>
   <summary>Click to expand code example</summary>
 
@@ -856,9 +890,9 @@ SwarmSort knows when it's confident and when it's not:
 # - Crowded areas: "Need to be extra careful here"
 
 config = SwarmSortConfig(
-    uncertainty_weight=0.33,  # How much to consider uncertainty
-    # 0.0 = Ignore uncertainty (aggressive)
-    # 0.5 = Balanced approach
+    uncertainty_weight=0.3,  # Enable uncertainty (default is 0 = disabled)
+    # 0.0 = Ignore uncertainty (default, aggressive)
+    # 0.3-0.5 = Balanced approach
     # 1.0 = Very conservative
 )
 
@@ -868,6 +902,39 @@ drone_config = SwarmSortConfig(
     kalman_type='oc',       # Better motion model for erratic movement
 )
 ```
+
+#### **Probabilistic vs Standard Cost Computation**
+
+SwarmSort offers two modes for computing association costs:
+
+```python
+# Standard mode (default) - Fast and usually sufficient
+config = SwarmSortConfig(
+    use_probabilistic_costs=False,  # Default
+)
+
+# Probabilistic mode - More sophisticated but slower
+config = SwarmSortConfig(
+    use_probabilistic_costs=True,
+)
+```
+
+| Mode | How it works | Best for |
+|------|--------------|----------|
+| **Standard** (`False`) | Simple Euclidean distance between detections and predicted positions. Fast O(1) per pair. | Most use cases, real-time tracking, >100 objects |
+| **Probabilistic** (`True`) | Mahalanobis distance using velocity-based covariance. Accounts for motion direction uncertainty. | Complex motion patterns, variable speeds, <50 objects |
+
+**When to use probabilistic costs:**
+- Objects have highly variable speeds (some fast, some slow)
+- Motion direction matters (e.g., objects more likely to continue in same direction)
+- You need better handling of tracks with many missed frames
+- Accuracy is more important than speed
+
+**When to keep standard costs (default):**
+- Real-time performance is critical
+- Objects move at similar speeds
+- You have many objects (>100)
+- Simple motion patterns (microscopy, top-view cameras)
 
 #### **Smart Collision Prevention**
 Prevents ID switches when objects get close:

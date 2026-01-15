@@ -370,7 +370,7 @@ class SwarmSortConfig(BaseConfig):
     - 0.5 = Partial adjustment (more strict on appearance)
     """
 
-    max_embeddings_per_track: int = 15
+    max_embeddings_per_track: int = 7
     """Maximum number of appearance samples to store per track.
 
     Each track keeps a history of appearance features to handle appearance changes
@@ -405,19 +405,22 @@ class SwarmSortConfig(BaseConfig):
         )
     """
 
-    embedding_matching_method: Literal["average", "weighted_average", "best_match", "median"] = "median"
+    embedding_matching_method: Literal["last", "average", "weighted_average", "best_match", "median"] = "median"
     """How to match current appearance against track history.
+
+    - "last": Use only the most recent embedding (fastest, 2-3x speedup)
+      Best for real-time applications where appearance is consistent
 
     - "average": Compare against mean of all stored appearances
       Simple, stable, but slow to adapt to changes
 
     - "weighted_average": Recent appearances count more
-      Good balance of stability and adaptability (recommended)
+      Good balance of stability and adaptability
 
     - "best_match": Find best matching historical appearance
       Handles appearance changes well but more computationally expensive
 
-    - "median": Median distance to all stored appearances
+    - "median": Median distance to all stored appearances (default)
       More robust to outliers than average, good for noisy embeddings
     """
 
@@ -442,7 +445,20 @@ class SwarmSortConfig(BaseConfig):
     # ============================================================================
 
     sparse_computation_threshold: int = 300
-    """Use the many object optimized sparse computation"""
+    """Threshold for switching to sparse computation mode.
+
+    When both the number of detections AND tracks exceed this threshold, the tracker
+    uses grid-based spatial indexing to compute costs only for nearby detection-track
+    pairs. This reduces complexity from O(n*m) to O(n*k) where k is the average number
+    of nearby tracks per detection.
+
+    Benefits:
+    - Significant speedup for high-density scenarios (300+ objects)
+    - Grid size = max_distance * 1.5, only pairs in 3x3 neighborhood are considered
+    - Automatically disabled if sparse pairs > 50% of full matrix (not beneficial)
+
+    Note: Sparse mode is not compatible with use_probabilistic_costs=True.
+    """
 
     use_probabilistic_costs: bool = False
     """Use probabilistic fusion for cost computation.
@@ -856,7 +872,7 @@ class SwarmSortConfig(BaseConfig):
         if self.max_embeddings_per_track < 1:
             raise ValueError("max_embeddings_per_track must be at least 1")
 
-        if self.embedding_matching_method not in ["average", "weighted_average", "best_match", "median"]:
+        if self.embedding_matching_method not in ["last", "average", "weighted_average", "best_match", "median"]:
             raise ValueError("Invalid embedding_matching_method")
 
         if self.min_consecutive_detections < 1:
@@ -986,7 +1002,7 @@ def validate_config(config: SwarmSortConfig) -> Tuple[bool, List[str]]:
     if config.max_embeddings_per_track < 1:
         errors.append("max_embeddings_per_track must be at least 1")
 
-    if config.embedding_matching_method not in ["average", "weighted_average", "best_match", "median"]:
+    if config.embedding_matching_method not in ["last", "average", "weighted_average", "best_match", "median"]:
         errors.append(f"Invalid embedding_matching_method: {config.embedding_matching_method}")
 
     if config.min_consecutive_detections < 1:

@@ -50,7 +50,9 @@ from .cost_computation import (
     compute_freeze_flags_vectorized,
     compute_neighbor_counts_vectorized,
     compute_deduplication_mask,
-    estimate_track_covariances
+    estimate_track_covariances,
+    compute_sparse_cost_matrix,
+    compute_sparse_embedding_distances
 )
 
 from .assignment import (
@@ -182,6 +184,9 @@ class SwarmSortTracker:
         # parallel_cost_matrix: Use parallel cost matrix computation for better performance
         # Note: May produce slightly non-deterministic results due to floating-point order
         self.parallel_cost_matrix = getattr(self.config, 'parallel_cost_matrix', False)
+
+        # Sparse computation threshold - use grid-based spatial indexing for large-scale scenarios
+        self.sparse_computation_threshold = getattr(self.config, 'sparse_computation_threshold', 300)
 
         # Initialization threshold - minimum confidence to create pending detection
         self.init_conf_threshold = getattr(self.config, 'init_conf_threshold', 0.0)
@@ -647,6 +652,42 @@ class SwarmSortTracker:
             cost_timings['uncertainty_ratios'] = time.perf_counter() - t0
             t0 = time.perf_counter()
 
+        # Check for sparse computation mode (large-scale scenarios)
+        # Note: Sparse mode is not compatible with probabilistic costs currently
+        sparse_pairs = None
+        if not self.use_probabilistic_costs:
+            sparse_pairs = self._compute_sparse_pairs(
+                det_positions, track_positions, self.max_distance * 1.5
+            )
+
+        if detailed_timing and sparse_pairs is not None:
+            cost_timings['sparse_pairs'] = time.perf_counter() - t0
+            n_pairs = len(sparse_pairs[0])
+            t0 = time.perf_counter()
+
+        # Use sparse cost matrix if candidate pairs were found
+        if sparse_pairs is not None:
+            sparse_det_indices, sparse_track_indices = sparse_pairs
+
+            result = compute_sparse_cost_matrix(
+                det_positions, track_positions, track_last_positions,
+                track_misses, scaled_embedding_distances,
+                self.embedding_weight, self.max_distance, do_embeddings,
+                miss_threshold, self.embedding_threshold_adjustment,
+                sparse_det_indices, sparse_track_indices,
+                track_uncertainty_ratios, self.uncertainty_weight
+            )
+
+            if detailed_timing:
+                cost_timings['cost_func'] = time.perf_counter() - t0
+                cost_timings['total'] = time.perf_counter() - t_start
+                self._print_cost_matrix_timings(
+                    cost_timings, n_dets, n_tracks,
+                    f'sparse({n_pairs}/{n_dets*n_tracks})'
+                )
+
+            return result
+
         # Use appropriate cost function
         if self.use_probabilistic_costs:
             # Extract track velocities for covariance estimation
@@ -722,6 +763,79 @@ class SwarmSortTracker:
 
         print(f"  [CostMatrix] {mode} | {n_dets}x{n_tracks} | total={total_ms:.2f}ms | {' '.join(breakdown)}")
 
+    def _compute_sparse_pairs(
+        self,
+        det_positions: np.ndarray,
+        track_positions: np.ndarray,
+        max_search_radius: float
+    ) -> Optional[Tuple[np.ndarray, np.ndarray]]:
+        """Compute sparse candidate pairs using spatial grid indexing.
+
+        For large-scale scenarios (many detections and tracks), this uses grid-based
+        spatial indexing to find only nearby detection-track pairs, reducing complexity
+        from O(n*m) to O(n*k) where k is the average number of nearby tracks.
+
+        Args:
+            det_positions: Detection positions [N_det, 2]
+            track_positions: Track predicted positions [N_track, 2]
+            max_search_radius: Maximum distance to consider (grid cell size)
+
+        Returns:
+            Tuple of (det_indices, track_indices) for candidate pairs,
+            or None if sparse mode should not be used (too few objects or too many pairs)
+        """
+        n_dets = len(det_positions)
+        n_tracks = len(track_positions)
+
+        # Only use spatial indexing when it's beneficial (overhead is worth it)
+        if n_dets < self.sparse_computation_threshold or n_tracks < self.sparse_computation_threshold:
+            return None
+
+        # Build spatial grid index for tracks
+        grid_size = max_search_radius
+        if grid_size <= 0:
+            return None
+
+        track_grid = {}
+
+        # Place tracks in grid cells
+        for j in range(n_tracks):
+            x, y = track_positions[j]
+            grid_x = int(x / grid_size)
+            grid_y = int(y / grid_size)
+            key = (grid_x, grid_y)
+            if key not in track_grid:
+                track_grid[key] = []
+            track_grid[key].append(j)
+
+        # Find candidate pairs by checking 3x3 neighborhood of each detection
+        det_indices = []
+        track_indices = []
+
+        for i in range(n_dets):
+            x, y = det_positions[i]
+            grid_x = int(x / grid_size)
+            grid_y = int(y / grid_size)
+
+            # Check neighboring grid cells (3x3 neighborhood)
+            for dx in [-1, 0, 1]:
+                for dy in [-1, 0, 1]:
+                    key = (grid_x + dx, grid_y + dy)
+                    if key in track_grid:
+                        for j in track_grid[key]:
+                            det_indices.append(i)
+                            track_indices.append(j)
+
+        if not det_indices:
+            return None
+
+        # Only use sparse mode if it reduces computation significantly (< 50% of full matrix)
+        n_pairs = len(det_indices)
+        if n_pairs >= n_dets * n_tracks * 0.5:
+            return None
+
+        return np.array(det_indices, dtype=np.int32), np.array(track_indices, dtype=np.int32)
+
     def _compute_embedding_distances(
         self,
         detections: List[Detection],
@@ -731,6 +845,8 @@ class SwarmSortTracker:
         track_positions: np.ndarray = None
     ) -> np.ndarray:
         """Compute embedding distances between detections and tracks.
+
+        OPTIMIZED VERSION with buffer reuse and vectorized operations.
 
         For detections without embeddings (has_embedding_mask[i] = False),
         the embedding distance is set to normalized position distance so that
@@ -747,6 +863,8 @@ class SwarmSortTracker:
         Returns:
             Scaled embedding distance matrix [N_det, N_track]
         """
+        from scipy.spatial.distance import cdist
+
         n_dets = len(detections)
         n_tracks = len(tracks)
 
@@ -758,12 +876,6 @@ class SwarmSortTracker:
         dets_with_emb = np.where(has_embedding_mask)[0]
         dets_without_emb = np.where(~has_embedding_mask)[0]
 
-        # Log if we have partial embeddings
-        if len(dets_without_emb) > 0 and len(dets_with_emb) > 0:
-            logger.debug(
-                f"Partial embeddings: {len(dets_with_emb)}/{n_dets} detections have embeddings"
-            )
-
         # Get embedding dimension from first detection with embedding, or config default
         emb_dim = getattr(self.config, 'default_embedding_dimension', 128)
         if len(dets_with_emb) > 0:
@@ -771,46 +883,54 @@ class SwarmSortTracker:
             if first_emb is not None:
                 emb_dim = len(first_emb)
 
-        # Prepare detection embeddings - only for those that have them
-        det_embeddings = np.zeros((n_dets, emb_dim), dtype=np.float32)
+        # === OPTIMIZATION: Reusable buffer for detection embeddings ===
+        if not hasattr(self, '_emb_dist_det_buffer') or self._emb_dist_det_buffer.shape[0] < n_dets or self._emb_dist_det_buffer.shape[1] != emb_dim:
+            self._emb_dist_det_buffer = np.zeros((max(n_dets, 100), emb_dim), dtype=np.float32)
+
+        det_embeddings = self._emb_dist_det_buffer[:n_dets, :emb_dim]
+        det_embeddings[:] = 0.0
+
+        # Batch extract detection embeddings
         for i in dets_with_emb:
-            det_embeddings[i] = np.asarray(detections[i].embedding, dtype=np.float32)[:emb_dim]
+            emb = detections[i].embedding
+            if emb is not None:
+                det_embeddings[i] = np.asarray(emb, dtype=np.float32)[:emb_dim]
 
-        # Compute all norms at once (vectorized)
+        # Vectorized normalization
         norms = np.linalg.norm(det_embeddings, axis=1, keepdims=True)
+        mask = (norms > 1e-8).flatten()
+        det_embeddings[mask] /= norms[mask]
 
-        # Normalize where needed: norm > 0 and not already unit length
-        # Avoid division by zero by using np.where
-        needs_norm = (norms > 1e-8) & (np.abs(norms - 1.0) > 0.01)
-        safe_norms = np.where(norms > 1e-8, norms, 1.0)  # Avoid div by zero
-        det_embeddings = np.where(needs_norm, det_embeddings / safe_norms, det_embeddings)
+        # === Track embedding extraction with buffer reuse ===
+        track_counts = np.array([len(t.embedding_history) for t in tracks], dtype=np.int32)
+        total_embs = sum(max(c, 1) for c in track_counts)
 
-        # Prepare track embeddings using vectorized operations
-        # OPTIMIZATION: Avoid np.vstack per track - directly copy embeddings
+        # Reusable buffer for track embeddings
+        if not hasattr(self, '_emb_dist_track_buffer') or len(self._emb_dist_track_buffer) < total_embs * emb_dim:
+            self._emb_dist_track_buffer = np.zeros(max(total_embs * emb_dim, 10000), dtype=np.float32)
 
-        # First pass: count total embeddings and per-track counts
-        track_counts = np.zeros(n_tracks, dtype=np.int32)
-        total_embeddings = 0
-        for i, track in enumerate(tracks):
-            count = len(track.embedding_history)
-            track_counts[i] = count if count > 0 else 0
-            total_embeddings += count if count > 0 else 1  # Reserve space for zero embedding
+        track_embeddings_flat = self._emb_dist_track_buffer[:total_embs * emb_dim]
+        track_embeddings_flat[:] = 0.0
 
-        # Pre-allocate flat array (zeros handles empty tracks automatically)
-        track_embeddings_flat = np.zeros(total_embeddings * emb_dim, dtype=np.float32)
-
-        # Second pass: directly copy each embedding without intermediate vstack
+        # Copy track embeddings - try vectorized stack first, fallback to loop
         offset = 0
-        for i, track in enumerate(tracks):
-            n_track_embs = len(track.embedding_history)
-            if n_track_embs > 0:
-                # Directly iterate and copy each embedding (avoids vstack allocation)
-                for emb in track.embedding_history:
-                    emb_arr = np.asarray(emb, dtype=np.float32).ravel()
-                    track_embeddings_flat[offset:offset + emb_dim] = emb_arr[:emb_dim]
-                    offset += emb_dim
+        for track in tracks:
+            hist = track.embedding_history
+            n_hist = len(hist)
+            if n_hist > 0:
+                try:
+                    # Vectorized: stack all embeddings at once
+                    stacked = np.vstack(list(hist))
+                    flat_len = n_hist * emb_dim
+                    track_embeddings_flat[offset:offset + flat_len] = stacked.ravel()[:flat_len]
+                    offset += flat_len
+                except Exception:
+                    # Fallback: copy one by one
+                    for emb in hist:
+                        emb_arr = np.asarray(emb, dtype=np.float32).ravel()
+                        track_embeddings_flat[offset:offset + emb_dim] = emb_arr[:emb_dim]
+                        offset += emb_dim
             else:
-                # Zero embedding for tracks without history (already zeros)
                 offset += emb_dim
 
         # Method mapping
@@ -825,7 +945,6 @@ class SwarmSortTracker:
 
         # Compute distances
         # OPTIMIZATION: Use fast matrix multiplication path for method=0 (last embedding)
-        # This is 2-3x faster than the Numba loop for large matrices
         if method == 0:
             distances = compute_embedding_distances_matmul(
                 det_embeddings, track_embeddings_flat, track_counts
@@ -842,16 +961,10 @@ class SwarmSortTracker:
             self.embedding_scaler.update_statistics(distances_flat)
             distances = scaled_flat.reshape(distances.shape)
 
-        # For detections without embeddings, set embedding distance = pos_dist / max_distance
-        # This makes the combined cost equal position distance:
-        # cost = (1-w)*pos + w*(pos/max)*max = (1-w)*pos + w*pos = pos
+        # === OPTIMIZATION: Vectorized fallback for dets without embeddings ===
         if len(dets_without_emb) > 0 and det_positions is not None and track_positions is not None:
-            for i in dets_without_emb:
-                for j in range(n_tracks):
-                    # Compute position distance
-                    pos_dist = np.linalg.norm(det_positions[i] - track_positions[j])
-                    # Normalize to [0, 1] range (same as scaled embedding distances)
-                    distances[i, j] = min(pos_dist / self.max_distance, 1.0)
+            pos_dists = cdist(det_positions[dets_without_emb], track_positions)
+            distances[dets_without_emb, :] = np.clip(pos_dists / self.max_distance, 0, 1)
 
         return distances
 

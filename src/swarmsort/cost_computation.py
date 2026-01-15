@@ -889,3 +889,179 @@ def compute_deduplication_mask(
                 keep[idx_j] = False
 
     return keep
+
+
+# ============================================================================
+# SPARSE COST MATRIX COMPUTATION
+# ============================================================================
+
+@nb.njit(fastmath=True, cache=True)
+def compute_sparse_cost_matrix(
+    det_positions: np.ndarray,
+    track_positions: np.ndarray,
+    track_last_positions: np.ndarray,
+    track_misses: np.ndarray,
+    scaled_embedding_distances: np.ndarray,
+    embedding_weight: float,
+    max_distance: float,
+    do_embeddings: bool,
+    miss_threshold: int,
+    embedding_threshold_adjustment: float,
+    sparse_det_indices: np.ndarray,
+    sparse_track_indices: np.ndarray,
+    track_uncertainty_ratios: np.ndarray,
+    uncertainty_weight: float
+) -> np.ndarray:
+    """Compute cost matrix only for sparse candidate pairs.
+
+    For large-scale scenarios, this computes costs only for detection-track pairs
+    that are spatially close (determined by sparse_det_indices and sparse_track_indices).
+    All other pairs are set to infinity.
+
+    This reduces complexity from O(n*m) to O(k) where k is the number of sparse pairs,
+    typically k << n*m when objects are spatially distributed.
+
+    Args:
+        det_positions: Detection positions [N_det, 2]
+        track_positions: Track predicted positions [N_track, 2]
+        track_last_positions: Track last detection positions [N_track, 2]
+        track_misses: Number of consecutive misses per track [N_track]
+        scaled_embedding_distances: Pre-computed embedding distances [N_det, N_track]
+        embedding_weight: Weight for embedding cost (0-1)
+        max_distance: Maximum association distance
+        do_embeddings: Whether to include embedding cost
+        miss_threshold: Misses before using last position
+        embedding_threshold_adjustment: Threshold expansion factor for embeddings
+        sparse_det_indices: Detection indices for sparse pairs [N_pairs]
+        sparse_track_indices: Track indices for sparse pairs [N_pairs]
+        track_uncertainty_ratios: Uncertainty ratio per track (for penalty, may be empty)
+        uncertainty_weight: Weight for uncertainty penalty
+
+    Returns:
+        Cost matrix [N_det, N_track] with inf for non-candidate pairs
+    """
+    n_dets = det_positions.shape[0]
+    n_tracks = track_positions.shape[0]
+    n_pairs = len(sparse_det_indices)
+
+    # Initialize with infinity (non-candidate pairs are not viable)
+    cost_matrix = np.full((n_dets, n_tracks), np.inf, dtype=np.float32)
+
+    # Compute effective max distance for gating
+    if do_embeddings:
+        effective_max = max_distance * (1.0 + embedding_weight * embedding_threshold_adjustment)
+    else:
+        effective_max = max_distance
+
+    effective_max_sq = effective_max * effective_max
+
+    # Check if uncertainty is enabled
+    use_uncertainty = uncertainty_weight > 0.0 and len(track_uncertainty_ratios) == n_tracks
+
+    # Compute costs only for sparse pairs
+    for p in range(n_pairs):
+        i = sparse_det_indices[p]
+        j = sparse_track_indices[p]
+
+        # Skip if already computed (duplicate pair from overlapping grid cells)
+        if cost_matrix[i, j] < np.inf:
+            continue
+
+        # Choose position: predicted vs last based on miss count
+        if track_misses[j] >= miss_threshold:
+            tx = track_last_positions[j, 0]
+            ty = track_last_positions[j, 1]
+        else:
+            tx = track_positions[j, 0]
+            ty = track_positions[j, 1]
+
+        # Compute position distance
+        dx = det_positions[i, 0] - tx
+        dy = det_positions[i, 1] - ty
+        pos_distance_sq = dx * dx + dy * dy
+
+        # Gating check
+        if pos_distance_sq > effective_max_sq:
+            continue
+
+        pos_distance = math.sqrt(pos_distance_sq)
+
+        # Compute cost
+        if do_embeddings:
+            emb_dist = scaled_embedding_distances[i, j]
+            cost = (1.0 - embedding_weight) * pos_distance + embedding_weight * emb_dist * max_distance
+        else:
+            cost = pos_distance
+
+        # Add uncertainty penalty if enabled
+        if use_uncertainty:
+            cost += uncertainty_weight * track_uncertainty_ratios[j] * max_distance
+
+        cost_matrix[i, j] = cost
+
+    return cost_matrix
+
+
+@nb.njit(fastmath=True, parallel=True, cache=True)
+def compute_sparse_embedding_distances(
+    det_embeddings: np.ndarray,
+    track_embeddings: np.ndarray,
+    sparse_det_indices: np.ndarray,
+    sparse_track_indices: np.ndarray,
+    n_dets: int,
+    n_tracks: int
+) -> np.ndarray:
+    """Compute embedding distances only for sparse candidate pairs.
+
+    This is a companion function for sparse mode that computes cosine distances
+    only for the candidate pairs, avoiding the full O(n*m) matrix computation.
+
+    Args:
+        det_embeddings: Detection embeddings [N_det, emb_dim]
+        track_embeddings: Track embeddings [N_track, emb_dim]
+        sparse_det_indices: Detection indices for sparse pairs [N_pairs]
+        sparse_track_indices: Track indices for sparse pairs [N_pairs]
+        n_dets: Total number of detections
+        n_tracks: Total number of tracks
+
+    Returns:
+        Embedding distance matrix [N_det, N_track] with 0 for non-candidate pairs
+    """
+    n_pairs = len(sparse_det_indices)
+    emb_dim = det_embeddings.shape[1]
+
+    # Initialize with zeros (non-candidate pairs get 0 distance, will be gated by position)
+    distances = np.zeros((n_dets, n_tracks), dtype=np.float32)
+
+    # Compute cosine distances for sparse pairs
+    for p in nb.prange(n_pairs):
+        i = sparse_det_indices[p]
+        j = sparse_track_indices[p]
+
+        # Skip if already computed
+        if distances[i, j] > 0:
+            continue
+
+        # Compute cosine similarity
+        dot_product = 0.0
+        norm_det_sq = 0.0
+        norm_track_sq = 0.0
+
+        for k in range(emb_dim):
+            d_val = det_embeddings[i, k]
+            t_val = track_embeddings[j, k]
+            dot_product += d_val * t_val
+            norm_det_sq += d_val * d_val
+            norm_track_sq += t_val * t_val
+
+        norm_det = math.sqrt(norm_det_sq)
+        norm_track = math.sqrt(norm_track_sq)
+
+        if norm_det > 1e-8 and norm_track > 1e-8:
+            cos_sim = dot_product / (norm_det * norm_track)
+            # Cosine distance in [0, 1] range
+            distances[i, j] = (1.0 - cos_sim) * 0.5
+        else:
+            distances[i, j] = 1.0  # Max distance for zero embeddings
+
+    return distances
