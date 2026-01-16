@@ -70,6 +70,8 @@ def run_single_benchmark(
         max_detection_gap=1,
         # Keep consistent thresholds
         greedy_threshold=30.0,
+        # Enable timing for debugging
+        debug_timings=True,
     )
     tracker = SwarmSortTracker(config)
     
@@ -648,4 +650,4 @@ if __name__ == "__main__":
     
     # Example for IDE usage - uncomment and modify as needed:
     # Quick test with fewer frames and objects
-    main(run=True, plot=True, objects=[10, 150, 500, 1000], frames=500, cli_mode=False)
+    main(run=True, plot=True, objects=[100, 500, 1000], frames=100, cli_mode=False)

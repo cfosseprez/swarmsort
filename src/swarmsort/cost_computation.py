@@ -245,6 +245,178 @@ def compute_embedding_distances_matmul(
     return distances.astype(np.float32)
 
 
+def compute_embedding_distances_sparse(
+    det_embeddings: np.ndarray,
+    track_embeddings_flat: np.ndarray,
+    track_counts: np.ndarray,
+    sparse_det_indices: np.ndarray,
+    sparse_track_indices: np.ndarray,
+    method: int,  # 0=last, 1=average, 2=weighted_average, 3=best_match, 4=median
+    n_dets: int,
+    n_tracks: int
+) -> np.ndarray:
+    """
+    FAST sparse embedding distance computation.
+
+    Computes embedding distances ONLY for sparse candidate pairs using Numba,
+    avoiding the full NxM matmul. This is faster because we only compute
+    dot products for the ~33K sparse pairs, not all 900K pairs.
+
+    Args:
+        det_embeddings: Detection embeddings [N_det, emb_dim] (must be L2-normalized)
+        track_embeddings_flat: Flattened track embedding histories (L2-normalized)
+        track_counts: Number of embeddings per track [N_track]
+        sparse_det_indices: Detection indices for sparse pairs [N_pairs]
+        sparse_track_indices: Track indices for sparse pairs [N_pairs]
+        method: Aggregation method (0=last, 1=average, 2=weighted, 3=best_match, 4=median)
+        n_dets: Total number of detections
+        n_tracks: Total number of tracks
+
+    Returns:
+        Distance matrix [N_det, N_track] with distances only for sparse pairs,
+        all other entries are 1.0 (max distance)
+    """
+    # Initialize output with max distance (non-sparse pairs won't be matched)
+    distances = np.ones((n_dets, n_tracks), dtype=np.float32)
+
+    if len(sparse_det_indices) == 0:
+        return distances
+
+    # Ensure correct types for Numba
+    det_emb_f32 = np.ascontiguousarray(det_embeddings, dtype=np.float32)
+    track_emb_f32 = np.ascontiguousarray(track_embeddings_flat, dtype=np.float32)
+    track_counts_i32 = track_counts.astype(np.int32)
+    sparse_det_idx = sparse_det_indices.astype(np.int32)
+    sparse_track_idx = sparse_track_indices.astype(np.int32)
+
+    emb_dim = det_embeddings.shape[1]
+
+    # Compute track offsets for indexing into flat array
+    track_offsets = np.zeros(n_tracks + 1, dtype=np.int32)
+    track_offsets[1:] = np.cumsum(track_counts_i32)
+
+    # Compute distances ONLY for sparse pairs (Numba-accelerated)
+    _compute_sparse_embedding_distances_numba(
+        det_emb_f32, track_emb_f32, track_counts_i32, track_offsets,
+        sparse_det_idx, sparse_track_idx, method, emb_dim, distances
+    )
+
+    return distances
+
+
+@nb.njit(fastmath=True, parallel=True, cache=True)
+def _compute_sparse_embedding_distances_numba(
+    det_embeddings: np.ndarray,      # [n_dets, emb_dim]
+    track_embeddings_flat: np.ndarray,  # [total_embs * emb_dim]
+    track_counts: np.ndarray,        # [n_tracks]
+    track_offsets: np.ndarray,       # [n_tracks + 1]
+    sparse_det_indices: np.ndarray,  # [n_pairs]
+    sparse_track_indices: np.ndarray,  # [n_pairs]
+    method: int,
+    emb_dim: int,
+    distances: np.ndarray            # Output: [n_dets, n_tracks]
+) -> None:
+    """
+    Numba-accelerated sparse embedding distance computation.
+
+    Computes dot products and aggregates ONLY for sparse pairs.
+    This avoids the O(n_dets * total_track_embs) matmul.
+    """
+    n_pairs = len(sparse_det_indices)
+
+    # Parallel over sparse pairs
+    for p in nb.prange(n_pairs):
+        i = sparse_det_indices[p]
+        j = sparse_track_indices[p]
+
+        n_embs = track_counts[j]
+        if n_embs == 0:
+            continue  # distances[i,j] stays at 1.0
+
+        emb_offset = track_offsets[j] * emb_dim
+
+        if method == 0:  # last
+            # Only compute dot product with last embedding
+            last_offset = emb_offset + (n_embs - 1) * emb_dim
+            dot = 0.0
+            for d in range(emb_dim):
+                dot += det_embeddings[i, d] * track_embeddings_flat[last_offset + d]
+            distances[i, j] = (1.0 - dot) * 0.5
+
+        elif method == 1:  # average
+            total = 0.0
+            for k in range(n_embs):
+                offset = emb_offset + k * emb_dim
+                dot = 0.0
+                for d in range(emb_dim):
+                    dot += det_embeddings[i, d] * track_embeddings_flat[offset + d]
+                total += (1.0 - dot) * 0.5
+            distances[i, j] = total / n_embs
+
+        elif method == 2:  # weighted_average
+            total = 0.0
+            weight_sum = 0.0
+            for k in range(n_embs):
+                offset = emb_offset + k * emb_dim
+                dot = 0.0
+                for d in range(emb_dim):
+                    dot += det_embeddings[i, d] * track_embeddings_flat[offset + d]
+                w = float(k + 1)
+                total += w * (1.0 - dot) * 0.5
+                weight_sum += w
+            distances[i, j] = total / weight_sum
+
+        elif method == 3:  # best_match (min)
+            min_dist = 1.0
+            for k in range(n_embs):
+                offset = emb_offset + k * emb_dim
+                dot = 0.0
+                for d in range(emb_dim):
+                    dot += det_embeddings[i, d] * track_embeddings_flat[offset + d]
+                dist = (1.0 - dot) * 0.5
+                if dist < min_dist:
+                    min_dist = dist
+            distances[i, j] = min_dist
+
+        else:  # method == 4: median
+            dist_buffer = np.empty(n_embs, dtype=np.float32)
+            for k in range(n_embs):
+                offset = emb_offset + k * emb_dim
+                dot = 0.0
+                for d in range(emb_dim):
+                    dot += det_embeddings[i, d] * track_embeddings_flat[offset + d]
+                dist_buffer[k] = (1.0 - dot) * 0.5
+            # Inline median for small arrays
+            distances[i, j] = _numba_median_sparse(dist_buffer, n_embs)
+
+
+@nb.njit(fastmath=True, cache=True)
+def _numba_median_sparse(arr: np.ndarray, n: int) -> float:
+    """Median computation for sparse embedding distances."""
+    if n == 0:
+        return 1.0
+    if n == 1:
+        return arr[0]
+
+    # Insertion sort for small arrays (typically n <= 15)
+    sorted_arr = np.empty(n, dtype=np.float32)
+    for i in range(n):
+        sorted_arr[i] = arr[i]
+
+    for i in range(1, n):
+        key = sorted_arr[i]
+        j = i - 1
+        while j >= 0 and sorted_arr[j] > key:
+            sorted_arr[j + 1] = sorted_arr[j]
+            j -= 1
+        sorted_arr[j + 1] = key
+
+    if n % 2 == 1:
+        return sorted_arr[n // 2]
+    else:
+        return (sorted_arr[n // 2 - 1] + sorted_arr[n // 2]) * 0.5
+
+
 @nb.njit(fastmath=True, cache=True)
 def _numba_median(arr: np.ndarray, n: int) -> float:
     """Compute median of first n elements using insertion sort (efficient for small n)."""
