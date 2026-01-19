@@ -34,7 +34,6 @@ from .track_state import PendingDetection, FastTrackState
 
 from .kalman_filters import (
     simple_kalman_update,
-    simple_kalman_predict,
     oc_sort_predict,
     oc_sort_update,
     compute_oc_sort_cost_matrix
@@ -200,14 +199,16 @@ class SwarmSortTracker:
         self._frame_count = 0
         self.timings = {}
 
-        # OPTIMIZATION: Reusable array pools to avoid per-frame allocations
-        # These grow as needed and are reused across frames
-        self._reusable_det_positions: Optional[np.ndarray] = None
-        self._reusable_track_positions: Optional[np.ndarray] = None
-        self._reusable_track_last_positions: Optional[np.ndarray] = None
-        self._reusable_track_misses: Optional[np.ndarray] = None
-        self._max_dets_seen = 0
-        self._max_tracks_seen = 0
+        # OPTIMIZATION: Pre-allocate array pools to avoid per-frame allocations
+        # Pre-allocate with reasonable default size to avoid early reallocation spikes
+        # These grow as needed if object count exceeds initial allocation
+        initial_pool_size = getattr(self.config, 'initial_pool_size', 150)
+        self._reusable_det_positions = np.empty((initial_pool_size, 2), dtype=np.float32)
+        self._reusable_track_positions = np.empty((initial_pool_size, 2), dtype=np.float32)
+        self._reusable_track_last_positions = np.empty((initial_pool_size, 2), dtype=np.float32)
+        self._reusable_track_misses = np.empty(initial_pool_size, dtype=np.int32)
+        self._max_dets_seen = initial_pool_size
+        self._max_tracks_seen = initial_pool_size
 
     def _initialize_embeddings(self):
         """Initialize embedding-related components.
@@ -262,30 +263,59 @@ class SwarmSortTracker:
             self.embedding_scaler = EmbeddingDistanceScaler(
                 method=getattr(self.config, 'embedding_scaling_method', 'min_robustmax')
             )
+            # Warmup the scaler to avoid mode transition spike at min_samples
+            if hasattr(self.embedding_scaler, 'warmup'):
+                self.embedding_scaler.warmup()
         else:
             self.embedding_extractor = None
             self.embedding_scaler = None
 
     def _precompile_numba(self):
-        """Pre-compile Numba functions for better performance."""
+        """Pre-compile Numba functions for better performance.
+
+        Uses realistic data sizes to ensure all code paths are compiled upfront,
+        avoiding JIT compilation spikes during actual tracking.
+        """
         if not getattr(self, '_numba_compiled', False):
             try:
-                # Create dummy data for compilation
+                # Use realistic data sizes to trigger full compilation
+                # Small dummy data (1x1) doesn't exercise all code paths
+                warmup_size = getattr(self.config, 'initial_pool_size', 150)
+                n_warmup_dets = min(warmup_size, 100)
+                n_warmup_tracks = min(warmup_size, 100)
                 emb_dim = getattr(self.config, 'default_embedding_dimension', 128)
-                dummy_det = np.array([[0.0, 0.0]], dtype=np.float32)
-                dummy_track = np.array([[0.0, 0.0]], dtype=np.float32)
-                dummy_emb = np.zeros((1, emb_dim), dtype=np.float32)
-                dummy_cost = np.array([[0.0]], dtype=np.float32)
 
-                # Trigger compilation
+                # Create realistic-sized dummy data
+                dummy_det = np.random.randn(n_warmup_dets, 2).astype(np.float32) * 100
+                dummy_track = np.random.randn(n_warmup_tracks, 2).astype(np.float32) * 100
+                dummy_track_last = np.random.randn(n_warmup_tracks, 2).astype(np.float32) * 100
+                dummy_misses = np.zeros(n_warmup_tracks, dtype=np.int32)
+                dummy_emb = np.random.randn(n_warmup_tracks, emb_dim).astype(np.float32)
+                dummy_cost = np.random.randn(n_warmup_dets, n_warmup_tracks).astype(np.float32)
+
+                # Trigger compilation of cost matrix functions
                 compute_cost_matrix_vectorized(
-                    dummy_det, dummy_track, dummy_track,
-                    np.array([0]), dummy_emb, 0.5, 100.0, False, 3, 1.0
+                    dummy_det, dummy_track, dummy_track_last,
+                    dummy_misses, dummy_emb, 0.5, 100.0, False, 3, 1.0
                 )
+
+                # Trigger compilation of assignment functions
                 numba_greedy_assignment(dummy_cost, 100.0)
 
+                # Trigger compilation of freeze flag computation if available
+                try:
+                    compute_freeze_flags_vectorized(dummy_track, 25.0, 1)
+                except Exception:
+                    pass  # Optional function
+
+                # Trigger compilation of neighbor count if available
+                try:
+                    compute_neighbor_counts_vectorized(dummy_track, 33.0)
+                except Exception:
+                    pass  # Optional function
+
                 self._numba_compiled = True
-                logger.debug("Numba functions compiled successfully")
+                logger.debug(f"Numba functions compiled successfully (warmup size: {n_warmup_dets}x{n_warmup_tracks})")
             except Exception as e:
                 logger.warning(f"Numba compilation warning: {e}")
 
@@ -1428,7 +1458,7 @@ class SwarmSortTracker:
         if n_dets == 0 or n_tracks == 0:
             return
 
-        # --- OPTIMIZATION: Use representative embeddings (single per track) ---
+        # --- Use same embedding matching method as main assignment ---
         # Extract detection embeddings
         det_embeddings = np.array([
             det.embedding for _, det in unmatched_dets_with_emb
@@ -1439,20 +1469,33 @@ class SwarmSortTracker:
         det_norms = np.where(det_norms > 1e-8, det_norms, 1.0)
         det_embeddings = det_embeddings / det_norms
 
-        # Get representative embedding for each track (most recent)
-        track_embeddings = np.array([
-            track.embedding_history[-1] for _, track in lost_tracks_with_ids
-        ], dtype=np.float32)
+        # Extract ALL track embeddings (full history, same as main assignment)
+        emb_dim = det_embeddings.shape[1]
+        track_counts = np.array([len(track.embedding_history) for _, track in lost_tracks_with_ids], dtype=np.int32)
+        total_embs = int(np.sum(track_counts))
 
-        # Normalize track embeddings
-        track_norms = np.linalg.norm(track_embeddings, axis=1, keepdims=True)
-        track_norms = np.where(track_norms > 1e-8, track_norms, 1.0)
-        track_embeddings = track_embeddings / track_norms
+        track_embeddings_flat = np.zeros(total_embs * emb_dim, dtype=np.float32)
+        offset = 0
+        for _, track in lost_tracks_with_ids:
+            hist = track.embedding_history
+            n_hist = len(hist)
+            if n_hist > 0:
+                stacked = np.vstack(list(hist))
+                # Normalize each embedding
+                norms = np.linalg.norm(stacked, axis=1, keepdims=True)
+                norms = np.where(norms > 1e-8, norms, 1.0)
+                stacked = stacked / norms
+                flat_len = n_hist * emb_dim
+                track_embeddings_flat[offset:offset + flat_len] = stacked.ravel()[:flat_len]
+                offset += flat_len
 
-        # --- OPTIMIZATION: Matrix multiplication for cosine similarity ---
-        # cosine_similarity = det @ track.T, then distance = (1 - sim) / 2
-        cos_similarities = det_embeddings @ track_embeddings.T
-        raw_embedding_distances = (1.0 - cos_similarities) / 2.0
+        # Use same matching method as main assignment (best_match, average, etc.)
+        method_map = {"last": 0, "average": 1, "weighted_average": 2, "best_match": 3, "median": 4}
+        method = method_map.get(self.embedding_matching_method, 3)  # default to best_match
+
+        raw_embedding_distances = compute_embedding_distances_with_method(
+            det_embeddings, track_embeddings_flat, track_counts, method
+        )
 
         # Scale embedding distances
         if self.embedding_scaler:
@@ -1564,13 +1607,15 @@ class SwarmSortTracker:
         self._frame_count = 0
         self.timings.clear()
 
-        # Reset reusable array pools (allow them to be garbage collected)
-        self._reusable_det_positions = None
-        self._reusable_track_positions = None
-        self._reusable_track_last_positions = None
-        self._reusable_track_misses = None
-        self._max_dets_seen = 0
-        self._max_tracks_seen = 0
+        # Re-initialize array pools to initial size (preserves warmup allocation)
+        # This avoids re-triggering allocation spikes on new videos
+        initial_pool_size = getattr(self.config, 'initial_pool_size', 150)
+        self._reusable_det_positions = np.empty((initial_pool_size, 2), dtype=np.float32)
+        self._reusable_track_positions = np.empty((initial_pool_size, 2), dtype=np.float32)
+        self._reusable_track_last_positions = np.empty((initial_pool_size, 2), dtype=np.float32)
+        self._reusable_track_misses = np.empty(initial_pool_size, dtype=np.int32)
+        self._max_dets_seen = initial_pool_size
+        self._max_tracks_seen = initial_pool_size
 
         # Reset embedding scaler statistics
         if self.embedding_scaler:

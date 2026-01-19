@@ -1159,9 +1159,11 @@ def compute_sparse_cost_matrix(
         pos_distance = math.sqrt(pos_distance_sq)
 
         # Compute cost
+        # Use additive formula matching compute_cost_matrix_vectorized:
+        # Position distance is the base, embedding adds additional cost scaled by max_distance
         if do_embeddings:
             emb_dist = scaled_embedding_distances[i, j]
-            cost = (1.0 - embedding_weight) * pos_distance + embedding_weight * emb_dist * max_distance
+            cost = pos_distance + embedding_weight * emb_dist * max_distance
         else:
             cost = pos_distance
 

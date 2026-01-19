@@ -357,6 +357,45 @@ class EmbeddingDistanceScaler:
         self.update_counter = 0
         logger.debug("EmbeddingDistanceScaler: Full reset performed")
 
+    def warmup(self, n_samples: int = None):
+        """Pre-populate scaler with synthetic data to avoid mode transition spike.
+
+        When the scaler transitions from simple scaling (sample_count < min_samples)
+        to percentile-based scaling, there can be a performance spike as statistics
+        are computed for the first time with real data sizes.
+
+        This method pre-populates the scaler with synthetic data that approximates
+        typical embedding distance distributions, avoiding the cold-start spike.
+
+        Args:
+            n_samples: Number of synthetic samples to generate. Defaults to min_samples.
+                      Should be >= min_samples to enable percentile-based scaling immediately.
+        """
+        if n_samples is None:
+            n_samples = self.min_samples
+
+        # Generate synthetic embedding distances
+        # Typical cosine distances for embeddings fall in [0, 1] range
+        # Use a beta distribution to simulate typical distance distribution:
+        # - Most distances are in the middle range (0.3-0.7)
+        # - Few very small (same identity) or very large (very different) distances
+        synthetic_distances = np.random.beta(2, 2, size=n_samples) * 0.8 + 0.1
+
+        # Temporarily set update_interval to 1 to force statistics update
+        original_interval = self.update_interval
+        self.update_interval = 1
+
+        # Process in batches to simulate realistic update patterns
+        batch_size = 50
+        for i in range(0, n_samples, batch_size):
+            batch = synthetic_distances[i:i + batch_size]
+            self.update_statistics(batch)
+
+        # Restore original update interval
+        self.update_interval = original_interval
+
+        logger.debug(f"EmbeddingDistanceScaler: Warmed up with {n_samples} synthetic samples")
+
     def soft_reset(self, faster_update_rate: float = 0.2):
         """Soft reset - keep statistics but increase learning rate temporarily.
 

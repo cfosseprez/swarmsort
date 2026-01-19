@@ -321,7 +321,7 @@ class FastTrackState:
     ):
         """Update track state with new detection."""
         # Import here to avoid circular dependency
-        from .kalman_filters import simple_kalman_update, simple_kalman_predict
+        from .kalman_filters import simple_kalman_update
 
         self.position = position.astype(np.float32)
         self.last_detection_pos = position.copy()

@@ -105,8 +105,9 @@ def simple_kalman_predict(x: np.ndarray) -> np.ndarray:
     """
     Simplified Kalman prediction with default damping.
 
-    Uses DEFAULT_VELOCITY_DAMPING (0.95) for velocity decay.
-    For configurable damping, use simple_kalman_predict_with_damping().
+    DEPRECATED: This function uses hardcoded DEFAULT_VELOCITY_DAMPING (0.95).
+    Use simple_kalman_predict_with_damping() with config.kalman_velocity_damping instead.
+    Kept for backward compatibility only.
 
     Args:
         x: Current state [x, y, vx, vy]
@@ -117,7 +118,7 @@ def simple_kalman_predict(x: np.ndarray) -> np.ndarray:
     x_pred = np.zeros(4, dtype=np.float32)
     x_pred[0] = x[0] + x[2]
     x_pred[1] = x[1] + x[3]
-    # Note: 0.95 is DEFAULT_VELOCITY_DAMPING, hardcoded for Numba compatibility
+    # DEPRECATED: 0.95 is hardcoded - use simple_kalman_predict_with_damping() instead
     x_pred[2] = x[2] * 0.95
     x_pred[3] = x[3] * 0.95
     return x_pred
